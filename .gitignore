@@ -1,0 +1,32 @@
+# Rust build output
+/target/
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local analyzer runs (not fixtures)
+/debug_keys/
+/debug_matrix/
+/debug_output/
+/extracted/
+/final_check/
+/retry_build/
+/test_updated_structure/
+/trace_operations/
+/output/
+/output.txt
+/output2.txt
+/text_analysis.txt
+/print.pdf
+
+# OS and editor
+.DS_Store
+.idea/
+*.swp

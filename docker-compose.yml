@@ -1,0 +1,25 @@
+services:
+  excel-tooling:
+    build: ./modules/excel-tooling
+    image: excel-tooling
+    ports:
+      - "50051:50051"
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /run
+      - /var/tmp
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python3",
+          "-c",
+          "import socket; socket.create_connection(('127.0.0.1', 50051), 2).close()",
+        ]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+      start_period: 20s

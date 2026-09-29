@@ -1,0 +1,53 @@
+page_size:
+  width: 90
+  height: 110
+  units: mm
+  bleeds:
+    top: 3
+    right: 3
+    bottom: 3
+    left: 3
+resources:
+  images:
+    photo:
+      name: photo
+      width: 8
+      height: 8
+      file_format: jpg
+      extracted_path: images/pixel.jpg
+  fonts:
+    font1:
+      name: font1
+      font_family: LiberationSerif
+      weight: normal
+      italic: false
+      embedded: true
+      source_path: fonts/LiberationSerif-Regular.ttf
+contents:
+  - id: photo-1
+    posX: 10
+    posY: 15
+    width: 30
+    height: 40
+    image:
+      resource_name: photo
+  - id: line-1
+    posX: 10
+    posY: 60
+    width: 70
+    height: 15
+    alignment:
+      horizontal: left
+      vertical: top
+    padding:
+      top: 0
+      right: 0
+      bottom: 0
+      left: 0
+    text:
+      font: font1
+      font_size: 5
+      leading: 0
+      line_height: 6
+      preentered: Hello
+      content: null

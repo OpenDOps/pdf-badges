@@ -1,0 +1,26 @@
+page_size:
+  width: 90
+  height: 110
+  units: mm
+  bleeds:
+    top: 3
+    right: 3
+    bottom: 3
+    left: 3
+resources:
+  images:
+    photo:
+      name: photo
+      width: 8
+      height: 1
+      file_format: bmp
+      extracted_path: images/pixel-1.bmp
+  fonts: {}
+contents:
+  - id: photo-1
+    posX: 10
+    posY: 20
+    width: 30
+    height: 40
+    image:
+      resource_name: photo

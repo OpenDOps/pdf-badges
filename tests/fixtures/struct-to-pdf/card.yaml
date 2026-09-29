@@ -1,0 +1,52 @@
+page_size:
+  width: 90
+  height: 130
+  units: mm
+  bleeds:
+    top: 3
+    right: 3
+    bottom: 3
+    left: 3
+resources:
+  images: {}
+  fonts:
+    font1:
+      name: font1
+      font_family: LiberationSerif
+      weight: normal
+      italic: false
+      embedded: true
+      source_path: fonts/LiberationSerif-Regular.ttf
+    font2:
+      name: font2
+      font_family: LiberationSerif
+      weight: bold
+      italic: false
+      embedded: true
+      source_path: fonts/LiberationSerif-Bold.ttf
+contents:
+  - id: card-text
+    posX: 10
+    posY: 30
+    width: 70
+    height: 50
+    auto_scale: true
+    alignment:
+      horizontal: center
+      vertical: middle
+    padding:
+      top: 0
+      right: 0
+      bottom: 0
+      left: 0
+    text:
+      font: font1
+      font_size: 5
+      leading: 0.5
+      line_height: 6
+      font_style:
+        weight: normal
+        italic: false
+        underline: false
+      preentered: '<span font="font1">{{name}} carried the lantern along the river road past the mill and the evening market and the stone bridge and the quiet school and the old bakery {{name}} carried the lantern along the river road past the mill and the evening market and the stone bridge and the quiet school and the old bakery<br>{{surname}} kept every letter in a wooden box beside the window and read them again each winter evening under the lamp and wrote the street names in a careful hand {{surname}} kept every letter in a wooden box beside the window and read them again each winter evening under the lamp and wrote the street names in a careful hand</span><br><br><span font="font2"><bold>{{company name}} prints the posters and folds every sheet before the morning train leaves the station and stacks the bundles by the door {{company name}} prints the posters and folds every sheet before the morning train leaves the station and stacks the bundles by the door</bold></span>'
+      content: null

@@ -1,0 +1,44 @@
+syntax = "proto3";
+
+package irbis.table.v1;
+
+message Table {
+  repeated Column columns = 1;
+  repeated Row rows = 2;
+}
+
+message Column {
+  string excel_id = 1;
+  string name = 2;
+  repeated Column subcolumns = 3;
+}
+
+message Row {
+  uint32 excel_row = 1;
+  repeated Cell cells = 2;
+}
+
+message Cell {
+  string excel_id = 1;
+  Value value = 2;
+}
+
+message Value {
+  oneof kind {
+    string text = 1;
+    double float_value = 2;
+    int64 int_value = 3;
+    DateTimeValue date = 4;
+    bool bool_value = 5;
+  }
+}
+
+message DateTimeValue {
+  int32 year = 1;
+  int32 month = 2;
+  int32 day = 3;
+  int32 hour = 4;
+  int32 minute = 5;
+  int32 second = 6;
+  bool has_time = 7;
+}
