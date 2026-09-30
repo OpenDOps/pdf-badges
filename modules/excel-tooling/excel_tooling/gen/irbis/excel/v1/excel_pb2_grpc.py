@@ -55,6 +55,11 @@ class ExcelToolingStub:
                 request_serializer=irbis_dot_excel_dot_v1_dot_excel__pb2.ReadTableRequest.SerializeToString,
                 response_deserializer=irbis_dot_excel_dot_v1_dot_excel__pb2.RowBatch.FromString,
                 _registered_method=True)
+        self.ProvidePassword = channel.unary_unary(
+                '/irbis.excel.v1.ExcelTooling/ProvidePassword',
+                request_serializer=irbis_dot_excel_dot_v1_dot_excel__pb2.ProvidePasswordRequest.SerializeToString,
+                response_deserializer=irbis_dot_excel_dot_v1_dot_excel__pb2.SessionView.FromString,
+                _registered_method=True)
         self.Close = channel.unary_unary(
                 '/irbis.excel.v1.ExcelTooling/Close',
                 request_serializer=irbis_dot_excel_dot_v1_dot_excel__pb2.CloseRequest.SerializeToString,
@@ -89,6 +94,12 @@ class ExcelToolingServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def ProvidePassword(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
     def Close(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
@@ -117,6 +128,11 @@ def add_ExcelToolingServicer_to_server(servicer, server):
                     servicer.ReadTable,
                     request_deserializer=irbis_dot_excel_dot_v1_dot_excel__pb2.ReadTableRequest.FromString,
                     response_serializer=irbis_dot_excel_dot_v1_dot_excel__pb2.RowBatch.SerializeToString,
+            ),
+            'ProvidePassword': grpc.unary_unary_rpc_method_handler(
+                    servicer.ProvidePassword,
+                    request_deserializer=irbis_dot_excel_dot_v1_dot_excel__pb2.ProvidePasswordRequest.FromString,
+                    response_serializer=irbis_dot_excel_dot_v1_dot_excel__pb2.SessionView.SerializeToString,
             ),
             'Close': grpc.unary_unary_rpc_method_handler(
                     servicer.Close,
@@ -232,6 +248,33 @@ class ExcelTooling:
             '/irbis.excel.v1.ExcelTooling/ReadTable',
             irbis_dot_excel_dot_v1_dot_excel__pb2.ReadTableRequest.SerializeToString,
             irbis_dot_excel_dot_v1_dot_excel__pb2.RowBatch.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ProvidePassword(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/irbis.excel.v1.ExcelTooling/ProvidePassword',
+            irbis_dot_excel_dot_v1_dot_excel__pb2.ProvidePasswordRequest.SerializeToString,
+            irbis_dot_excel_dot_v1_dot_excel__pb2.SessionView.FromString,
             options,
             channel_credentials,
             insecure,

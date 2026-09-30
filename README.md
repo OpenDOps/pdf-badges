@@ -1,9 +1,7 @@
 # pdf-badges
 
-Tools that turn a spreadsheet into a multi-page PDF of badges.
+PDF tooling for badge templates. A PDF is read into a page structure, set up as a template, and written back out. Each data row becomes one page. The writer is a Rust library that C, Java, and Python can wrap. The same library is served over gRPC.
 
-`excel-tooling` reads a workbook through LibreOffice Calc and returns a typed table over gRPC. The Rust PDF writer fills a template page from that table, one page per row. The two sides share a protobuf `Table` and nothing else.
+See [docs/pdf-tooling](docs/pdf-tooling/README.md). The rest of the docs are indexed in [docs/README.md](docs/README.md).
 
-The PDF analyzer and `render-page` writer still live at the repository root (`src/`, `tests/`). They move to `modules/pdf-tooling/` when that split lands.
-
-See [docs/README.md](docs/README.md) for the layout and design notes.
+Excel tooling is an extra feature: a reader that can supply that table from a workbook. See [docs/excel-tooling](docs/excel-tooling/design.md).

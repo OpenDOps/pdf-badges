@@ -246,9 +246,9 @@ Open a real file with UNO, `calculateAll()`, and build a `Grid` plus the non-emp
 
    Wait until port 2002 accepts a connection before running pytest.
 
-3. `workbook.open(path)` loads through `com.sun.star.frame.Desktop`. Media descriptor: `Hidden` true, `MacroExecutionMode` 0 (`NEVER_EXECUTE`). Then `calculateAll()`.
+3. `workbook.open(path)` loads through `com.sun.star.frame.Desktop`. Media descriptor: `Hidden` true, `MacroExecutionMode` 0 (`NEVER_EXECUTE`), `UpdateDocMode` 0 (`NO_UPDATE`). Then `calculateAll()`. The compose network `private` is internal, so this container has no outbound route.
 
-4. A sheet is non-empty when its used area contains a non-empty cell. Return those sheets in tab order with their workbook index. Include `Hidden`. Skip `Empty`. If none remain, raise `NoData`.
+4. A sheet is listed only after a content query finds one real value. A multi-cell used area that is only formatting is skipped. Return listed sheets in tab order with their workbook index. Include `Hidden`. If none remain, raise `NoData`.
 
 5. For the selected sheet, read the used area once (`gotoStartOfUsedArea` / `gotoEndOfUsedArea`). That rectangle is the grid's range. Past it, the scanner stops, so a formatted tail cannot walk to the last Calc row.
 
@@ -303,7 +303,7 @@ The five RPCs from [design.md](design.md). Unit tests drive them with a fake wor
 
 ### Work
 
-1. Session map keyed by a new UUID. Each session holds the temp file path, the open document, the selected sheet index, the candidate limit, the current candidates, and the selected header row if any. Idle time is 15 minutes from the last call. A call that finds an expired session deletes it and returns `NOT_FOUND`. `Close` deletes it immediately.
+1. Session map keyed by a new UUID. Each session holds the temp file path, the open document, the selected sheet index, the candidate limit, the current candidates, and the selected header row if any. Idle time is 15 minutes from the last call on that workbook. A timer and every RPC drop every session idle longer than that. Using a dropped id returns `NOT_FOUND`. `Close` deletes its session immediately.
 
 2. One lock covers UNO calls and the session map. A second RPC waits. Do not open two documents on the listener at once.
 
@@ -351,7 +351,7 @@ Host `pytest` for the fake-workbook cases passes. `titles_over_grpc` and `linger
 
 [Back to summary](#summary)
 
-Done. `ReadTable` returns `stream RowBatch`. Opening a workbook lists a sheet from its used area and reads header candidates one row at a time until K is reached. The data walk reads at most 2,000 sheet rows, drops that block, then reads the next. The RPC sends at most 100 processed rows per message. Host `pytest -m "not libreoffice"` passes. `titles_stream` and `lingerie_stream` pass inside the image.
+Done. `ReadTable` returns `stream RowBatch`. A sheet is listed only after one real value is found. Header candidates jump across empty spans and stop at K non-empty rows. The data walk reads at most 2,000 sheet rows, drops that block, then reads the next. Cancelling the call stops that walk. `background` with channel `queue` finishes the walk after the RPC returns and discards the batches. The RPC sends at most 100 processed rows per message. Host `pytest -m "not libreoffice"` passes. `titles_stream` and `lingerie_stream` pass inside the image.
 
 ### Work
 
@@ -359,7 +359,7 @@ Done. `ReadTable` returns `stream RowBatch`. Opening a workbook lists a sheet fr
 
 2. Stop building a full `Grid` for every non-empty sheet during `open`. Listing a sheet only needs to know that one cell is non-empty. Header candidates read only until K non-empty rows are found.
 
-3. The data walk reads the used column span, 2,000 sheet rows at a time, starting on the row after the header. A sheet shorter than 2,000 rows is one read. Classify that block, yield its processed rows, and drop the block before the next `getDataArray`. Do not keep a second block. Do not start the next read while the current block is still held. Empty rows in the block count toward the 50-row stop and are not yielded. The stop, or the end of the used area, ends the walk.
+3. The data walk reads the leaf columns of the selected header, 2,000 sheet rows at a time, starting on the row after the header. Contiguous leaves are one range. A gap is not read. A sheet shorter than 2,000 rows is one read. Classify that block, yield its processed rows, and drop the block before the next `getDataArray`. Do not keep a second block. Do not start the next read while the current block is still held. Empty rows in the block count toward the 50-row stop and are not yielded. The stop, or the end of the used area, ends the walk.
 
 4. `ReadTable` is server streaming. It takes processed rows from that walk and writes a `RowBatch` whenever it has 100, and a shorter batch at the end. After a batch is written, those rows are not kept. `ReadTable` before `SelectHeader` is still `FAILED_PRECONDITION`. A failure while a block is being read fails the RPC. The client must not treat the batches already received as a complete table.
 
@@ -384,28 +384,23 @@ Host `pytest tests/test_session.py -m "not libreoffice"` passes. `titles_stream`
 
 [Back to summary](#summary)
 
-Done. `docker compose up excel-tooling` serves `python -m excel_tooling` on port 50051. The container root is read-only, `/tmp` holds uploads and a writable copy of the baked LibreOffice profile (`MacroSecurityLevel` 3, `DisableMacrosExecution`), and each load still sets `MacroExecutionMode` 0. `grpcurl -plaintext localhost:50051 list` prints `irbis.excel.v1.ExcelTooling`. Both smoke commands exit 0.
+Done. `docker compose up excel-tooling` serves `python -m excel_tooling` on port 50051. The container root is read-only, `/tmp` holds uploads and a writable copy of the baked LibreOffice profile (`MacroSecurityLevel` 3, `DisableMacrosExecution`), and each load still sets `MacroExecutionMode` 0. Port 50051 is on the compose network `private` and is not published to the host. Callers on that network use plaintext `excel-tooling:50051`.
 
 The image from step 4 becomes the service a caller runs.
 
 ### Work
 
-1. Default command after soffice is ready: `python -m excel_tooling`. Publish port 50051.
+1. Default command after soffice is ready: `python -m excel_tooling`. Port 50051 stays on the compose network. Do not publish it to the host. Do not terminate TLS here.
 
 2. Bake a soffice profile with macro execution disabled, and keep `MacroExecutionMode` 0 on each load. The profile directory is writable. The rest of the image can be read-only. `/tmp` is writable, and that is where uploads go.
 
-3. `docker-compose.yml` at the repo root, service name `excel-tooling`, port `50051:50051`.
+3. `docker-compose.yml` at the repo root, service name `excel-tooling`, on network `private`, `expose` `50051` with no host `ports` mapping.
 
 4. `tests/smoke.py` is a Python client, not grpcurl. Client streaming is awkward in grpcurl, and so is the `ReadTable` server stream. The script uploads a path, reads `RowBatch` messages until the stream ends, and concatenates the rows. For `titles.xlsx` it selects the `Titles` sheet, selects excel row 4, and checks the two data rows. For `JPGVL0I5VW.xlsm` it uploads with limit 3, checks the two non-empty sheets, selects header row 2 on `База посетителей`, and checks excel row 4 the same way as `lingerie_full_names`. It also checks that `grpcurl -plaintext localhost:50051 list` prints `irbis.excel.v1.ExcelTooling`. Use grpcurl only for that list check.
 
 ### Done when
 
-`docker compose up excel-tooling` is healthy, `grpcurl` lists the service, and both smoke commands exit 0 against `localhost:50051`:
-
-```text
-python tests/smoke.py tests/fixtures/titles.xlsx
-python tests/smoke.py tests/fixtures/JPGVL0I5VW.xlsm
-```
+`docker compose up excel-tooling` is healthy. Port 50051 is on network `private` and is not published. A client on that network reaches `excel-tooling:50051` in plaintext.
 
 That is the MVP.
 

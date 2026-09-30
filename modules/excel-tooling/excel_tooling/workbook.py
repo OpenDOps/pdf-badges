@@ -7,7 +7,16 @@ from excel_tooling.scan import candidate_grid, columns_for_header, header_candid
 from excel_tooling.values import Reading, classify
 
 _ALLOWED = {".xlsx", ".xlsm", ".xls", ".ods"}
+_OPEN_PROPERTIES = (
+    ("Hidden", True),
+    ("MacroExecutionMode", 0),
+    ("UpdateDocMode", 0),
+)
 _desktop = None
+
+
+class PasswordRequired(Exception):
+    pass
 
 
 class BadFile(Exception):
@@ -31,6 +40,7 @@ class Workbook:
         self._doc = doc
         self._sources: dict[int, _CalcSource] = {}
         self._listed: tuple[SheetInfo, ...] | None = None
+        self._prefixes: dict[tuple[int, int], tuple] = {}
         self.selected_sheet_index: int | None = None
 
     def sheets(self) -> tuple[SheetInfo, ...]:
@@ -51,21 +61,37 @@ class Workbook:
         return self._listed
 
     def candidates(self, sheet_index: int, k: int):
-        self._require(sheet_index)
-        return header_candidates(candidate_grid(self._sources[sheet_index], k), k)
+        return self._prefix(sheet_index, k)[1]
 
     def select_header(self, sheet_index: int, excel_row: int, k: int, subcolumn_row: int | None = None):
-        found = self.candidates(sheet_index, k)
+        prefix, found = self._prefix(sheet_index, k)
         source = self._sources[sheet_index]
         first_row, last_row, first_col, last_col = source.bounds()
         cells: dict[int, list[GridCell]] = {}
-        cells.update(source.read(excel_row, excel_row))
-        source.release()
+        self._take_row(source, cells, prefix, excel_row)
         if subcolumn_row is not None:
-            cells.update(source.read(subcolumn_row, subcolumn_row))
-            source.release()
+            self._take_row(source, cells, prefix, subcolumn_row)
         grid = Grid(first_row, last_row, first_col, last_col, cells)
         return columns_for_header(grid, excel_row, found, subcolumn_row)
+
+    def _prefix(self, sheet_index: int, k: int):
+        self._require(sheet_index)
+        key = (sheet_index, k)
+        cached = self._prefixes.get(key)
+        if cached is None:
+            source = self._sources[sheet_index]
+            grid = candidate_grid(source, k)
+            cached = (grid, header_candidates(grid, k))
+            self._prefixes[key] = cached
+        return cached
+
+    def _take_row(self, source, cells: dict, prefix: Grid, excel_row: int) -> None:
+        stored = prefix.cells.get(excel_row)
+        if stored is not None:
+            cells[excel_row] = stored
+            return
+        cells.update(source.read(excel_row, excel_row))
+        source.release()
 
     def iter_blocks(
         self, sheet_index: int, excel_row: int, k: int, subcolumn_row: int | None = None
@@ -101,11 +127,11 @@ class Workbook:
             raise SheetNotListed(sheet_index)
 
 
-def open(path: str | Path) -> Workbook:
+def open(path: str | Path, password: str | None = None) -> Workbook:
     source = Path(path)
     if source.suffix.lower() not in _ALLOWED:
         raise BadFile(source.suffix)
-    doc = _load(source)
+    doc = _load(source, password or None)
     book = Workbook(doc)
     try:
         book.sheets()
@@ -115,18 +141,21 @@ def open(path: str | Path) -> Workbook:
     return book
 
 
-def _load(path: Path):
+def _load(path: Path, password: str | None = None):
     import uno
-    from com.sun.star.beans import PropertyValue
 
-    hidden = PropertyValue()
-    hidden.Name = "Hidden"
-    hidden.Value = True
-    macro = PropertyValue()
-    macro.Name = "MacroExecutionMode"
-    macro.Value = 0
+    handler = _abort_password_prompt()
     url = uno.systemPathToFileUrl(str(path.resolve()))
-    doc = _desktop_instance().loadComponentFromURL(url, "_blank", 0, (hidden, macro))
+    doc = _desktop_instance().loadComponentFromURL(
+        url, "_blank", 0, _properties(password, handler)
+    )
+    if handler is not None and handler.password_requested:
+        if doc is not None:
+            try:
+                doc.close(True)
+            except Exception:
+                doc.dispose()
+        raise PasswordRequired()
     if doc is None:
         raise RuntimeError(f"Calc did not open {path.name}")
     try:
@@ -135,6 +164,49 @@ def _load(path: Path):
         pass
     doc.calculateAll()
     return doc
+
+
+def _properties(password: str | None = None, handler=None):
+    from com.sun.star.beans import PropertyValue
+
+    values = list(_OPEN_PROPERTIES)
+    if password:
+        values.append(("Password", password))
+    if handler is not None:
+        values.append(("InteractionHandler", handler))
+    items = []
+    for name, value in values:
+        item = PropertyValue()
+        item.Name = name
+        item.Value = value
+        items.append(item)
+    return tuple(items)
+
+
+def _abort_password_prompt():
+    try:
+        import unohelper
+        from com.sun.star.task import XInteractionHandler
+    except ImportError:
+        return None
+
+    class Handler(unohelper.Base, XInteractionHandler):
+        def __init__(self):
+            self.password_requested = False
+
+        def handle(self, request):
+            self.password_requested = True
+            for continuation in request.getContinuations():
+                name = ""
+                try:
+                    name = continuation.getImplementationName()
+                except Exception:
+                    name = ""
+                if "Abort" in name and hasattr(continuation, "select"):
+                    continuation.select()
+                    return
+
+    return Handler()
 
 
 def _desktop_instance():
@@ -170,12 +242,40 @@ class _CalcSource:
 
     def has_values(self) -> bool:
         first_row, last_row, first_col, last_col = self._bounds
-        if first_row != last_row or first_col != last_col:
-            return True
-        return _cell_has_value(self._sheet, first_col, first_row)
+        if first_row == last_row and first_col == last_col:
+            return _cell_has_value(self._sheet, first_col, first_row)
+        return _range_has_value(self._sheet, first_col, last_col, first_row, last_row)
 
-    def read(self, first_row: int, last_row: int) -> dict[int, list[GridCell]]:
-        self.held = _read_window(self._doc, self._sheet, self._bounds, first_row, last_row)
+    def nonempty_rows(self, k: int):
+        if k <= 0:
+            return
+        first_row, last_row, first_col, last_col = self._bounds
+        from com.sun.star.sheet.CellFlags import DATETIME, FORMULA, STRING, VALUE
+
+        cell_range = self._sheet.getCellRangeByPosition(
+            first_col, first_row - 1, last_col, last_row - 1
+        )
+        flags = int(VALUE) | int(DATETIME) | int(STRING) | int(FORMULA)
+        found = cell_range.queryContentCells(flags)
+        cells = found.getCells()
+        if cells is None:
+            return
+        enum = cells.createEnumeration()
+        previous = None
+        produced = 0
+        while enum.hasMoreElements():
+            address = enum.nextElement().getCellAddress()
+            excel_row = address.Row + 1
+            if excel_row == previous:
+                continue
+            previous = excel_row
+            produced += 1
+            yield excel_row
+            if produced == k:
+                return
+
+    def read(self, first_row: int, last_row: int, columns=None) -> dict[int, list[GridCell]]:
+        self.held = _read_window(self._doc, self._sheet, self._bounds, first_row, last_row, columns)
         return self.held
 
     def release(self) -> None:
@@ -195,23 +295,69 @@ def _used_bounds(sheet):
     )
 
 
+def _range_has_value(sheet, first_col: int, last_col: int, first_row: int, last_row: int) -> bool:
+    from com.sun.star.sheet.CellFlags import DATETIME, FORMULA, STRING, VALUE
+
+    cell_range = sheet.getCellRangeByPosition(first_col, first_row - 1, last_col, last_row - 1)
+    flags = int(VALUE) | int(DATETIME) | int(STRING) | int(FORMULA)
+    found = cell_range.queryContentCells(flags)
+    cells = found.getCells()
+    if cells is None:
+        return False
+    enum = cells.createEnumeration()
+    while enum.hasMoreElements():
+        if _uno_cell_has_value(enum.nextElement()):
+            return True
+    return False
+
+
 def _cell_has_value(sheet, col: int, excel_row: int) -> bool:
+    return _uno_cell_has_value(sheet.getCellByPosition(col, excel_row - 1))
+
+
+def _uno_cell_has_value(cell) -> bool:
     from com.sun.star.table.CellContentType import EMPTY
 
-    cell = sheet.getCellByPosition(col, excel_row - 1)
     if int(cell.getError()) != 0:
         return True
     return cell.getType() != EMPTY
 
 
-def _read_window(doc, sheet, bounds, first_row: int, last_row: int) -> dict[int, list[GridCell]]:
+def _column_spans(columns) -> tuple[tuple[int, int], ...]:
+    ordered = sorted(set(columns))
+    if not ordered:
+        return ()
+    spans: list[tuple[int, int]] = []
+    start = previous = ordered[0]
+    for col in ordered[1:]:
+        if col == previous + 1:
+            previous = col
+            continue
+        spans.append((start, previous))
+        start = previous = col
+    spans.append((start, previous))
+    return tuple(spans)
+
+
+def _read_window(doc, sheet, bounds, first_row: int, last_row: int, columns=None) -> dict[int, list[GridCell]]:
     _origin, _end, first_col, last_col = bounds
+    spans = ((first_col, last_col),) if columns is None else _column_spans(columns)
+    if not spans:
+        return {}
+    null = doc.NullDate
+    bits = _format_bits()
+    cells: dict[int, list[GridCell]] = {}
+    for start_col, end_col in spans:
+        for row, row_cells in _read_span(doc, sheet, start_col, end_col, first_row, last_row, null, bits).items():
+            cells.setdefault(row, []).extend(row_cells)
+    return cells
+
+
+def _read_span(doc, sheet, first_col: int, last_col: int, first_row: int, last_row: int, null, bits):
     cell_range = sheet.getCellRangeByPosition(first_col, first_row - 1, last_col, last_row - 1)
     data = cell_range.getDataArray()
     errors = _formula_errors(cell_range)
     rects = _special_rects(doc, cell_range)
-    null = doc.NullDate
-    bits = _format_bits()
     cells: dict[int, list[GridCell]] = {}
     for row_offset, row_data in enumerate(data):
         absolute_row = (first_row - 1) + row_offset

@@ -2,7 +2,7 @@
 
 How to start the service and check it by hand. The reader design is [design.md](design.md). The shared table is [table.md](../table.md).
 
-Commands below are run from `modules/excel-tooling` unless a step says otherwise. The service listens on port `50051`. `SelectHeader` returns the column names in one reply. `ReadTable` then streams data rows, at most 100 per message.
+Commands below are run from `modules/excel-tooling` unless a step says otherwise. The service listens on port `50051` on the compose network `private`. That port is not published to the host. Another container on `private` calls `excel-tooling:50051` in plaintext. TLS is the gateway's job. `SelectHeader` returns the column names in one reply. `ReadTable` then streams data rows, at most 100 per message.
 
 A `javaldx` warning from the container is harmless. The server is up when the process stays running and the client below prints the sheets.
 
@@ -14,7 +14,7 @@ Docker Desktop has to be running. From the repository root:
 docker compose up --build excel-tooling
 ```
 
-The container root is read-only. `/tmp` is writable, and that is where uploads and the LibreOffice profile go. The profile baked into the image disables macro execution, and each workbook is still opened with `MacroExecutionMode` 0. Wait until the service is healthy. It listens on port `50051`.
+The container root is read-only. `/tmp` is writable, and that is where uploads and the LibreOffice profile go. The profile baked into the image disables macro execution, and each workbook is still opened with `MacroExecutionMode` 0 and link updates off. The `private` network is internal, so the container cannot contact other hosts. Wait until the service is healthy. Port `50051` stays on that network.
 
 Leave that terminal open. The next sections use a second terminal.
 
@@ -24,8 +24,10 @@ The fixture is `tests/fixtures/JPGVL0I5VW.xlsm`. Sheet `База посетит�
 
 Row 2 is the column names (`ID`, `Дата`, and the rest). Row 3 is the subcolumn row. `subcolumn_row` must be one of the four rows after the column row. Here that is row 3.
 
+From the repository root. The client runs in the service container, on the same network as the server:
+
 ```bash
-.venv/bin/python << 'PY'
+docker compose exec -T excel-tooling /opt/venv/bin/python - << 'PY'
 import excel_tooling
 import grpc
 from irbis.excel.v1 import excel_pb2, excel_pb2_grpc
@@ -33,7 +35,7 @@ from irbis.excel.v1 import excel_pb2, excel_pb2_grpc
 path = "tests/fixtures/JPGVL0I5VW.xlsm"
 header_row = 2
 subcolumn_row = 3
-channel = grpc.insecure_channel("localhost:50051", options=[
+channel = grpc.insecure_channel("excel-tooling:50051", options=[
     ("grpc.max_send_message_length", 64 * 1024 * 1024),
     ("grpc.max_receive_message_length", 64 * 1024 * 1024),
 ])
@@ -124,9 +126,4 @@ docker run --rm excel-tooling pytest -m libreoffice -q
 docker run --rm excel-tooling pytest tests/test_lingerie.py -q
 ```
 
-With the compose service healthy, `grpcurl` on your `PATH`, the smoke client checks both fixtures and that `grpcurl` lists `irbis.excel.v1.ExcelTooling`:
-
-```bash
-.venv/bin/python tests/smoke.py tests/fixtures/titles.xlsx
-.venv/bin/python tests/smoke.py tests/fixtures/JPGVL0I5VW.xlsm
-```
+`tests/smoke.py` dials `localhost:50051` and shells out to `grpcurl`. The compose port is not on the host, and the image has no `grpcurl`, so that script is not the check for this service. Use the manual client above.

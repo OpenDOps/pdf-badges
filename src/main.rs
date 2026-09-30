@@ -28,8 +28,10 @@ struct Args {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    if std::env::args().nth(1).as_deref() == Some("render-page") {
-        return render_page_cli();
+    match std::env::args().nth(1).as_deref() {
+        Some("render-page") => return render_page_cli(),
+        Some("serve") => return serve_cli(),
+        _ => {}
     }
     let args = Args::parse();
 
@@ -78,6 +80,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         args.output.display()
     );
 
+    Ok(())
+}
+
+#[derive(Parser)]
+#[command(name = "serve")]
+struct ServeArgs {
+    /// Address to listen on
+    #[arg(long, default_value = "0.0.0.0:50052")]
+    listen: String,
+}
+
+fn serve_cli() -> Result<(), Box<dyn std::error::Error>> {
+    let mut raw = std::env::args();
+    let program = raw.next().unwrap_or_else(|| "rust-reg".into());
+    let _command = raw.next();
+    let args = match ServeArgs::try_parse_from(std::iter::once(program).chain(raw)) {
+        Ok(args) => args,
+        Err(err) => err.exit(),
+    };
+    let listen = args.listen.parse()?;
+    let runtime = tokio::runtime::Runtime::new()?;
+    runtime
+        .block_on(rust_reg::pdf_server::serve(listen))
+        .map_err(|err| err.to_string())?;
     Ok(())
 }
 

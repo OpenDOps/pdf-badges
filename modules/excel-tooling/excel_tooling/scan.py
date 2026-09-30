@@ -27,7 +27,9 @@ class SubcolumnRowOutOfRange(Exception):
 
 def header_candidates(grid: Grid, k: int) -> tuple[Candidate, ...]:
     found: list[Candidate] = []
-    for excel_row in range(1, grid.last_row + 1):
+    for excel_row in sorted(grid.cells):
+        if excel_row > grid.last_row:
+            break
         columns = _columns_of_row(grid, excel_row)
         if not columns:
             continue
@@ -59,12 +61,14 @@ def columns_for_header(
 
 
 def candidate_grid(source, k: int) -> Grid:
-    """Read one sheet row at a time until `k` non-empty header rows are found."""
+    """Visit rows that contain a value until `k` header rows are found. Empty spans are not read."""
     first_row, last_row, first_col, last_col = source.bounds()
     cells: dict[int, list[GridCell]] = {}
     found = 0
     stop = first_row
-    for excel_row in range(first_row, last_row + 1):
+    for excel_row in source.nonempty_rows(k):
+        if excel_row < first_row or excel_row > last_row:
+            continue
         stop = excel_row
         raw = source.read(excel_row, excel_row)
         row_cells = list(raw.get(excel_row, []))
@@ -84,7 +88,7 @@ def walk_blocks(source, start: int, end: int, columns: tuple[Column, ...], block
     leaf_cols = tuple(column.index for column in _leaves(columns))
     skipped = 0
     for first, last in _block_windows(start, end, block_size):
-        raw = source.read(first, last)
+        raw = source.read(first, last, leaf_cols)
         processed: list[DataRow] = []
         stop = False
         for excel_row in range(first, last + 1):

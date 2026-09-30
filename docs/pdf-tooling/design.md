@@ -1,6 +1,6 @@
 # pdf-tooling
 
-Turns a page structure plus a `Table` ([table.md](../table.md)) into a PDF with one page per data row. The service runs in Docker and speaks gRPC. The draw path is the current Rust writer (`struct_to_pdf`): same page schema, same markup, same rectangles.
+Turns a page structure plus a `Table` ([table.md](../table.md)) into a PDF with one page per data row. The draw path is the Rust library `struct_to_pdf`: same page schema, same markup, same rectangles. Rust programs link that crate. C, Java, and Python wrap it through a C ABI. The same library also runs in Docker and speaks gRPC. How to link it is [runbook.md](runbook.md).
 
 Today `render-page` draws one page and leaves `{{name}}` in the text. This design adds three steps in front of that draw: mark template boxes, list their mustache fields, bind each field to a column name.
 
@@ -8,12 +8,15 @@ The extract half of the crate (PDF in, analysis YAML out) stays a library and a 
 
 ## Template page
 
-The input is one page object, the same YAML or JSON that `render-page` accepts ([struct-to-pdf/v0.md](struct-to-pdf/v0.md), [document-schema.md](document-schema.md)). A text box gains one field:
+The input is one page object, the same YAML or JSON that `render-page` accepts ([struct-to-pdf/v0.md](struct-to-pdf/v0.md), [document-schema.md](document-schema.md)). A text box gains `template`, and may set `delimiters`:
 
 ```yaml
 contents:
   - id: card-text
     template: true
+    delimiters:
+      open: "{{"
+      close: "}}"
     posX: 10
     posY: 30
     width: 70
@@ -25,16 +28,25 @@ contents:
 
 `template: true` means the box is scanned and substituted. Boxes without the flag are copied onto every page with their text unchanged, including any `{{` they happen to contain. Image placements are never templates. `template` defaults to false so existing fixtures keep drawing placeholders as literal text.
 
+`delimiters.open` and `delimiters.close` are the strings that wrap a field. Absent means `{{` and `}}`. The field keys are in [document-schema.md](document-schema.md#target-text-box). One box has one pair. Two boxes on a page may differ. The strings are matched exactly, so a box whose open is three braces does not also treat two braces as a field.
+
+```text
+open "{{"    close "}}"     {{name}}
+open "{{{"   close "}}}"    {{{name}}}
+open "<%"    close "%>"     <%name%>
+```
+
 The string that is scanned is `content` when it is a string, otherwise `preentered`. That is the same choice the writer already makes when it paints a box.
 
 ## Mustache fields
 
-A field is the text between `{{` and `}}` in a template box, trimmed. `{{ name }}` and `{{name}}` are the field `name`. The card fixture's `{{company name}}` is the field `company name`. Spaces inside the name are significant after trimming.
+A field is the text between that box's `open` and `close`, trimmed. With the default pair, `{{ name }}` and `{{name}}` are the field `name`. The card fixture's `{{company name}}` is the field `company name`. Spaces inside the name are significant after trimming.
 
 Rules for v1:
 
-- No nested braces, no sections, no inverted sections, no partials. `{{#row}}` is not a section; if it appears it is a field whose name is `#row`, which is not useful, so `{{` followed by `#`, `/`, `^`, `!`, `>`, or `&` is an error that names the box id.
-- An empty `{{}}`, or a second `{{` before `}}`, is an error that names the box id.
+- No nested delimiters, no sections, no inverted sections, no partials. An open token whose first name character is `#`, `/`, `^`, `!`, `>`, or `&` is an error that names the box id. With the default pair, `{{#row}}` is that error.
+- An empty pair (`open` immediately followed by `close`), or a second `open` before `close`, is an error that names the box id.
+- `delimiters` on a box whose `template` is not true, or on an image placement, is an error that names the box id.
 - The scan runs on the raw string, so a placeholder sitting inside `<span>…</span>` is found. Tag names are not special-cased.
 - The same field name in several boxes, or twice in one box, is one field. The binding applies to every occurrence.
 - The reply lists each field once, in first-seen order, with the box ids that contain it.
@@ -88,7 +100,15 @@ The existing CLI stays for tests and local use:
 pdf-tooling render-page page.yaml -o out.pdf
 ```
 
-A second subcommand can wait. The gRPC method is the product path.
+A second subcommand can wait. Callers use the library below or the gRPC methods. Both draw through `struct_to_pdf`.
+
+## Library
+
+Indexing a template, filling its fields, and drawing one page per row are functions on `struct_to_pdf`. A Rust program depends on the crate and calls them in process.
+
+Other languages use one C ABI, `include/pdf_template.h`. The crate builds an `rlib` for Rust, a `cdylib` shared library, and a `staticlib`. C links either library. Java loads the shared library with Panama or JNI. Python loads it with ctypes or cffi. Symbol names start with `pdf_template_`. The header is the contract those wrappers compile against. The build of that ABI is step 8 of [template/implementation-plan.md](template/implementation-plan.md).
+
+The gRPC handlers are another caller of these functions. A wrapper that wants the Docker service speaks gRPC. A wrapper that links the library calls the C ABI. Rust and Python embedding is [integration.md](integration.md).
 
 ## gRPC
 
@@ -179,7 +199,9 @@ modules/pdf-tooling/
     struct_to_pdf/               today's writer
       template.rs                scan {{ }}, substitute, escape
       document.rs                render_pages
+      ffi.rs                     C ABI over the same functions
     grpc.rs                      LoadTemplate, SetBindings, Render
+  include/pdf_template.h         header Java and Python wrap
   tests/
     fixtures/struct-to-pdf/      existing one-page fixtures, unchanged
     fixtures/template/           card with template: true, plus a tiny Table

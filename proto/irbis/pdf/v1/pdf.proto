@@ -1,0 +1,58 @@
+syntax = "proto3";
+package irbis.pdf.v1;
+
+service PdfTooling {
+  rpc LoadTemplate(stream TemplateChunk) returns (TemplateView);
+  rpc Render(RenderRequest) returns (RenderResponse);
+  rpc RenderChunks(RenderRequest) returns (stream PdfChunk);
+  rpc Close(CloseRequest) returns (CloseResponse);
+}
+
+message TemplateChunk {
+  oneof part {
+    TemplateMeta meta = 1;   // first message
+    bytes data = 2;          // a zip archive
+  }
+}
+
+message TemplateMeta {
+  string filename = 1;       // the page file name inside the zip
+}
+
+message TemplateView {
+  string session_id = 1;
+  repeated TemplateField fields = 2;
+}
+
+message TemplateField {
+  string name = 1;
+  repeated string box_ids = 2;
+}
+
+message RenderRequest {
+  string session_id = 1;
+  repeated ValueRow rows = 2;
+}
+
+message RenderResponse {
+  string path = 1;           // absolute path of the written PDF
+}
+
+message ValueRow {
+  repeated FieldValue values = 1;
+}
+
+message FieldValue {
+  string field = 1;
+  string value = 2;
+}
+
+message PdfChunk {
+  bytes data = 1;
+}
+
+message CloseRequest {
+  string session_id = 1;
+}
+
+message CloseResponse {}

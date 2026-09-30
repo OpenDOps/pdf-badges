@@ -2,8 +2,10 @@ services:
   excel-tooling:
     build: ./modules/excel-tooling
     image: excel-tooling
-    ports:
-      - "50051:50051"
+    expose:
+      - "50051"
+    networks:
+      - private
     read_only: true
     tmpfs:
       - /tmp
@@ -23,3 +25,23 @@ services:
       timeout: 5s
       retries: 30
       start_period: 20s
+
+  pdf-tooling:
+    build:
+      context: .
+      dockerfile: docker/pdf-tooling/Dockerfile
+    image: pdf-tooling
+    ports:
+      - "50052:50052"
+    networks:
+      - private
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/tcpcheck"]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+
+networks:
+  private:
+    internal: true

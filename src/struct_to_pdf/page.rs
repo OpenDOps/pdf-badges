@@ -130,6 +130,9 @@ pub struct TextBox {
     pub horizontal: HorizontalAlign,
     pub vertical: VerticalAlign,
     pub padding: Padding,
+    pub template: bool,
+    pub delimiter_open: String,
+    pub delimiter_close: String,
     pub text: TextBody,
 }
 
@@ -419,6 +422,8 @@ fn parse_content(index: usize, value: &Value) -> Result<ContentEntry, RenderErro
 
     if has_text {
         let text_obj = object(obj.get("text"), &format!("id={id} text"))?;
+        let template = parse_template(obj, &id)?;
+        let (delimiter_open, delimiter_close) = parse_delimiters(obj, &id, template)?;
         Ok(ContentEntry::Text(TextBox {
             id: id.clone(),
             pos_x,
@@ -429,9 +434,24 @@ fn parse_content(index: usize, value: &Value) -> Result<ContentEntry, RenderErro
             horizontal: parse_horizontal(obj, &format!("id={}", text_obj_id_from(obj)))?,
             vertical: parse_vertical(obj, &format!("id={}", text_obj_id_from(obj)))?,
             padding: parse_padding(obj, width, height, &text_obj_id_from(obj))?,
+            template,
+            delimiter_open,
+            delimiter_close,
             text: parse_text(text_obj, &text_obj_id_from(obj))?,
         }))
     } else {
+        if obj.contains_key("template") {
+            return Err(RenderError {
+                context: id,
+                message: "template is only valid on a text box".to_string(),
+            });
+        }
+        if obj.contains_key("delimiters") {
+            return Err(RenderError {
+                context: id,
+                message: "delimiters is only valid on a text box".to_string(),
+            });
+        }
         let image_obj = object(obj.get("image"), &format!("id={id} image"))?;
         let resource_name =
             optional_string(image_obj, "resource_name").ok_or_else(|| RenderError {
@@ -451,6 +471,56 @@ fn parse_content(index: usize, value: &Value) -> Result<ContentEntry, RenderErro
 
 fn text_obj_id_from(obj: &Map<String, Value>) -> String {
     optional_string(obj, "id").unwrap_or_default()
+}
+
+fn parse_template(obj: &Map<String, Value>, id: &str) -> Result<bool, RenderError> {
+    match obj.get("template") {
+        None => Ok(false),
+        Some(Value::Bool(value)) => Ok(*value),
+        Some(_) => Err(RenderError {
+            context: id.to_string(),
+            message: "template must be a boolean".to_string(),
+        }),
+    }
+}
+
+fn parse_delimiters(
+    obj: &Map<String, Value>,
+    id: &str,
+    template: bool,
+) -> Result<(String, String), RenderError> {
+    let Some(value) = obj.get("delimiters") else {
+        return Ok(("{{".to_string(), "}}".to_string()));
+    };
+    if !template {
+        return Err(RenderError {
+            context: id.to_string(),
+            message: "delimiters requires template".to_string(),
+        });
+    }
+    let map = value.as_object().ok_or_else(|| RenderError {
+        context: id.to_string(),
+        message: "delimiters must be an object".to_string(),
+    })?;
+    let open = delimiter_side(map, "open", id)?;
+    let close = delimiter_side(map, "close", id)?;
+    if open.is_empty() || close.is_empty() {
+        return Err(RenderError {
+            context: id.to_string(),
+            message: "delimiters open and close must be non-empty".to_string(),
+        });
+    }
+    Ok((open, close))
+}
+
+fn delimiter_side(map: &Map<String, Value>, side: &str, id: &str) -> Result<String, RenderError> {
+    match map.get(side) {
+        Some(Value::String(text)) => Ok(text.clone()),
+        _ => Err(RenderError {
+            context: id.to_string(),
+            message: format!("delimiters.{side} is missing"),
+        }),
+    }
 }
 
 fn parse_auto_scale(obj: &Map<String, Value>, id: &str) -> Result<bool, RenderError> {

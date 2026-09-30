@@ -39,9 +39,9 @@ A row is empty when every cell in the used column span is empty. Merged cells ke
 
 Scan from row 1 downward.
 
-**Sheets.** A sheet is listed when it contains at least one non-empty cell. Hidden sheets are listed and may be selected. The default selection is the first non-empty sheet in tab order. Empty sheets are omitted. If the workbook has no non-empty sheet, `OpenWorkbook` fails.
+**Sheets.** A sheet is listed when a content query finds at least one real value (text, number, boolean, error, or formula). A used area that is only formatting is omitted. Hidden sheets are listed and may be selected. The default selection is the first listed sheet in tab order. If the workbook has no such sheet, `OpenWorkbook` fails.
 
-**Header candidates.** From the first non-empty row, take the next K non-empty rows. Empty rows between them are skipped and do not use up a candidate slot. The default K is 10. The caller may set K from 1 to 50 on open or on sheet selection. Each candidate is the sheet row number (1-based) plus the non-empty cells of that row, left to right: column letter and trimmed cell text. Numbers and dates in a candidate row are sent as their displayed text, because a header is a name, not a value.
+**Header candidates.** From the rows that contain a value, take the next K non-empty rows. Empty spans are not read one row at a time. The walk stops once K non-empty rows are found. The default K is 10. The caller may set K from 1 to 50 on open or on sheet selection. Each candidate is the sheet row number (1-based) plus the non-empty cells of that row, left to right: column letter and trimmed cell text. Numbers and dates in a candidate row are sent as their displayed text, because a header is a name, not a value.
 
 **After the header is chosen.** Columns are the non-empty cells of that row. Duplicate trimmed names fail the selection. Data begins on the next sheet row after the header. Candidate rows above the chosen header are titles; they are not data. A data row is emitted only when at least one column that has a header is non-empty. Cells in columns without a header are ignored. Fully empty data rows are not emitted. Fifty consecutive skipped rows end the table. The unused area past Calc's used range also ends the table, so a formatted-but-empty tail cannot run to row 1048576.
 
@@ -74,11 +74,13 @@ On `JPGVL0I5VW.xlsm`, column row 2 and subcolumn row 3, `AR` is `Как Вы у�
 
 Calc loads the whole file on open, and `calculateAll()` runs in that process. UNO has no call that leaves the rest of an `.xlsx` or `.xlsm` on disk. The window is only the copy this service keeps.
 
-`ReadTable` asks Calc for at most **2,000 sheet rows** at a time (`getDataArray` on that rectangle). A sheet shorter than that is one read of the used area. Those rows are classified, then sent on the stream in batches of at most **100 processed rows**. When a batch is written, it is dropped. When the 2,000-row block has been sent, that block is dropped and the next 2,000 sheet rows are read. The server does not keep the previous block, and it does not load the next block before the current one has been sent. The lock around UNO is held for one read, then released while the batches go out.
+`ReadTable` asks Calc for at most **2,000 sheet rows** at a time, and only the leaf columns of the selected header. A parent with subcolumns is read through those subcolumns. Gaps between leaf columns are separate ranges, not one array across the used width. A sheet shorter than 2,000 rows is one read of those columns. Those rows are classified, then sent on the stream in batches of at most **100 processed rows**. When a batch is written, it is dropped. When the 2,000-row block has been sent, that block is dropped and the next 2,000 sheet rows are read. The server does not keep the previous block, and it does not load the next block before the current one has been sent. The lock around UNO is held for one read, then released while the batches go out.
 
-Empty sheet rows inside a block count toward the 50-row stop and are not messages. A stop or the end of the used area ends the stream. A failure mid-stream fails the RPC. The client does not treat a short successful prefix as the whole table.
+Empty sheet rows inside a block count toward the 50-row stop and are not messages. A stop or the end of the used area ends the stream. If the client cancels, the walk stops before the next block. `ReadTable` with `background` and `channel` `queue` keeps walking after the RPC returns and discards each batch. Any other channel is rejected, and `channel` without `background` is rejected. A failure mid-stream fails the RPC. The client does not treat a short successful prefix as the whole table.
 
-Header candidates are the first K non-empty rows only. Opening a workbook does not copy every data cell into Python. Column names from `SelectHeader` stay for the session. They are one row.
+Header candidates are the first K non-empty rows only. That prefix is read once for a sheet and a K, then reused by `SelectHeader` and `ReadTable`. Opening a workbook does not copy every data cell into Python. Column names from `SelectHeader` stay for the session. They are one row.
+
+`EXCEL_MAX_SESSIONS` caps open workbooks. The default is 100. Opening one more closes the workbook that has been idle the longest. A workbook that is inside a Calc call stays open. If every open workbook is busy, the new open is rejected.
 
 ## Cell classification
 
@@ -107,6 +109,7 @@ service ExcelTooling {
   rpc SelectSheet(SelectSheetRequest) returns (SessionView);
   rpc SelectHeader(SelectHeaderRequest) returns (irbis.table.v1.Table);
   rpc ReadTable(ReadTableRequest) returns (stream RowBatch);
+  rpc ProvidePassword(ProvidePasswordRequest) returns (SessionView);
   rpc Close(CloseRequest) returns (CloseResponse);
 }
 
@@ -120,6 +123,7 @@ message OpenChunk {
 message OpenMeta {
   string filename = 1;                 // used for the extension check
   uint32 header_candidate_limit = 2;   // 0 means 10
+  string password = 3;
 }
 
 message SessionView {
@@ -127,6 +131,7 @@ message SessionView {
   repeated SheetInfo sheets = 2;
   uint32 selected_sheet_index = 3;
   repeated HeaderCandidate header_candidates = 4;
+  bool password_required = 5;
 }
 
 message SheetInfo {
@@ -153,10 +158,17 @@ message SelectHeaderRequest {
 
 message ReadTableRequest {
   string session_id = 1;
+  bool background = 2;
+  string channel = 3;  // required with background; only "queue"
 }
 
 message RowBatch {
   repeated irbis.table.v1.Row rows = 1;   // at most 100
+}
+
+message ProvidePasswordRequest {
+  string session_id = 1;
+  string password = 2;
 }
 
 message CloseRequest {
@@ -170,7 +182,9 @@ message CloseResponse {}
 
 The upload is client-streaming so a workbook is not capped by the default gRPC message size. Set the server's max receive size to 64 MiB as well, for a single large chunk.
 
-Sessions live in memory in the process that opened them. Idle time is 15 minutes, then the file and the Calc document are discarded. `Close` discards them immediately. A restart drops every session. There is no shared volume protocol in v1: the bytes on the stream are the file.
+An encrypted workbook is not opened until a password is available, so Calc never sits on a password prompt. `OpenMeta.password` opens it on the first call. With no password, `OpenWorkbook` returns `password_required` and keeps the uploaded file for one minute. That wait holds no Calc lock. `ProvidePassword` then opens it. A wrong password leaves the wait in place. After one minute, or on `Close`, the file is deleted.
+
+Sessions live in memory in the process that opened them. Idle time is 15 minutes from the last call on that workbook. A timer and every RPC drop each session that has been idle that long, then discard its file and Calc document. `Close` discards its session immediately. A restart drops every session. There is no shared volume protocol in v1: the bytes on the stream are the file.
 
 Errors are gRPC status codes with a short reason: invalid file, no non-empty sheet, unknown session, sheet index not in the non-empty list, header row not in the candidate list, duplicate column name.
 
@@ -187,7 +201,7 @@ entrypoint
 
 Calc is not safe for concurrent document use on one process. The server keeps a lock around UNO calls and handles one workbook operation at a time. Scale by running more containers. The gRPC server can accept other connections while one call holds the lock; those calls wait.
 
-Open loads the document through UNO (`com.sun.star.sheet.SpreadsheetDocument`), runs `calculateAll()`, then builds the sheet list and the default candidates. The document stays open on the session. `ReadTable` walks rows from the header in blocks of 2,000 sheet rows. It does not convert the file to CSV. CSV would drop the distinction between int, float, and date.
+Open loads the document through UNO (`com.sun.star.sheet.SpreadsheetDocument`) with `MacroExecutionMode` 0 and `UpdateDocMode` `NO_UPDATE`, so external links are not refreshed. It then runs `calculateAll()` and builds the sheet list and the default candidates. The compose network is internal, so the container has no route to other hosts. The document stays open on the session. `ReadTable` walks rows from the header in blocks of 2,000 sheet rows. It does not convert the file to CSV. CSV would drop the distinction between int, float, and date.
 
 ```text
 modules/excel-tooling/
@@ -207,11 +221,10 @@ Tests open those fixtures through the same `workbook.py` path. They do not need 
 
 ## Docker
 
-Base image with `libreoffice-calc` and the Python UNO bits that ship with it (`python3-uno` on Debian). No full desktop. Port `50051`. A read-only root and a writable `/tmp` for the files Calc opens. `MacroExecutionMode` forced off in the soffice profile baked into the image.
+Base image with `libreoffice-calc` and the Python UNO bits that ship with it (`python3-uno` on Debian). No full desktop. Port `50051` is on the compose network `private` and is not published to the host. Callers on that network use plaintext `excel-tooling:50051`. TLS is the gateway's job. gRPC reflection stays off on `0.0.0.0:50051`. It is enabled only when the process listens on a loopback address. A read-only root and a writable `/tmp` for the files Calc opens. `MacroExecutionMode` forced off in the soffice profile baked into the image.
 
 ```text
 docker compose up excel-tooling
-grpcurl -plaintext localhost:50051 list
 ```
 
 ## Later adapters

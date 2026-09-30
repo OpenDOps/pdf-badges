@@ -1,0 +1,49 @@
+page_size:
+  width: 90
+  height: 50
+  units: mm
+  bleeds:
+    top: 0
+    right: 0
+    bottom: 0
+    left: 0
+resources:
+  images: {}
+  fonts:
+    font1:
+      name: font1
+      font_family: LiberationSerif
+      weight: normal
+      italic: false
+      embedded: true
+      source_path: ../struct-to-pdf/fonts/LiberationSerif-Regular.ttf
+    font2:
+      name: font2
+      font_family: LiberationSerif
+      weight: bold
+      italic: false
+      embedded: true
+      source_path: ../struct-to-pdf/fonts/LiberationSerif-Bold.ttf
+contents:
+  - id: card-text
+    posX: 5
+    posY: 10
+    width: 80
+    height: 30
+    template: true
+    auto_scale: true
+    alignment:
+      horizontal: left
+      vertical: top
+    padding:
+      top: 0
+      right: 0
+      bottom: 0
+      left: 0
+    text:
+      font: font1
+      font_size: 12
+      leading: 0
+      line_height: 14
+      preentered: '<span font="font1">{{name}} {{surname}}</span> <span font="font2">{{company name}}</span>'
+      content: null

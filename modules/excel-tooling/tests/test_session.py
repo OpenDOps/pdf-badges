@@ -1,3 +1,5 @@
+import threading
+import time
 from pathlib import Path
 
 import grpc
@@ -5,7 +7,7 @@ import pytest
 
 from excel_tooling.model import CellValue, Grid, GridCell, SheetInfo
 from excel_tooling.scan import columns_for_header, data_rows, header_candidates
-from excel_tooling.server import IDLE_SECONDS, serve
+from excel_tooling.server import IDLE_SECONDS, MAX_UPLOAD_BYTES, serve
 from excel_tooling.workbook import SheetNotListed
 
 import excel_tooling  # noqa: F401
@@ -23,6 +25,11 @@ class FakeBook:
         self._sheets = sheets
         self.selected_sheet_index = sheets[0][0]
         self.closed = False
+        self.watch_header = False
+        self.header_entered = threading.Event()
+        self.stream_started = threading.Event()
+        self.stream_release = threading.Event()
+        self.hold_stream = False
 
     def sheets(self):
         return tuple(SheetInfo(index, name) for index, name, _grid in self._sheets)
@@ -31,6 +38,8 @@ class FakeBook:
         return header_candidates(self._grid(sheet_index), k)
 
     def select_header(self, sheet_index, excel_row, k, subcolumn_row=None):
+        if self.watch_header:
+            self.header_entered.set()
         return columns_for_header(
             self._grid(sheet_index), excel_row, self.candidates(sheet_index, k), subcolumn_row
         )
@@ -40,7 +49,14 @@ class FakeBook:
         return columns, data_rows(self._grid(sheet_index), excel_row, columns, subcolumn_row)
 
     def iter_blocks(self, sheet_index, excel_row, k, subcolumn_row=None):
-        _columns, rows = self.read_table(sheet_index, excel_row, k, subcolumn_row)
+        if self.hold_stream:
+            self.stream_started.set()
+            if not self.stream_release.wait(5):
+                raise TimeoutError("stream gate")
+        columns = columns_for_header(
+            self._grid(sheet_index), excel_row, self.candidates(sheet_index, k), subcolumn_row
+        )
+        rows = data_rows(self._grid(sheet_index), excel_row, columns, subcolumn_row)
         if rows:
             yield list(rows)
 
@@ -73,8 +89,14 @@ def titles_grid():
     )
 
 
-def start(opener=None, clock=None):
-    server, port, service = serve("127.0.0.1:0", opener=opener, clock=clock)
+def start(opener=None, clock=None, sweep_seconds=None, max_sessions=None):
+    server, port, service = serve(
+        "127.0.0.1:0",
+        opener=opener,
+        clock=clock,
+        sweep_seconds=sweep_seconds,
+        max_sessions=max_sessions,
+    )
     channel = grpc.insecure_channel(f"127.0.0.1:{port}", options=CHANNEL_OPTIONS)
     return service, server, excel_pb2_grpc.ExcelToolingStub(channel)
 
@@ -257,6 +279,298 @@ def test_close_then_read():
     assert view.session_id not in service.sessions
     assert book.closed
     assert not opened["path"].exists()
+
+
+def test_upload_is_on_disk_before_calc():
+    seen = {}
+
+    def opener(path):
+        seen["bytes"] = Path(path).read_bytes()
+        return FakeBook([(0, "Titles", titles_grid())])
+
+    def chunks():
+        yield excel_pb2.OpenChunk(meta=excel_pb2.OpenMeta(filename="book.xlsx"))
+        yield excel_pb2.OpenChunk(data=b"hello-")
+        yield excel_pb2.OpenChunk(data=b"bytes")
+
+    _service, server, stub = start(opener=opener)
+    try:
+        stub.OpenWorkbook(chunks())
+    finally:
+        server.stop(1)
+    assert seen["bytes"] == b"hello-bytes"
+
+
+def _upload_mib_chunks(extra=b""):
+    piece = b"x" * (1024 * 1024)
+
+    def chunks():
+        yield excel_pb2.OpenChunk(meta=excel_pb2.OpenMeta(filename="book.xlsx"))
+        remaining = MAX_UPLOAD_BYTES
+        while remaining:
+            take = min(len(piece), remaining)
+            yield excel_pb2.OpenChunk(data=piece[:take])
+            remaining -= take
+        if extra:
+            yield excel_pb2.OpenChunk(data=extra)
+
+    return chunks()
+
+
+def test_upload_of_64_mib_reaches_calc():
+    seen = {}
+
+    def opener(path):
+        seen["size"] = Path(path).stat().st_size
+        return FakeBook([(0, "Titles", titles_grid())])
+
+    _service, server, stub = start(opener=opener)
+    try:
+        stub.OpenWorkbook(_upload_mib_chunks())
+    finally:
+        server.stop(1)
+    assert seen["size"] == MAX_UPLOAD_BYTES
+
+
+def test_upload_over_64_mib_is_rejected(monkeypatch):
+    from excel_tooling import server as server_mod
+
+    created = {}
+    real_mkstemp = server_mod.tempfile.mkstemp
+
+    def tracking(*args, **kwargs):
+        handle, name = real_mkstemp(*args, **kwargs)
+        created["path"] = Path(name)
+        return handle, name
+
+    monkeypatch.setattr(server_mod.tempfile, "mkstemp", tracking)
+    service, server, stub = start(opener=lambda _path: (_ for _ in ()).throw(AssertionError("opened")))
+    try:
+        code = status(lambda: stub.OpenWorkbook(_upload_mib_chunks(b"x")))
+    finally:
+        server.stop(1)
+    assert code == grpc.StatusCode.RESOURCE_EXHAUSTED
+    assert service.sessions == {}
+    assert not created["path"].exists()
+
+
+def test_same_workbook_waits_for_the_stream():
+    book = FakeBook([(0, "Titles", titles_grid())])
+    book.hold_stream = True
+    _service, server, stub = start(opener=lambda _path: book)
+    errors = []
+    try:
+        view = upload(stub, "book.xlsx")
+        stub.SelectHeader(excel_pb2.SelectHeaderRequest(session_id=view.session_id, excel_row=4))
+        book.watch_header = True
+
+        def read():
+            try:
+                collect(stub, view.session_id)
+            except Exception as exc:
+                errors.append(exc)
+
+        def again():
+            try:
+                stub.SelectHeader(
+                    excel_pb2.SelectHeaderRequest(session_id=view.session_id, excel_row=4)
+                )
+            except Exception as exc:
+                errors.append(exc)
+
+        reader = threading.Thread(target=read)
+        reader.start()
+        assert book.stream_started.wait(2)
+        waiter = threading.Thread(target=again)
+        waiter.start()
+        assert not book.header_entered.wait(0.4)
+        book.stream_release.set()
+        assert book.header_entered.wait(2)
+        reader.join(2)
+        waiter.join(2)
+    finally:
+        book.stream_release.set()
+        server.stop(1)
+    assert errors == []
+    assert not reader.is_alive()
+    assert not waiter.is_alive()
+
+
+def test_other_workbook_runs_during_a_stream():
+    blocked = FakeBook([(0, "Titles", titles_grid())])
+    blocked.hold_stream = True
+    other = FakeBook([(0, "Other", titles_grid())])
+    books = [blocked, other]
+
+    def opener(_path):
+        return books.pop(0)
+
+    _service, server, stub = start(opener=opener)
+    opened = threading.Event()
+    errors = []
+    try:
+        view = upload(stub, "book.xlsx")
+        stub.SelectHeader(excel_pb2.SelectHeaderRequest(session_id=view.session_id, excel_row=4))
+
+        def read():
+            try:
+                collect(stub, view.session_id)
+            except Exception as exc:
+                errors.append(exc)
+
+        def open_other():
+            try:
+                upload(stub, "other.xlsx", payload=b"other")
+                opened.set()
+            except Exception as exc:
+                errors.append(exc)
+
+        reader = threading.Thread(target=read)
+        reader.start()
+        assert blocked.stream_started.wait(2)
+        second = threading.Thread(target=open_other)
+        second.start()
+        assert opened.wait(2)
+        assert not blocked.stream_release.is_set()
+        blocked.stream_release.set()
+        reader.join(2)
+        second.join(2)
+    finally:
+        blocked.stream_release.set()
+        server.stop(1)
+    assert errors == []
+    assert not reader.is_alive()
+    assert not second.is_alive()
+
+
+def test_call_sweeps_other_idle_sessions():
+    clock = {"now": 1_000.0}
+    books = []
+
+    def opener(_path):
+        book = FakeBook([(0, "Titles", titles_grid())])
+        books.append(book)
+        return book
+
+    service, server, stub = start(opener=opener, clock=lambda: clock["now"])
+    try:
+        first = upload(stub, "a.xlsx", payload=b"a")
+        second = upload(stub, "b.xlsx", payload=b"b")
+        clock["now"] += IDLE_SECONDS + 1
+        third = upload(stub, "c.xlsx", payload=b"c")
+    finally:
+        server.stop(1)
+    assert first.session_id not in service.sessions
+    assert second.session_id not in service.sessions
+    assert third.session_id in service.sessions
+    assert books[0].closed
+    assert books[1].closed
+    assert not books[2].closed
+
+
+def test_timer_sweeps_idle_sessions():
+    clock = {"now": 1_000.0}
+    book = FakeBook([(0, "Titles", titles_grid())])
+    service, server, stub = start(
+        opener=lambda _path: book,
+        clock=lambda: clock["now"],
+        sweep_seconds=0.05,
+    )
+    try:
+        view = upload(stub, "book.xlsx")
+        clock["now"] += IDLE_SECONDS + 1
+        deadline = time.monotonic() + 2
+        while view.session_id in service.sessions and time.monotonic() < deadline:
+            time.sleep(0.05)
+    finally:
+        server.stop(1)
+    assert view.session_id not in service.sessions
+    assert book.closed
+
+
+def test_session_cap_closes_the_oldest_idle_workbook():
+    clock = {"now": 1.0}
+    books = []
+
+    def opener(_path):
+        book = FakeBook([(0, "Titles", titles_grid())])
+        books.append(book)
+        return book
+
+    service, server, stub = start(opener=opener, clock=lambda: clock["now"], max_sessions=2)
+    try:
+        first = upload(stub, "a.xlsx", b"a")
+        clock["now"] = 2
+        second = upload(stub, "b.xlsx", b"b")
+        clock["now"] = 3
+        stub.SelectHeader(excel_pb2.SelectHeaderRequest(session_id=first.session_id, excel_row=4))
+        clock["now"] = 4
+        third = upload(stub, "c.xlsx", b"c")
+    finally:
+        server.stop(1)
+    assert first.session_id in service.sessions
+    assert second.session_id not in service.sessions
+    assert third.session_id in service.sessions
+    assert books[1].closed
+    assert not books[0].closed
+    assert not books[2].closed
+
+
+def test_session_cap_leaves_a_busy_workbook_open():
+    busy = FakeBook([(0, "Titles", titles_grid())])
+    busy.hold_stream = True
+    opened = []
+
+    def opener(_path):
+        book = busy if not opened else FakeBook([(0, "Titles", titles_grid())])
+        opened.append(book)
+        return book
+
+    service, server, stub = start(opener=opener, max_sessions=1)
+    errors = []
+    try:
+        view = upload(stub, "busy.xlsx", b"busy")
+        stub.SelectHeader(excel_pb2.SelectHeaderRequest(session_id=view.session_id, excel_row=4))
+
+        def read():
+            try:
+                collect(stub, view.session_id)
+            except Exception as exc:
+                errors.append(exc)
+
+        reader = threading.Thread(target=read)
+        reader.start()
+        assert busy.stream_started.wait(2)
+        code = status(lambda: upload(stub, "next.xlsx", b"next"))
+        assert view.session_id in service.sessions
+        assert not busy.closed
+    finally:
+        busy.stream_release.set()
+        reader.join(2)
+        server.stop(1)
+    assert code == grpc.StatusCode.RESOURCE_EXHAUSTED
+    assert errors == []
+    assert opened[1].closed
+
+
+def test_session_cap_comes_from_the_environment(monkeypatch):
+    monkeypatch.setenv("EXCEL_MAX_SESSIONS", "1")
+    books = []
+
+    def opener(_path):
+        book = FakeBook([(0, "Titles", titles_grid())])
+        books.append(book)
+        return book
+
+    service, server, stub = start(opener=opener)
+    try:
+        first = upload(stub, "a.xlsx", b"a")
+        second = upload(stub, "b.xlsx", b"b")
+    finally:
+        server.stop(1)
+    assert first.session_id not in service.sessions
+    assert second.session_id in service.sessions
+    assert books[0].closed
 
 
 def test_expired_session():

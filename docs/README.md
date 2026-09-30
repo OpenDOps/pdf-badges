@@ -11,7 +11,7 @@ excel-tooling          LibreOffice Calc in Docker, gRPC
         │  Table protobuf
         │  columns + typed cells
         ▼
-pdf-tooling            Rust writer in Docker, gRPC
+pdf-tooling            Rust library other languages wrap; also Docker, gRPC
         │
         │  template page, boxes marked as templates,
         │  {{field}} bound to a column name
@@ -19,7 +19,7 @@ pdf-tooling            Rust writer in Docker, gRPC
 multi-page PDF         one page per data row
 ```
 
-`excel-tooling` reads a workbook, lets the caller pick a sheet and a header row, and returns the table. `pdf-tooling` loads a page structure, finds mustache fields in the boxes marked as templates, accepts a binding from column name to field, and draws one PDF page for each row. Google Sheets and Yandex Tables will be further openers on `excel-tooling`. They produce the same `Table`.
+`excel-tooling` reads a workbook, lets the caller pick a sheet and a header row, and returns the table. `pdf-tooling` is a Rust library. It loads a page structure, finds mustache fields in the boxes marked as templates, accepts a binding from column name to field, and draws one PDF page for each row. A Rust program links the crate. C, Java, and Python wrap the C ABI. The Docker service calls the same functions. Google Sheets and Yandex Tables will be further openers on `excel-tooling`. They produce the same `Table`.
 
 The caller is not a third service yet. It opens the workbook, selects the sheet and the header, loads the template, sets the binding, and posts the table to the PDF service.
 
@@ -58,6 +58,9 @@ Today the Rust code still lives at the repository root (`src/`, `tests/`, the ro
 | [excel-tooling/implementation-plan.md](excel-tooling/implementation-plan.md) | MVP build sequence for that reader |
 | [excel-tooling/runbook.md](excel-tooling/runbook.md) | How to start the service and check a workbook by hand |
 | [pdf-tooling/README.md](pdf-tooling/README.md) | PDF module: extract, template editor, writer |
+| [pdf-tooling/design.md](pdf-tooling/design.md) | Template fill, the Rust library, and the gRPC service |
+| [pdf-tooling/runbook.md](pdf-tooling/runbook.md) | Link the library from Rust, C, Java, or Python |
+| [pdf-tooling/integration.md](pdf-tooling/integration.md) | Embed the library from Rust and from Python |
 | [basic-excel-pdf-integration/implementation-plan.md](basic-excel-pdf-integration/implementation-plan.md) | First path from a workbook to a multi-page PDF |
 
 ## What is already true

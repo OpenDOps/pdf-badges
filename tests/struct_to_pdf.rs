@@ -4,8 +4,8 @@ use std::sync::Mutex;
 use lopdf::{Document, Object};
 
 use rust_reg::struct_to_pdf::{
-    authored_text_bounds, load_page, parse_page, pdf_point, render_page, save_pdf, to_points,
-    ContentEntry, HorizontalAlign, RenderError, SourceFormat, Units, VerticalAlign,
+    authored_text_bounds, load_page, parse_page, pdf_point, render_page, render_pages, save_pdf,
+    to_points, ContentEntry, HorizontalAlign, RenderError, SourceFormat, Units, VerticalAlign,
 };
 
 const CARD_TEXT: &str = "<span font=\"font1\">{{name}} carried the lantern along the river road past the mill and the evening market and the stone bridge and the quiet school and the old bakery {{name}} carried the lantern along the river road past the mill and the evening market and the stone bridge and the quiet school and the old bakery<br>{{surname}} kept every letter in a wooden box beside the window and read them again each winter evening under the lamp and wrote the street names in a careful hand {{surname}} kept every letter in a wooden box beside the window and read them again each winter evening under the lamp and wrote the street names in a careful hand</span><br><br><span font=\"font2\"><bold>{{company name}} prints the posters and folds every sheet before the morning train leaves the station and stacks the bundles by the door {{company name}} prints the posters and folds every sheet before the morning train leaves the station and stacks the bundles by the door</bold></span>";
@@ -1488,6 +1488,176 @@ fn tall_run_stays_inside_after_reflow() {
         block <= to_points(content_height, Units::Mm) + 0.01,
         "drawn block {block} exceeds the content box"
     );
+}
+
+#[test]
+fn one_page_matches_render_page() {
+    let (page, base_dir) = load_fixture("card.yaml");
+    let single = render_page(&page, &base_dir).unwrap();
+    let many = render_pages(std::slice::from_ref(&page), &base_dir).unwrap();
+    assert_eq!(pages_count(&many), 1);
+    assert_eq!(pages_count(&single), pages_count(&many));
+    let text = page_text(&many);
+    assert!(text.contains("{{name}}"));
+    assert!(text.contains("{{surname}}"));
+    assert!(text.contains("{{company name}}"));
+    assert_eq!(page_text(&single), text);
+}
+
+#[test]
+fn two_blank_pages() {
+    let first = parse_yaml(
+        r#"
+page_size:
+  width: 90
+  height: 110
+  units: mm
+  bleeds: {top: 0, right: 0, bottom: 0, left: 0}
+resources:
+  images: {}
+  fonts: {}
+contents: []
+"#,
+    )
+    .unwrap();
+    let second = parse_yaml(
+        r#"
+page_size:
+  width: 200
+  height: 100
+  units: points
+  bleeds: {top: 10, right: 10, bottom: 10, left: 10}
+resources:
+  images: {}
+  fonts: {}
+contents: []
+"#,
+    )
+    .unwrap();
+    let bytes = render_pages(&[first, second], &fixture("")).unwrap();
+    assert_eq!(pages_count(&bytes), 2);
+    let doc = Document::load_mem(&bytes).unwrap();
+    approx_eq(
+        rect_of(page_dict(&doc, 1), b"TrimBox"),
+        [0.0, 0.0, mm(90.0), mm(110.0)],
+    );
+    approx_eq(
+        rect_of(page_dict(&doc, 2), b"TrimBox"),
+        [10.0, 10.0, 210.0, 110.0],
+    );
+}
+
+#[test]
+fn shared_font_object() {
+    let (first, base_dir) = regular_page("Ann");
+    let (second, _) = regular_page("Bo");
+    let bytes = render_pages(&[first, second], &base_dir).unwrap();
+    let doc = Document::load_mem(&bytes).unwrap();
+    assert_eq!(pages_count(&bytes), 2);
+    let file_ids = font_file_ids(&doc);
+    assert_eq!(file_ids.len(), 1, "one embedded font file");
+    assert_eq!(font_file_on_page(&doc, 1), file_ids[0]);
+    assert_eq!(font_file_on_page(&doc, 2), file_ids[0]);
+    assert!(doc.extract_text(&[1]).unwrap().contains("Ann"));
+    assert!(doc.extract_text(&[2]).unwrap().contains("Bo"));
+}
+
+#[test]
+fn empty_pages() {
+    let err = render_pages(&[], &fixture("")).expect_err("no pages");
+    assert_eq!(err.context, "page");
+    assert!(err.message.contains("no pages"), "{}", err.message);
+}
+
+fn regular_page(text: &str) -> (rust_reg::struct_to_pdf::Page, PathBuf) {
+    let source = format!(
+        r#"
+page_size:
+  width: 90
+  height: 50
+  units: mm
+  bleeds: {{top: 0, right: 0, bottom: 0, left: 0}}
+resources:
+  images: {{}}
+  fonts:
+    font1:
+      name: font1
+      font_family: LiberationSerif
+      weight: normal
+      italic: false
+      embedded: true
+      source_path: fonts/LiberationSerif-Regular.ttf
+contents:
+  - id: line
+    posX: 10
+    posY: 10
+    width: 70
+    height: 20
+    alignment:
+      horizontal: left
+      vertical: top
+    padding: {{top: 0, right: 0, bottom: 0, left: 0}}
+    text:
+      font: font1
+      font_size: 12
+      leading: 0
+      line_height: 14
+      preentered: "{text}"
+      content: null
+"#
+    );
+    (parse_yaml(&source).unwrap(), fixture(""))
+}
+
+fn pages_count(bytes: &[u8]) -> i64 {
+    let doc = Document::load_mem(bytes).expect("pdf bytes");
+    let root = doc.trailer.get(b"Root").unwrap().as_reference().unwrap();
+    let catalog = doc.get_dictionary(root).unwrap();
+    let pages_id = catalog.get(b"Pages").unwrap().as_reference().unwrap();
+    let pages = doc.get_dictionary(pages_id).unwrap();
+    match pages.get(b"Count").unwrap() {
+        Object::Integer(count) => *count,
+        other => panic!("Count is {other:?}"),
+    }
+}
+
+fn page_dict(doc: &Document, number: u32) -> &lopdf::Dictionary {
+    let page_id = *doc.get_pages().get(&number).expect("page");
+    doc.get_dictionary(page_id).expect("page dict")
+}
+
+fn font_file_ids(doc: &Document) -> Vec<lopdf::ObjectId> {
+    let mut ids = Vec::new();
+    for object in doc.objects.values() {
+        let Object::Dictionary(dict) = object else {
+            continue;
+        };
+        if let Ok(Object::Reference(id)) = dict.get(b"FontFile2") {
+            ids.push(*id);
+        }
+    }
+    ids
+}
+
+fn font_file_on_page(doc: &Document, number: u32) -> lopdf::ObjectId {
+    let resources = page_dict(doc, number)
+        .get(b"Resources")
+        .unwrap()
+        .as_dict()
+        .unwrap();
+    let fonts = resources.get(b"Font").unwrap().as_dict().unwrap();
+    let type0_id = fonts.get(b"F1").unwrap().as_reference().unwrap();
+    let type0 = doc.get_dictionary(type0_id).unwrap();
+    let descendants = type0.get(b"DescendantFonts").unwrap().as_array().unwrap();
+    let cid_id = descendants[0].as_reference().unwrap();
+    let cid = doc.get_dictionary(cid_id).unwrap();
+    let descriptor_id = cid.get(b"FontDescriptor").unwrap().as_reference().unwrap();
+    let descriptor = doc.get_dictionary(descriptor_id).unwrap();
+    descriptor
+        .get(b"FontFile2")
+        .unwrap()
+        .as_reference()
+        .unwrap()
 }
 
 #[test]

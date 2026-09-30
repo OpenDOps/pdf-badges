@@ -9,6 +9,7 @@ service ExcelTooling {
   rpc SelectSheet(SelectSheetRequest) returns (SessionView);
   rpc SelectHeader(SelectHeaderRequest) returns (irbis.table.v1.Table);
   rpc ReadTable(ReadTableRequest) returns (stream RowBatch);
+  rpc ProvidePassword(ProvidePasswordRequest) returns (SessionView);
   rpc Close(CloseRequest) returns (CloseResponse);
 }
 
@@ -22,6 +23,7 @@ message OpenChunk {
 message OpenMeta {
   string filename = 1;
   uint32 header_candidate_limit = 2;
+  string password = 3;
 }
 
 message SessionView {
@@ -29,6 +31,7 @@ message SessionView {
   repeated SheetInfo sheets = 2;
   uint32 selected_sheet_index = 3;
   repeated HeaderCandidate header_candidates = 4;
+  bool password_required = 5;
 }
 
 message SheetInfo {
@@ -55,10 +58,17 @@ message SelectHeaderRequest {
 
 message ReadTableRequest {
   string session_id = 1;
+  bool background = 2;
+  string channel = 3;  // required with background; only "queue"
 }
 
 message RowBatch {
   repeated irbis.table.v1.Row rows = 1;
+}
+
+message ProvidePasswordRequest {
+  string session_id = 1;
+  string password = 2;
 }
 
 message CloseRequest {

@@ -37,6 +37,11 @@ def test_titles_candidates():
     assert names(candidates[1].columns) == [("A", "Name"), ("B", "City"), ("C", "Amount")]
 
 
+def test_candidates_ignore_the_empty_span_after_the_last_value():
+    sheet = grid(1_048_576, 0, {2: [text(0, "Name")]})
+    assert [candidate.excel_row for candidate in header_candidates(sheet, 10)] == [2]
+
+
 def test_k_limits_candidates():
     sheet = grid(4, 0, {row: [text(0, f"r{row}")] for row in range(1, 5)})
     candidates = header_candidates(sheet, 2)

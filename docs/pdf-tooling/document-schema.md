@@ -165,6 +165,10 @@ padding:
   bottom: 0
   left: 0
 auto_scale: true            # card: shrink font sizes so the long text fits this rectangle
+template: true              # scan this box for fields; absent means false
+delimiters:                 # only with template: true; absent means {{ and }}
+  open: "{{"
+  close: "}}"
 text:
   font: font1               # key in resources.fonts
   font_size: 5              # in page_size.units
@@ -180,7 +184,7 @@ text:
 
 Lengths on the page (`posX`, `posY`, `width`, `height`, `padding`, `font_size`, `leading`, `line_height`) use `page_size.units`: `points` or `mm`. The writer converts `mm` to points with `pt = mm * 72 / 25.4` before building the PDF.
 
-`alignment`, `padding`, and `auto_scale` sit on the box, next to the rectangle. They are not inside `text`. The current single value `text.alignment` (`Left`, `Center`, `Right`, `Justified`) is replaced by the two-axis object.
+`alignment`, `padding`, `auto_scale`, `template`, and `delimiters` sit on the box, next to the rectangle. They are not inside `text`. The current single value `text.alignment` (`Left`, `Center`, `Right`, `Justified`) is replaced by the two-axis object.
 
 | Field | Meaning |
 |---|---|
@@ -197,6 +201,8 @@ Lengths on the page (`posX`, `posY`, `width`, `height`, `padding`, `font_size`, 
 | `preentered` | Text extracted from the PDF, or the authored string. Kept so a fill can be reverted. |
 | `content` | Text written by the automatic tool or a later editor. Render `content` when it is a string, including an empty string. Render `preentered` when `content` is null or absent. |
 | `auto_scale` | Optional, on the rectangle, not inside `text`. Absent or `false` leaves every font size as authored. `true` asks the writer to shrink font sizes so the text bounds fit this box. The card box sets it `true` and uses long paragraphs so the authored size overflows. The scale rules are [Fit text to the rectangle](json-to-pdf.md#fit-text-to-the-rectangle). |
+| `template` | Optional. Absent or `false` copies the box as written. `true` scans the string the writer paints (`content` when it is a string, otherwise `preentered`) for fields wrapped by `delimiters`. Only a text box may set it. |
+| `delimiters` | Optional. Used when `template` is true. `open` and `close` are the strings that wrap a field name. Absent means `{{` and `}}`. When the key is present, both sides are required non-empty strings. They are matched as written. One box has one pair. Two boxes on a page may use different pairs. A `delimiters` key without `template: true`, or on an image placement, is invalid. |
 
 The content box is the frame inset by padding:
 
@@ -355,8 +361,8 @@ F6:
 
 | Actor | Writes |
 |---|---|
-| Extractor | Full document. `preentered` set, `content` null, ids assigned, `alignment.horizontal` from the shared edge, `alignment.vertical: top`, padding all `0`, `page_size.bleeds` from the PDF trim and bleed boxes, markup only where a run differs from the box default. |
-| Editor | `posX`, `posY`, `width`, `height` of text boxes and image placements. May also change `alignment`, `padding`, and `page_size.bleeds`. Does not rewrite `preentered`. |
+| Extractor | Full document. `preentered` set, `content` null, ids assigned, `alignment.horizontal` from the shared edge, `alignment.vertical: top`, padding all `0`, `page_size.bleeds` from the PDF trim and bleed boxes, markup only where a run differs from the box default. Leaves `template` and `delimiters` absent. |
+| Editor | `posX`, `posY`, `width`, `height` of text boxes and image placements. May also change `alignment`, `padding`, `page_size.bleeds`, and, on a text box, `template` and `delimiters`. Does not rewrite `preentered`. |
 | Automatic tool | `content` on a text box chosen by `id`. May use the same markup. May change `alignment` and `padding`. |
 | Writer | Nothing. Reads the tree and produces a PDF. |
 

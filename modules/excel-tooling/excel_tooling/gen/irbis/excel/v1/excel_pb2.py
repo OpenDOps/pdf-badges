@@ -25,7 +25,7 @@ _sym_db = _symbol_database.Default()
 from irbis.table.v1 import table_pb2 as irbis_dot_table_dot_v1_dot_table__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x1airbis/excel/v1/excel.proto\x12\x0eirbis.excel.v1\x1a\x1airbis/table/v1/table.proto\"M\n\tOpenChunk\x12(\n\x04meta\x18\x01 \x01(\x0b\x32\x18.irbis.excel.v1.OpenMetaH\x00\x12\x0e\n\x04\x64\x61ta\x18\x02 \x01(\x0cH\x00\x42\x06\n\x04part\"<\n\x08OpenMeta\x12\x10\n\x08\x66ilename\x18\x01 \x01(\t\x12\x1e\n\x16header_candidate_limit\x18\x02 \x01(\r\"\xa6\x01\n\x0bSessionView\x12\x12\n\nsession_id\x18\x01 \x01(\t\x12)\n\x06sheets\x18\x02 \x03(\x0b\x32\x19.irbis.excel.v1.SheetInfo\x12\x1c\n\x14selected_sheet_index\x18\x03 \x01(\r\x12:\n\x11header_candidates\x18\x04 \x03(\x0b\x32\x1f.irbis.excel.v1.HeaderCandidate\"(\n\tSheetInfo\x12\x0c\n\x04name\x18\x01 \x01(\t\x12\r\n\x05index\x18\x02 \x01(\r\"M\n\x0fHeaderCandidate\x12\x11\n\texcel_row\x18\x01 \x01(\r\x12\'\n\x07\x63olumns\x18\x02 \x03(\x0b\x32\x16.irbis.table.v1.Column\"]\n\x12SelectSheetRequest\x12\x12\n\nsession_id\x18\x01 \x01(\t\x12\x13\n\x0bsheet_index\x18\x02 \x01(\r\x12\x1e\n\x16header_candidate_limit\x18\x03 \x01(\r\"S\n\x13SelectHeaderRequest\x12\x12\n\nsession_id\x18\x01 \x01(\t\x12\x11\n\texcel_row\x18\x02 \x01(\r\x12\x15\n\rsubcolumn_row\x18\x03 \x01(\r\"&\n\x10ReadTableRequest\x12\x12\n\nsession_id\x18\x01 \x01(\t\"-\n\x08RowBatch\x12!\n\x04rows\x18\x01 \x03(\x0b\x32\x13.irbis.table.v1.Row\"\"\n\x0c\x43loseRequest\x12\x12\n\nsession_id\x18\x01 \x01(\t\"\x0f\n\rCloseResponse2\x85\x03\n\x0c\x45xcelTooling\x12H\n\x0cOpenWorkbook\x12\x19.irbis.excel.v1.OpenChunk\x1a\x1b.irbis.excel.v1.SessionView(\x01\x12N\n\x0bSelectSheet\x12\".irbis.excel.v1.SelectSheetRequest\x1a\x1b.irbis.excel.v1.SessionView\x12J\n\x0cSelectHeader\x12#.irbis.excel.v1.SelectHeaderRequest\x1a\x15.irbis.table.v1.Table\x12I\n\tReadTable\x12 .irbis.excel.v1.ReadTableRequest\x1a\x18.irbis.excel.v1.RowBatch0\x01\x12\x44\n\x05\x43lose\x12\x1c.irbis.excel.v1.CloseRequest\x1a\x1d.irbis.excel.v1.CloseResponseb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x1airbis/excel/v1/excel.proto\x12\x0eirbis.excel.v1\x1a\x1airbis/table/v1/table.proto\"M\n\tOpenChunk\x12(\n\x04meta\x18\x01 \x01(\x0b\x32\x18.irbis.excel.v1.OpenMetaH\x00\x12\x0e\n\x04\x64\x61ta\x18\x02 \x01(\x0cH\x00\x42\x06\n\x04part\"N\n\x08OpenMeta\x12\x10\n\x08\x66ilename\x18\x01 \x01(\t\x12\x1e\n\x16header_candidate_limit\x18\x02 \x01(\r\x12\x10\n\x08password\x18\x03 \x01(\t\"\xc1\x01\n\x0bSessionView\x12\x12\n\nsession_id\x18\x01 \x01(\t\x12)\n\x06sheets\x18\x02 \x03(\x0b\x32\x19.irbis.excel.v1.SheetInfo\x12\x1c\n\x14selected_sheet_index\x18\x03 \x01(\r\x12:\n\x11header_candidates\x18\x04 \x03(\x0b\x32\x1f.irbis.excel.v1.HeaderCandidate\x12\x19\n\x11password_required\x18\x05 \x01(\x08\"(\n\tSheetInfo\x12\x0c\n\x04name\x18\x01 \x01(\t\x12\r\n\x05index\x18\x02 \x01(\r\"M\n\x0fHeaderCandidate\x12\x11\n\texcel_row\x18\x01 \x01(\r\x12\'\n\x07\x63olumns\x18\x02 \x03(\x0b\x32\x16.irbis.table.v1.Column\"]\n\x12SelectSheetRequest\x12\x12\n\nsession_id\x18\x01 \x01(\t\x12\x13\n\x0bsheet_index\x18\x02 \x01(\r\x12\x1e\n\x16header_candidate_limit\x18\x03 \x01(\r\"S\n\x13SelectHeaderRequest\x12\x12\n\nsession_id\x18\x01 \x01(\t\x12\x11\n\texcel_row\x18\x02 \x01(\r\x12\x15\n\rsubcolumn_row\x18\x03 \x01(\r\"K\n\x10ReadTableRequest\x12\x12\n\nsession_id\x18\x01 \x01(\t\x12\x12\n\nbackground\x18\x02 \x01(\x08\x12\x0f\n\x07\x63hannel\x18\x03 \x01(\t\"-\n\x08RowBatch\x12!\n\x04rows\x18\x01 \x03(\x0b\x32\x13.irbis.table.v1.Row\">\n\x16ProvidePasswordRequest\x12\x12\n\nsession_id\x18\x01 \x01(\t\x12\x10\n\x08password\x18\x02 \x01(\t\"\"\n\x0c\x43loseRequest\x12\x12\n\nsession_id\x18\x01 \x01(\t\"\x0f\n\rCloseResponse2\xdd\x03\n\x0c\x45xcelTooling\x12H\n\x0cOpenWorkbook\x12\x19.irbis.excel.v1.OpenChunk\x1a\x1b.irbis.excel.v1.SessionView(\x01\x12N\n\x0bSelectSheet\x12\".irbis.excel.v1.SelectSheetRequest\x1a\x1b.irbis.excel.v1.SessionView\x12J\n\x0cSelectHeader\x12#.irbis.excel.v1.SelectHeaderRequest\x1a\x15.irbis.table.v1.Table\x12I\n\tReadTable\x12 .irbis.excel.v1.ReadTableRequest\x1a\x18.irbis.excel.v1.RowBatch0\x01\x12V\n\x0fProvidePassword\x12&.irbis.excel.v1.ProvidePasswordRequest\x1a\x1b.irbis.excel.v1.SessionView\x12\x44\n\x05\x43lose\x12\x1c.irbis.excel.v1.CloseRequest\x1a\x1d.irbis.excel.v1.CloseResponseb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -35,25 +35,27 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_OPENCHUNK']._serialized_start=74
   _globals['_OPENCHUNK']._serialized_end=151
   _globals['_OPENMETA']._serialized_start=153
-  _globals['_OPENMETA']._serialized_end=213
-  _globals['_SESSIONVIEW']._serialized_start=216
-  _globals['_SESSIONVIEW']._serialized_end=382
-  _globals['_SHEETINFO']._serialized_start=384
-  _globals['_SHEETINFO']._serialized_end=424
-  _globals['_HEADERCANDIDATE']._serialized_start=426
-  _globals['_HEADERCANDIDATE']._serialized_end=503
-  _globals['_SELECTSHEETREQUEST']._serialized_start=505
-  _globals['_SELECTSHEETREQUEST']._serialized_end=598
-  _globals['_SELECTHEADERREQUEST']._serialized_start=600
-  _globals['_SELECTHEADERREQUEST']._serialized_end=683
-  _globals['_READTABLEREQUEST']._serialized_start=685
-  _globals['_READTABLEREQUEST']._serialized_end=723
-  _globals['_ROWBATCH']._serialized_start=725
-  _globals['_ROWBATCH']._serialized_end=770
-  _globals['_CLOSEREQUEST']._serialized_start=772
-  _globals['_CLOSEREQUEST']._serialized_end=806
-  _globals['_CLOSERESPONSE']._serialized_start=808
-  _globals['_CLOSERESPONSE']._serialized_end=823
-  _globals['_EXCELTOOLING']._serialized_start=826
-  _globals['_EXCELTOOLING']._serialized_end=1215
+  _globals['_OPENMETA']._serialized_end=231
+  _globals['_SESSIONVIEW']._serialized_start=234
+  _globals['_SESSIONVIEW']._serialized_end=427
+  _globals['_SHEETINFO']._serialized_start=429
+  _globals['_SHEETINFO']._serialized_end=469
+  _globals['_HEADERCANDIDATE']._serialized_start=471
+  _globals['_HEADERCANDIDATE']._serialized_end=548
+  _globals['_SELECTSHEETREQUEST']._serialized_start=550
+  _globals['_SELECTSHEETREQUEST']._serialized_end=643
+  _globals['_SELECTHEADERREQUEST']._serialized_start=645
+  _globals['_SELECTHEADERREQUEST']._serialized_end=728
+  _globals['_READTABLEREQUEST']._serialized_start=730
+  _globals['_READTABLEREQUEST']._serialized_end=805
+  _globals['_ROWBATCH']._serialized_start=807
+  _globals['_ROWBATCH']._serialized_end=852
+  _globals['_PROVIDEPASSWORDREQUEST']._serialized_start=854
+  _globals['_PROVIDEPASSWORDREQUEST']._serialized_end=916
+  _globals['_CLOSEREQUEST']._serialized_start=918
+  _globals['_CLOSEREQUEST']._serialized_end=952
+  _globals['_CLOSERESPONSE']._serialized_start=954
+  _globals['_CLOSERESPONSE']._serialized_end=969
+  _globals['_EXCELTOOLING']._serialized_start=972
+  _globals['_EXCELTOOLING']._serialized_end=1449
 # @@protoc_insertion_point(module_scope)
