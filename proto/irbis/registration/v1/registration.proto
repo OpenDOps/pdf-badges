@@ -1,0 +1,27 @@
+syntax = "proto3";
+
+package irbis.registration.v1;
+
+service Registration {
+  rpc Lookup(LookupRequest) returns (LookupResponse);
+  rpc EnqueuePrint(EnqueuePrintRequest) returns (EnqueuePrintResponse);
+}
+
+message LookupRequest {
+  string id = 1;
+}
+
+message LookupResponse {
+  bool found = 1;
+  string id = 2;
+  string name = 3;
+}
+
+message EnqueuePrintRequest {
+  string id = 1;
+  uint32 pages = 2;
+}
+
+message EnqueuePrintResponse {
+  string id = 1;
+}

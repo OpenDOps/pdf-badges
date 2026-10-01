@@ -42,12 +42,15 @@ docs/
   pdf-tooling/                  PDF module: extract, template editor, writer
   excel-tooling/                reader, gRPC, later sheet adapters
   basic-excel-pdf-integration/  scan, fill, gRPC, excel caller
+  registration-server/          on-device HTTP, print, and remote sync
 docker-compose.yml              both services on a local network
 ```
 
 Today the Rust code still lives at the repository root (`src/`, `tests/`, the root `Cargo.toml`). That tree becomes `modules/pdf-tooling/` when the split is done. Behavior of the extractor and of `render-page` stays. The move is a path change, not a rewrite.
 
 `excel-tooling` is Python. LibreOffice exposes workbooks through UNO, and the binding used to drive Calc headless is Python. The PDF writer stays Rust (`lopdf`, the current `struct_to_pdf` code). The two modules meet only at protobuf.
+
+`registration-server` is the process on the venue device: one weak core, local HTTP and WebSocket, print jobs, and a timed download from the remote registration server. Browsers call that HTTP API and decode JSON natively. The Registration gRPC service is compiled for tests only. The skeleton is `src/registration_server`, started with `rust-reg registration-server`. [registration-server/design.md](registration-server/design.md) is how that work is scheduled so local requests and printing keep the core.
 
 ## Documents
 
@@ -62,6 +65,12 @@ Today the Rust code still lives at the repository root (`src/`, `tests/`, the ro
 | [pdf-tooling/runbook.md](pdf-tooling/runbook.md) | Link the library from Rust, C, Java, or Python |
 | [pdf-tooling/integration.md](pdf-tooling/integration.md) | Embed the library from Rust and from Python |
 | [basic-excel-pdf-integration/implementation-plan.md](basic-excel-pdf-integration/implementation-plan.md) | First path from a workbook to a multi-page PDF |
+| [registration-server/design.md](registration-server/design.md) | On-device process: local HTTP, WebSocket, and print keep the single core; remote sync runs behind them |
+| [registration-server/login-and-token.md](registration-server/login-and-token.md) | Remote login, the project token, and the calls that send it |
+| [registration-server/porting.md](registration-server/porting.md) | First porting slice: log in once, store the token, attach it to later calls |
+| [registration-server/credentials.md](registration-server/credentials.md) | Credential file: JSON document and atomic replace |
+| [registration-server/credentials-implementation-plan.md](registration-server/credentials-implementation-plan.md) | Build sequence for that file |
+| [registration-server/admin-implementation-plan.md](registration-server/admin-implementation-plan.md) | Step 3: React admin, Russian catalog, static files, login, choose an exhibition |
 
 ## What is already true
 

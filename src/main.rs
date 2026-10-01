@@ -31,6 +31,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     match std::env::args().nth(1).as_deref() {
         Some("render-page") => return render_page_cli(),
         Some("serve") => return serve_cli(),
+        Some("registration-server") => return registration_server_cli(),
         _ => {}
     }
     let args = Args::parse();
@@ -104,6 +105,45 @@ fn serve_cli() -> Result<(), Box<dyn std::error::Error>> {
     runtime
         .block_on(rust_reg::pdf_server::serve(listen))
         .map_err(|err| err.to_string())?;
+    Ok(())
+}
+
+#[derive(Parser)]
+#[command(name = "registration-server")]
+struct RegistrationServerArgs {
+    /// HTTP and WebSocket listen address
+    #[arg(long, default_value = "0.0.0.0:8080")]
+    http: String,
+
+    /// Seconds between remote sync cycles
+    #[arg(long, default_value_t = 60)]
+    sync_every: u64,
+
+    /// Remote endpoint to download. Repeat for each endpoint.
+    #[arg(long = "endpoint")]
+    endpoint: Vec<String>,
+}
+
+fn registration_server_cli() -> Result<(), Box<dyn std::error::Error>> {
+    let mut raw = std::env::args();
+    let program = raw.next().unwrap_or_else(|| "rust-reg".into());
+    let _command = raw.next();
+    let args = match RegistrationServerArgs::try_parse_from(std::iter::once(program).chain(raw)) {
+        Ok(args) => args,
+        Err(err) => err.exit(),
+    };
+    if args.sync_every == 0 {
+        eprintln!("sync interval must be greater than zero");
+        std::process::exit(1);
+    }
+    let remote_base = rust_reg::registration_server::remote_base_from_env()?;
+    let config = rust_reg::registration_server::Config {
+        http_listen: args.http.parse()?,
+        endpoints: args.endpoint,
+        sync_interval: std::time::Duration::from_secs(args.sync_every),
+        remote_base: remote_base.into(),
+    };
+    rust_reg::registration_server::run(config).map_err(|err| err.to_string())?;
     Ok(())
 }
 
