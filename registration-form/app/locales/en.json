@@ -1,0 +1,43 @@
+{
+  "frame": {
+    "kiosk": "Kiosk",
+    "phone": "Phone",
+    "operator": "Operator desk"
+  },
+  "action": {
+    "back": "Back",
+    "next": "Next",
+    "locale": "Language",
+    "start": "Start"
+  },
+  "place": {
+    "otherCountry": "My country is not {{country}}"
+  },
+  "desk": {
+    "search": "Search",
+    "find": "Find",
+    "newVisitor": "New visitor",
+    "category": "Category",
+    "ticket": "Payment status",
+    "printer": "Printer",
+    "packets": "Packets",
+    "photo": "Photo",
+    "save": "Save",
+    "paid": "Paid",
+    "unpaid": "Not paid"
+  },
+  "end": {
+    "desk": "Take your badge at the registration desk.",
+    "pay": "You are registered. Please pay for your participation at the ticket desk."
+  },
+  "error": {
+    "title": "Page not found",
+    "required": "Fill in this field",
+    "other": "Enter your own answer",
+    "unique": "This value is already used",
+    "email": "Enter an email address",
+    "no_printer": "No printer for this badge.",
+    "no_ticket_code": "No ticket code is left.",
+    "invalid_phone_email_combo": "This email and phone belong to different people."
+  }
+}

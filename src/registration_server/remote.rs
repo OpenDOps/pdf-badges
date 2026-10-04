@@ -4,6 +4,8 @@
 //! `Set-Cookie`, and later calls send that one cookie. The temptoken and the
 //! session id stay in memory. `bind` writes the project token and drops them.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use cookie::Cookie;
@@ -20,11 +22,15 @@ pub const REMOTE_ENV: &str = "REGISTRATION_REMOTE";
 pub const DEFAULT_REMOTE_HOST: &str = "kuprin.su";
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+/// Cap for the two login calls. A hung login holds the single-flight flag
+/// until this returns, so the operator can try again. A shorter
+/// [`Remote::with_timeout`] still wins.
+const LOGIN_TIMEOUT: Duration = Duration::from_secs(20);
 const NOT_LOGGED_IN: &str = "You are not logged in!";
 
-/// One exhibition from `boxapi/expos/ru`.
+/// One event from `boxapi/expos/ru`.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Exhibition {
+pub struct Event {
     pub unique_id: String,
     pub name: String,
 }
@@ -46,6 +52,8 @@ pub enum RemoteError {
     Status(u16),
     Url(String),
     Credentials(CredentialError),
+    /// Another call to the remote server is already running.
+    InProgress,
 }
 
 impl std::fmt::Display for RemoteError {
@@ -63,6 +71,7 @@ impl std::fmt::Display for RemoteError {
             RemoteError::Status(code) => write!(f, "remote status {code}"),
             RemoteError::Url(detail) => write!(f, "remote url: {detail}"),
             RemoteError::Credentials(err) => write!(f, "{err}"),
+            RemoteError::InProgress => write!(f, "in_progress"),
         }
     }
 }
@@ -123,11 +132,17 @@ pub fn remote_base_from_env() -> Result<Url, RemoteError> {
     remote_base_url(raw.as_deref())
 }
 
-/// HTTP client for the four bind calls.
+/// HTTP client for the remote registration server.
+///
+/// Login, the event list, and bind share one in-flight call. A second
+/// call while the first is still running returns [`RemoteError::InProgress`]
+/// and does not open a socket.
 #[derive(Clone, Debug)]
 pub struct Remote {
     base: Url,
     timeout: Duration,
+    /// One call to the remote server at a time, shared with sessions it opens.
+    flight: Arc<AtomicBool>,
 }
 
 impl Remote {
@@ -139,6 +154,7 @@ impl Remote {
         Ok(Self {
             base: remote_base_url(Some(base))?,
             timeout,
+            flight: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -161,25 +177,60 @@ impl Remote {
         if device_id.is_empty() {
             return Err(RemoteError::NoDeviceId);
         }
+        self.login_for(device_id, email, password, self.timeout.min(LOGIN_TIMEOUT))
+            .await
+    }
+
+    /// Same exchange as [`Self::login`], bounded by `limit`.
+    ///
+    /// `limit` is capped at twenty seconds. The two hops share that budget.
+    pub async fn login_for(
+        &self,
+        device_id: &str,
+        email: &str,
+        password: &str,
+        limit: Duration,
+    ) -> Result<OperatorSession, RemoteError> {
+        let device_id = device_id.trim();
+        if device_id.is_empty() {
+            return Err(RemoteError::NoDeviceId);
+        }
         let email = email.trim();
+        let _flight = enter(&self.flight)?;
+        let limit = limit.min(LOGIN_TIMEOUT).max(Duration::from_secs(1));
         let http = session_client(self.timeout)?;
-        let temptoken = request_temptoken(&http, &self.base, email, password).await?;
-        let session_id = accept_session(&http, &self.base, &temptoken, email).await?;
+        let base = self.base.clone();
+        let exchange = async {
+            let temptoken = request_temptoken(&http, &base, email, password, limit).await?;
+            let session_id = accept_session(&http, &base, &temptoken, email, limit).await?;
+            Ok::<_, RemoteError>((http, session_id))
+        };
+        let (http, session_id) = match tokio::time::timeout(limit, exchange).await {
+            Ok(Ok(pair)) => pair,
+            Ok(Err(err)) => return Err(err),
+            Err(_elapsed) => return Err(RemoteError::NoConnection),
+        };
         Ok(OperatorSession {
             http,
             base: self.base.clone(),
             device_id: device_id.to_string(),
             session_id,
+            flight: Arc::clone(&self.flight),
         })
     }
 }
 
-/// In-memory `JSESSIONID` for one operator, alive until [`OperatorSession::bind`].
+/// In-memory `JSESSIONID` for one operator.
+///
+/// Bind stores the project token and leaves this session in place. The local
+/// operator cookie is what expires.
+#[derive(Clone)]
 pub struct OperatorSession {
     http: reqwest::Client,
     base: Url,
     device_id: String,
     session_id: String,
+    flight: Arc<AtomicBool>,
 }
 
 impl std::fmt::Debug for OperatorSession {
@@ -197,15 +248,23 @@ impl OperatorSession {
     }
 
     /// `GET boxapi/expos/ru`. `name` is `name.ru.str`, or empty when that path is absent.
-    pub async fn list_exhibitions(
+    pub async fn list_events(&self, limit: u64, skip: u64) -> Result<Vec<Event>, RemoteError> {
+        self.list_events_within(limit, skip, DEFAULT_TIMEOUT).await
+    }
+
+    /// `GET boxapi/expos/ru`, giving up after `timeout`.
+    pub async fn list_events_within(
         &self,
         limit: u64,
         skip: u64,
-    ) -> Result<Vec<Exhibition>, RemoteError> {
+        timeout: Duration,
+    ) -> Result<Vec<Event>, RemoteError> {
+        let _flight = enter(&self.flight)?;
         let url = join(&self.base, "boxapi/expos/ru")?;
         let response = send(
             self.http
                 .get(url)
+                .timeout(timeout.max(Duration::from_secs(1)))
                 .header(reqwest::header::COOKIE, session_cookie(&self.session_id))
                 .query(&[("limit", limit.to_string()), ("skip", skip.to_string())]),
         )
@@ -214,7 +273,7 @@ impl OperatorSession {
         let body: Value = response
             .json()
             .await
-            .map_err(|_| RemoteError::BadResponse("exhibition list is not json".into()))?;
+            .map_err(|_| RemoteError::BadResponse("event list is not json".into()))?;
         if session_expired(&body) {
             return Err(RemoteError::SessionExpired);
         }
@@ -223,11 +282,11 @@ impl OperatorSession {
         }
         let list = body
             .get("list")
-            .ok_or_else(|| RemoteError::BadResponse("exhibition list is missing".into()))?;
+            .ok_or_else(|| RemoteError::BadResponse("event list is missing".into()))?;
         let items = list
             .as_array()
-            .ok_or_else(|| RemoteError::BadResponse("exhibition list is not an array".into()))?;
-        let mut exhibitions = Vec::with_capacity(items.len());
+            .ok_or_else(|| RemoteError::BadResponse("event list is not an array".into()))?;
+        let mut events = Vec::with_capacity(items.len());
         for item in items {
             let Some(unique_id) = item.get("uniqueId").and_then(Value::as_str) else {
                 continue;
@@ -242,24 +301,36 @@ impl OperatorSession {
                 .unwrap_or("")
                 .trim()
                 .to_string();
-            exhibitions.push(Exhibition {
+            events.push(Event {
                 unique_id: unique_id.to_string(),
                 name,
             });
         }
-        Ok(exhibitions)
+        Ok(events)
     }
 
-    /// `GET profile/synchdev/{device}/{expo}`, store the project token, drop this session.
+    /// `GET profile/synchdev/{device}/{event}` and store the project token.
     pub async fn bind(
-        self,
+        &self,
         file: &CredentialFile,
-        expo_id: &str,
-        expo_name: Option<String>,
+        event_id: &str,
+        event_name: Option<String>,
     ) -> Result<(), RemoteError> {
-        let expo_id = expo_id.trim();
-        if expo_id.is_empty() {
-            return Err(RemoteError::BadResponse("expo id is empty".into()));
+        self.bind_within(file, event_id, event_name, DEFAULT_TIMEOUT)
+            .await
+    }
+
+    /// Same bind as [`Self::bind`], giving up after `timeout`.
+    pub async fn bind_within(
+        &self,
+        file: &CredentialFile,
+        event_id: &str,
+        event_name: Option<String>,
+        timeout: Duration,
+    ) -> Result<(), RemoteError> {
+        let event_id = event_id.trim();
+        if event_id.is_empty() {
+            return Err(RemoteError::BadResponse("event id is empty".into()));
         }
         let stored = file.load()?;
         if let Some(stored_id) = stored.device_id() {
@@ -271,10 +342,13 @@ impl OperatorSession {
             }
         }
 
-        let url = synchdev_url(&self.base, &self.device_id, expo_id)?;
+        let url = synchdev_url(&self.base, &self.device_id, event_id)?;
+        let _flight = enter(&self.flight)?;
+        let limit = timeout.max(Duration::from_secs(1));
         let response = send(
             self.http
                 .get(url)
+                .timeout(limit)
                 .header(reqwest::header::COOKIE, session_cookie(&self.session_id)),
         )
         .await?;
@@ -304,10 +378,29 @@ impl OperatorSession {
                 credentials.set_device_id(&device_id)?;
             }
             credentials.set_base_url(&base_url)?;
-            credentials.bind(expo_id, token, expo_name)?;
+            credentials.bind(event_id, token, event_name)?;
             Ok(())
         })?;
         Ok(())
+    }
+}
+
+/// One remote call at a time. The guard clears the flag when the call returns.
+fn enter(flight: &Arc<AtomicBool>) -> Result<FlightGuard, RemoteError> {
+    if flight
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return Err(RemoteError::InProgress);
+    }
+    Ok(FlightGuard(Arc::clone(flight)))
+}
+
+struct FlightGuard(Arc<AtomicBool>);
+
+impl Drop for FlightGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
     }
 }
 
@@ -328,9 +421,15 @@ async fn request_temptoken(
     base: &Url,
     email: &str,
     password: &str,
+    timeout: Duration,
 ) -> Result<String, RemoteError> {
     let url = join(base, "auth/login")?;
-    let response = send(http.post(url).form(&[("email", email), ("pass", password)])).await?;
+    let response = send(
+        http.post(url)
+            .timeout(timeout)
+            .form(&[("email", email), ("pass", password)]),
+    )
+    .await?;
     let status = response.status();
     let body: Value = response
         .json()
@@ -353,8 +452,9 @@ async fn accept_session(
     base: &Url,
     temptoken: &str,
     email: &str,
+    timeout: Duration,
 ) -> Result<String, RemoteError> {
-    let response = send(http.get(base.clone()).query(&[
+    let response = send(http.get(base.clone()).timeout(timeout).query(&[
         ("ak-fivesec-token", temptoken),
         ("ak-fivesec-token-email", email),
     ]))
@@ -384,7 +484,7 @@ fn join(base: &Url, path: &str) -> Result<Url, RemoteError> {
         .map_err(|err| RemoteError::Url(err.to_string()))
 }
 
-fn synchdev_url(base: &Url, device_id: &str, expo_id: &str) -> Result<Url, RemoteError> {
+fn synchdev_url(base: &Url, device_id: &str, event_id: &str) -> Result<Url, RemoteError> {
     let mut url = base.clone();
     {
         let mut segments = url
@@ -394,7 +494,7 @@ fn synchdev_url(base: &Url, device_id: &str, expo_id: &str) -> Result<Url, Remot
         segments.push("profile");
         segments.push("synchdev");
         segments.push(device_id);
-        segments.push(expo_id);
+        segments.push(event_id);
     }
     Ok(url)
 }
@@ -490,8 +590,8 @@ mod tests {
             let app = Router::new()
                 .route("/auth/login", axum::routing::post(login))
                 .route("/", get(session))
-                .route("/boxapi/expos/ru", get(expos))
-                .route("/profile/synchdev/{device_id}/{expo_id}", get(synchdev))
+                .route("/boxapi/expos/ru", get(events))
+                .route("/profile/synchdev/{device_id}/{event_id}", get(synchdev))
                 .with_state(seen.clone());
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let addr = listener.local_addr().unwrap();
@@ -543,7 +643,7 @@ mod tests {
         )
     }
 
-    async fn expos(
+    async fn events(
         headers: HeaderMap,
         Query(query): Query<HashMap<String, String>>,
     ) -> impl axum::response::IntoResponse {
@@ -567,16 +667,16 @@ mod tests {
         Json(serde_json::json!({
             "list": [
                 {
-                    "uniqueId": "expo-1",
-                    "name": { "ru": { "str": "Выставка" } }
+                    "uniqueId": "event-1",
+                    "name": { "ru": { "str": "Мероприятие" } }
                 },
-                { "uniqueId": "expo-2" }
+                { "uniqueId": "event-2" }
             ]
         }))
     }
 
     async fn synchdev(
-        Path((device_id, expo_id)): Path<(String, String)>,
+        Path((device_id, event_id)): Path<(String, String)>,
         headers: HeaderMap,
     ) -> impl axum::response::IntoResponse {
         let cookie = headers
@@ -589,7 +689,7 @@ mod tests {
             }));
         }
         Json(serde_json::json!({
-            "token": format!("project-{device_id}-{expo_id}")
+            "token": format!("project-{device_id}-{event_id}")
         }))
     }
 
@@ -680,23 +780,23 @@ mod tests {
             "operator@example.com".into()
         )));
 
-        let list = session.list_exhibitions(1000, 0).await.unwrap();
+        let list = session.list_events(1000, 0).await.unwrap();
         assert_eq!(
             list,
             vec![
-                Exhibition {
-                    unique_id: "expo-1".into(),
-                    name: "Выставка".into(),
+                Event {
+                    unique_id: "event-1".into(),
+                    name: "Мероприятие".into(),
                 },
-                Exhibition {
-                    unique_id: "expo-2".into(),
+                Event {
+                    unique_id: "event-2".into(),
                     name: String::new(),
                 },
             ]
         );
 
         let scratch = Scratch::new();
-        let path = scratch.0.join("credentials.json");
+        let path = scratch.0.join("credentials.yml");
         let file = CredentialFile::new(&path);
         file.update(|credentials| {
             credentials.set_device_id("device-1")?;
@@ -704,16 +804,16 @@ mod tests {
         })
         .unwrap();
         session
-            .bind(&file, "expo-1", Some("Выставка".into()))
+            .bind(&file, "event-1", Some("Мероприятие".into()))
             .await
             .unwrap();
 
         let stored = CredentialFile::new(&path).load().unwrap();
         assert!(stored.is_logged_in());
         assert_eq!(stored.device_id(), Some("device-1"));
-        assert_eq!(stored.expo_id(), Some("expo-1"));
-        assert_eq!(stored.expo_name(), Some("Выставка"));
-        assert_eq!(stored.project_token(), Some("project-device-1-expo-1"));
+        assert_eq!(stored.event_id(), Some("event-1"));
+        assert_eq!(stored.event_name(), Some("Мероприятие"));
+        assert_eq!(stored.project_token(), Some("project-device-1-event-1"));
         assert_eq!(stored.base_url(), Some(remote.base().as_str()));
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(!text.contains("JSESSIONID"));
@@ -729,7 +829,7 @@ mod tests {
             .login("device-1", "operator@example.com", "secret-pass")
             .await
             .unwrap();
-        let err = session.list_exhibitions(10, 9).await.unwrap_err();
+        let err = session.list_events(10, 9).await.unwrap_err();
         assert!(matches!(err, RemoteError::SessionExpired));
     }
 
@@ -753,13 +853,13 @@ mod tests {
             .await
             .unwrap();
         let scratch = Scratch::new();
-        let path = scratch.0.join("credentials.json");
+        let path = scratch.0.join("credentials.yml");
         let file = CredentialFile::new(&path);
         let mut credentials = Credentials::default();
         credentials.set_device_id("other-device").unwrap();
         file.store(&credentials).unwrap();
 
-        let err = session.bind(&file, "expo-1", None).await.unwrap_err();
+        let err = session.bind(&file, "event-1", None).await.unwrap_err();
         assert!(matches!(err, RemoteError::DeviceMismatch { .. }), "{err}");
         let stored = file.load().unwrap();
         assert_eq!(stored.device_id(), Some("other-device"));

@@ -5,18 +5,28 @@ const CATALOG_KEYS = [
   "login.email",
   "login.password",
   "login.submit",
+  "login.waiting",
+  "network.good",
+  "network.fair",
+  "network.poor",
+  "network.offline",
+  "network.local",
+  "error.bad_request",
   "error.no_device_id",
   "error.invalid_cred",
   "error.no_connection",
   "error.unknown_error",
   "error.session_expired",
   "error.login_in_progress",
-  "exhibitions.title",
-  "exhibitions.choose",
-  "exhibitions.current",
-  "exhibitions.empty",
-  "exhibitions.token_stored",
-  "exhibitions.token_empty",
+  "error.select_in_progress",
+  "error.in_progress",
+  "events.title",
+  "events.choose",
+  "events.current",
+  "events.empty",
+  "events.token_stored",
+  "events.token_empty",
+  "events.waiting",
   "keys.title",
   "keys.empty",
 ];
@@ -31,6 +41,7 @@ test("ru_has_every_key", () => {
   expect(i18n.t("error.invalid_cred")).toBe(
     "Неверные имя пользователя или пароль",
   );
+  expect(i18n.t("error.bad_request")).toBe("Некорректный запрос");
   expect(i18n.t("login.submit")).toBe("Войти");
 });
 

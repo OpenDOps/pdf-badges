@@ -1,0 +1,145 @@
+@import "tailwindcss";
+
+@theme {
+  --container-kiosk: 48rem;
+  --container-web: 36rem;
+  --spacing-bar: 4.5rem;
+}
+
+@layer base {
+  body {
+    background-color: #f3f4f6;
+    color: #111827;
+    min-height: 100vh;
+  }
+
+  h1 {
+    font-size: 1.5rem;
+    font-weight: 600;
+    line-height: 1.25;
+  }
+
+  h2 {
+    font-size: 1.125rem;
+    font-weight: 600;
+    line-height: 1.35;
+  }
+
+  label {
+    margin-bottom: 0.25rem;
+  }
+
+  input:not([type="checkbox"]):not([type="radio"]),
+  select,
+  textarea {
+    background-color: #fff;
+    border: 1px solid #cbd5e1;
+    border-radius: 0.375rem;
+    padding: 0.625rem 0.75rem;
+    min-height: 2.75rem;
+  }
+
+  input[type="checkbox"],
+  input[type="radio"] {
+    width: 1.125rem;
+    height: 1.125rem;
+    margin-right: 0.5rem;
+    accent-color: #1d4ed8;
+    vertical-align: -0.15rem;
+  }
+
+  button {
+    background-color: #1d4ed8;
+    color: #fff;
+    border-radius: 0.375rem;
+    padding: 0.75rem 1.25rem;
+    min-height: 2.75rem;
+    cursor: pointer;
+  }
+
+  [data-testid="operator-bar"] label {
+    margin-bottom: 0;
+  }
+
+  [data-testid="operator-bar"] select,
+  [data-testid="operator-bar"] input,
+  [data-testid="pay"] [role="tablist"] {
+    height: 2.75rem;
+  }
+
+  [data-testid="pay"] button {
+    flex: 1 1 0;
+    height: 100%;
+    background-color: #fff;
+    color: #111827;
+    border: 1px solid #cbd5e1;
+    border-radius: 0;
+    min-height: 0;
+    padding: 0 0.75rem;
+    white-space: nowrap;
+  }
+
+  [data-testid="pay"] button:first-child {
+    border-radius: 0.375rem 0 0 0.375rem;
+  }
+
+  [data-testid="pay"] button:last-child {
+    border-radius: 0 0.375rem 0.375rem 0;
+    border-left-width: 0;
+  }
+
+  [data-testid="pay"] button[aria-selected="true"] {
+    background-color: #1d4ed8;
+    color: #fff;
+  }
+
+  main {
+    padding: 1.5rem 1rem 2rem;
+  }
+
+  [data-testid="frame"] {
+    padding: 0 0 var(--spacing-bar);
+  }
+
+  [data-testid="body-row"]:has([role="listbox"]) {
+    position: relative;
+    z-index: 50;
+  }
+
+  [data-testid="bar"].fixed {
+    background-color: #fff;
+    border-top: 1px solid #e5e7eb;
+    padding: 0.75rem 1rem;
+  }
+
+  [data-testid="bar"] > button {
+    flex: 1 1 0;
+  }
+
+  [data-testid="greeting"] {
+    background-color: #e8eef5;
+  }
+
+  [data-testid="greeting"] button {
+    background-color: transparent;
+    color: #fff;
+    border-radius: 0;
+    min-height: 0;
+    padding: 0;
+    text-shadow:
+      1px 1px 0 #000,
+      -1px -1px 0 #000,
+      1px -1px 0 #000,
+      -1px 1px 0 #000;
+  }
+
+  [data-testid="locale"] button {
+    font-size: 1.5rem;
+    font-weight: 700;
+    padding: 0.25rem 0.5rem;
+  }
+
+  [data-testid="locale"] button[aria-pressed="true"] {
+    text-decoration: underline;
+  }
+}

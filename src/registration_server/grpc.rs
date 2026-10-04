@@ -105,9 +105,9 @@ mod tests {
     use tokio::net::TcpListener;
     use tokio::sync::watch;
 
+    use super::serve;
     use super::v1::registration_client::RegistrationClient;
     use super::v1::{EnqueuePrintRequest, LookupRequest};
-    use super::serve;
     use crate::registration_server::{App, Registration};
 
     #[tokio::test]

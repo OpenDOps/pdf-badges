@@ -17,13 +17,29 @@ use crate::registration_server::{App, ServeError};
 
 pub fn router(app: App) -> Router {
     let gate = Arc::clone(&app.gate);
-    Router::new()
+    let dist = app.dist.clone();
+    let operator = app.operator.clone();
+    let pages = Router::new()
         .route("/health", get(health))
         .route("/registrations/{id}", get(lookup))
         .route("/print", post(enqueue_print))
         .route("/ws", get(ws))
+        .route("/", get(index).head(index))
+        .route("/events", get(index).head(index))
+        .with_state(app);
+    crate::registration_server::admin::api_router(operator)
+        .merge(pages)
+        .fallback(move |request: Request| {
+            let dist = dist.clone();
+            async move {
+                let path = request.uri().path();
+                if path == "/api" || path.starts_with("/api/") {
+                    return api_missing().await;
+                }
+                crate::registration_server::admin::serve_public(&dist, request).await
+            }
+        })
         .layer(from_fn_with_state(gate, track_inflight))
-        .with_state(app)
 }
 
 pub async fn serve(
@@ -44,8 +60,39 @@ pub async fn serve(
 }
 
 async fn track_inflight(State(gate): State<Arc<Gate>>, request: Request, next: Next) -> Response {
+    let method = request.method().clone();
+    let path = request.uri().path().to_string();
     let _guard = gate.enter_request();
-    next.run(request).await
+    let response = next.run(request).await;
+    log::debug!("{method} {path} {}", response.status());
+    response
+}
+
+async fn index(State(app): State<App>, request: Request) -> Response {
+    crate::registration_server::admin::serve_index(&app.dist, request).await
+}
+
+async fn api_missing() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        Json(serde_json::json!({
+            "ok": false,
+            "error": { "code": "not_found" }
+        })),
+    )
+        .into_response()
+}
+
+pub fn network_body(snapshot: &crate::registration_server::Snapshot) -> serde_json::Value {
+    serde_json::json!({
+        "ok": true,
+        "data": {
+            "samples": snapshot.samples,
+            "offline": snapshot.offline,
+            "quality": snapshot.quality.map(|quality| quality.as_str()),
+            "timeout_secs": snapshot.timeout_secs,
+        }
+    })
 }
 
 async fn health() -> Json<serde_json::Value> {
@@ -64,6 +111,7 @@ async fn enqueue_print(
     Json(job): Json<PrintJob>,
 ) -> Result<(StatusCode, Json<PrintJob>), StatusCode> {
     let queued = job.clone();
+    log::debug!("print queued id={}", queued.id);
     app.prints.enqueue(job).map_err(enqueue_status)?;
     Ok((StatusCode::ACCEPTED, Json(queued)))
 }

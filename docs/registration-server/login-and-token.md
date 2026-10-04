@@ -1,6 +1,6 @@
 # Login and the project token
 
-The venue device logs in once, binds itself to one exhibition, and keeps the token that bind returns. Every later call to the remote server sends that token. The password and the browser session are only for the bind.
+The venue device logs in once, binds itself to one event, and keeps the token that bind returns. Every later call to the remote server sends that token. The password and the browser session are only for the bind.
 
 The Scala client is `temp-reg/registration`. The remote host is `http://kuprin.su/`, or `http://stage.kuprin.su/` when `devmode` is set. `getHostStr(secure = true)` uses the same `http://` URLs. This document is the wire contract to follow. [porting.md](porting.md) is the order to build it. [design.md](design.md) is how the process shares one core once sync is running.
 
@@ -16,13 +16,13 @@ POST auth/login                         short-lived temptoken
 GET  /  ?ak-fivesec-token=…             Set-Cookie: JSESSIONID
         │
         ▼
-GET  boxapi/expos/ru                    list of exhibitions (cookie)
+GET  boxapi/expos/ru                    list of events (cookie)
         │
         ▼
-GET  profile/synchdev/{device}/{expo}   project token (cookie)
+GET  profile/synchdev/{device}/{event}   project token (cookie)
         │
         ▼
-stored: device_id + expo id + token
+stored: device_id + event id + token
         │
         ▼
 every sync call                         form fields dev_id, token, eid
@@ -68,7 +68,7 @@ HTTP 200 and a `Set-Cookie` header. The client takes the text between the first 
 
 The local admin page then keeps `loggedin` and `jsessionid` on its own HTTP session and redirects to `/controlExpo`. That session is the operator sitting at the device. It is not the sync credential.
 
-### 3. List exhibitions
+### 3. List events
 
 `GET {host}boxapi/expos/ru`
 
@@ -81,10 +81,10 @@ Cookie: `JSESSIONID=<session>`.
 
 HTTP 200 JSON:
 
-- `list` — exhibitions. The page reads `uniqueId` and `name.ru.str`.
+- `list` — events. The page reads `uniqueId` and `name.ru.str`.
 - `status.errors[0].msg` — when present. The string `You are not logged in!` means the cookie is dead.
 
-The local route `GET /exposlist?jsessionid=&offset=` is a proxy. It adds `current` (the stored expo id) next to `list` before rendering.
+The local route `GET /exposlist?jsessionid=&offset=` is a proxy. It adds `current` (the stored event id) next to `list` before rendering.
 
 ### 4. Bind this device, take the project token
 
@@ -98,17 +98,17 @@ On that field the client writes `./base/main.props` and drops the operator sessi
 
 | property key | meaning |
 |---|---|
-| `current_expo_uid` | exhibition id (`uniqueId`) |
+| `current_expo_uid` | event id (`uniqueId`) |
 | `curentr_expo_token` | project token. The key is misspelled in the file. |
 | `current_expo_name` | label from the page (`name.ru.str`), not from this response |
 
-`setCurrentExpoUID` also zeroes sync cursors, opens the local expo database, and starts the 60-second sync loop. Those are consequences of choosing a project. The token itself is the three properties above.
+`setCurrentExpoUID` also zeroes sync cursors, opens the local event database, and starts the 60-second sync loop. Those are consequences of choosing a project. The token itself is the three properties above. [db-design.md](db-design.md) is that database open, including the working connection the Scala client keeps beside the file.
 
 Local route: `POST /selectexpo` with `expoUID`, `jsessionid`, and optional `expoName`. It requires the local `loggedin` session, calls the URL above, stores the token, then `removeSession`.
 
 ## Stored state the sync loop needs
 
-On startup the process loads `./base/main.props` (Java `Properties`). If `current_expo_uid` is non-empty it opens local expo data. If both the uid and `curentr_expo_token` are present it starts the synchronizer. No password, no cookie.
+On startup the process loads `./base/main.props` (Java `Properties`). If `current_expo_uid` is non-empty it opens local event data. If both the uid and `curentr_expo_token` are present it starts the synchronizer. No password, no cookie.
 
 Each write copies the file to `./base/main.props.back` first and restores that copy when the main file is empty.
 
@@ -118,7 +118,7 @@ The Rust process keeps these values in its own file. [credentials.md](credential
 
 ## How a sync call carries the token
 
-One helper builds every authenticated sync request. If `device_id`, the expo id, or the token is missing, it does not call the server and returns the local error `invalid_cred`.
+One helper builds every authenticated sync request. If `device_id`, the event id, or the token is missing, it does not call the server and returns the local error `invalid_cred`.
 
 Otherwise it adds three fields to the endpoint's own fields:
 
@@ -126,7 +126,7 @@ Otherwise it adds three fields to the endpoint's own fields:
 |---|---|
 | `dev_id` | `device_id` |
 | `token` | project token |
-| `eid` | expo id |
+| `eid` | event id |
 
 Four transports, same three fields:
 

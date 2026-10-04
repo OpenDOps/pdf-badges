@@ -1,12 +1,12 @@
 # Admin pages — step 3
 
-Build sequence for [porting.md](porting.md) step 3. The operator logs in, sees the exhibition list, chooses one, and the credential file from [credentials.md](credentials.md) stores the project token. The remote calls are the ones already in `Remote` and `OperatorSession` ([login-and-token.md](login-and-token.md)).
+Build sequence for [porting.md](porting.md) step 3. The operator logs in, sees the event list, chooses one, and the credential file from [credentials.md](credentials.md) stores the project token. The remote calls are the ones already in `Remote` and `OperatorSession` ([login-and-token.md](login-and-token.md)).
 
 The admin UI is a React application. Copy lives in a Russian catalog and reaches the screen through `react-i18next`. The Scala templates (`admin.mustache`, `controlExpo.mustache`) and their jQuery, Angular, and Bootstrap assets stay in the old tree.
 
 Each step is one change. The tests named in the step land with it and stay green. A later step keeps the earlier tests passing. Set **Status** to `not started`, `in progress`, or `done`.
 
-Step 3 is done when steps 1 through 12 are done. Keys and the per-exhibition sqlite file are the [following plan](#following-plan--exhibition-sqlite-and-keys), not a step here.
+Step 3 is done when steps 1 through 12 are done. The event database is [porting.md](porting.md) step 4. Key editing stays the [following plan](#following-plan--event-sqlite-and-keys).
 
 ## Summary
 
@@ -15,15 +15,15 @@ Step 3 is done when steps 1 through 12 are done. Keys and the per-exhibition sql
 | [1. React package](#step-1-react-package) | Vite, TypeScript, Vitest, `react-i18next` | done |
 | [2. Russian catalog](#step-2-russian-catalog) | Every visible string, keyed | done |
 | [3. Login screen](#step-3-login-screen) | Form, submit, error sentence | done |
-| [4. Exhibition screen](#step-4-exhibition-screen) | List, choose, token line, empty keys | done |
+| [4. Event screen](#step-4-event-screen) | List, choose, token line, empty keys | done |
 | [5. Conditional GET](#step-5-conditional-get) | `ETag`, `Last-Modified`, `304` for one file | done |
 | [6. Public path](#step-6-public-path) | URL path stays inside the build directory | done |
 | [7. Static route](#step-7-static-route) | Those rules on the HTTP router | done |
-| [8. Login failures](#step-8-login-failures) | `POST /api/login` returns an error code | not started |
-| [9. Login success](#step-9-login-success) | Cookie set, exhibition route can load | not started |
-| [10. Exhibition list](#step-10-exhibition-list) | `GET /api/exhibitions` | not started |
-| [11. Choose exhibition](#step-11-choose-exhibition) | Select stores the token; keys stay empty | not started |
-| [12. Mounted server](#step-12-mounted-server) | Built assets and `/api` on `serve` | not started |
+| [8. Login failures](#step-8-login-failures) | `POST /api/login` returns an error code | done |
+| [9. Login success](#step-9-login-success) | Cookie set, event route can load | done |
+| [10. Event list](#step-10-event-list) | `GET /api/events` | done |
+| [11. Choose event](#step-11-choose-event) | Select stores the token; keys stay empty | done |
+| [12. Mounted server](#step-12-mounted-server) | Built assets and `/api` on `serve` | done |
 
 Shared rules:
 
@@ -31,7 +31,7 @@ Shared rules:
 - The same stack as the PDF editor: React, TypeScript, Vite. Localization is `i18next` and `react-i18next`. The locale is `ru`. There is no second language in this step.
 - Components call `t("key")`. A missing key fails the Vitest run. The server sends an error code. The catalog maps `error.<code>` to a sentence. The server does not send Russian prose.
 - The operator cookie is HttpOnly. It names the in-memory `OperatorSession`. It is not the remote `JSESSIONID`. The remote cookie stays inside that session until `bind` drops it.
-- Tests that talk to a remote use a local stand-in with the same four routes as `remote.rs`: `POST auth/login`, `GET /`, `GET boxapi/expos/ru`, `GET profile/synchdev/{device}/{expo}`. They do not call kuprin.su.
+- Tests that talk to a remote use a local stand-in with the same four routes as `remote.rs`: `POST auth/login`, `GET /`, `GET boxapi/expos/ru`, `GET profile/synchdev/{device}/{event}`. They do not call kuprin.su.
 - `POST /api/login` accepts JSON `login` and `password`. Map them to `email` and `pass` on `Remote::login`.
 
 ## Screens
@@ -39,7 +39,7 @@ Shared rules:
 | screen | route | what it shows |
 |---|---|---|
 | Login | `/` | Email, password, submit. A failed login shows the sentence for the error code. |
-| Exhibitions | `/exhibitions` | The list, the current exhibition, a line that the project token is stored or absent, and an empty keys block. |
+| Events | `/events` | The list, the current event, a line that the project token is stored or absent, and an empty keys block. |
 
 The token line says that a token is stored. It does not print the token.
 
@@ -53,25 +53,25 @@ registration-admin/
     locales/ru.json
     api.ts
     Login.tsx
-    Exhibitions.tsx
+    Events.tsx
     App.tsx
   dist/                 vite build, served by the registration server
 ```
 
-`vite build` writes `dist/`. The registration server serves that directory as static files. `index.html` is the response for `/` and `/exhibitions`. A path under `/api` is never replaced with `index.html`.
+`vite build` writes `dist/`. The registration server serves that directory as static files. `index.html` is the response for `/` and `/events`. A path under `/api` is never replaced with `index.html`.
 
 ## API
 
-The admin page and `/api` share the HTTP server. The gRPC service on the other port stays the floor API: `Lookup` and `EnqueuePrint`. It does not gain login or exhibition methods.
+The admin page and `/api` share the HTTP server. The gRPC service on the other port stays the floor API: `Lookup` and `EnqueuePrint`. It does not gain login or event methods.
 
 A browser page cannot call that service without a second client stack, and the operator id is already an HttpOnly cookie on the same origin as the page. The password, the remote `JSESSIONID`, and the project token are never response fields. `Remote` still calls `POST auth/login` and `GET boxapi/expos/ru` on the remote host. The browser does not.
 
-Login and the exhibition list stay separate calls.
+Login and the event list stay separate calls.
 
-- `POST /api/login` is the command that checks the password and mints the cookie. A GET would put the password in the URL, and a reload of the exhibition page must not send it again.
-- `GET /api/exhibitions` reads that session's list. Repeating it does not log in.
-- `POST /api/exhibitions/select` writes the credential file.
-- `GET /api/binding` reads the file after select has cleared the cookie, so the screen can still show the chosen exhibition.
+- `POST /api/login` is the command that checks the password and mints the cookie. A GET would put the password in the URL, and a reload of the event page must not send it again.
+- `GET /api/events` reads that session's list. Repeating it does not log in.
+- `POST /api/events/select` writes the credential file.
+- `GET /api/binding` reads the file with no cookie, so the screen can show the chosen event after the operator lease has expired.
 
 ### JSON
 
@@ -85,7 +85,9 @@ Login and the exhibition list stay separate calls.
 | `no_device_id` | 400 | The credential file has no device id. No socket is opened. |
 | `invalid_cred` | 401 | The remote rejected the password. |
 | `session_expired` | 401 | The cookie is missing or unknown, or the remote session died. |
-| `login_in_progress` | 429 | A login is already inside `Remote::login`. The extra call is not queued and does not open `auth/login`. |
+| `login_in_progress` | 429 | A call to the remote server is already running, and this request is a login. The extra call is not queued and does not open `auth/login`. |
+| `select_in_progress` | 429 | A call to the remote server is already running, and this request is choosing an event. The extra call is not queued and does not open `profile/synchdev`. |
+| `in_progress` | 429 | A call to the remote server is already running, and this request is another remote call (the event list). The extra call is not queued. |
 | `no_connection` | 502 | Connect failed, the call timed out, or the login body was not the remote shape. |
 | `unknown_error` | 500 | Any other remote failure, including a remote HTTP error, a bad URL, a credential-file error, and `DeviceMismatch`. |
 | `not_found` | 404 | No such `/api` route. The static handler does not answer these. |
@@ -95,9 +97,11 @@ Login and the exhibition list stay separate calls.
 
 | route | `data` |
 |---|---|
-| `POST /api/login` | Request `{ "login", "password" }`, mapped to remote `email` and `pass`. Success is `200`, `data` `{}`, and `Set-Cookie` HttpOnly, `SameSite=Lax`, `Path=/`. |
-| `GET /api/exhibitions` | Cookie required. `{ "current": { "id", "name" } or null, "exhibitions": [ { "id", "name" } ] }`. `current` comes from the credential file. |
-| `POST /api/exhibitions/select` | Cookie required. Body `{ "id", "name" }`. An empty `id` is `bad_request`. Success is `200` and `{ "id", "name", "token_stored": true }`. The cookie is cleared. |
+| `GET /api/network` | `{ "samples", "offline", "quality", "timeout_secs" }`. `quality` is `good`, `fair`, `poor`, or `null`. `offline` is true when the last two probes failed. `timeout_secs` is a whole number of seconds. Before two samples it is `10` and `quality` is `null`. |
+| `POST /api/login` | Request `{ "login", "password" }`, mapped to remote `email` and `pass`. Success is `200`, `data` `{ "timeout_secs" }`, and `Set-Cookie` HttpOnly, `SameSite=Lax`, `Path=/`. Failures carry the same `timeout_secs` beside `error`. Login and `GET /api/events` use that many seconds as their remote timeout. |
+| `GET /api/events` | Cookie required. `{ "current": { "id", "name" } or null, "events": [ { "id", "name" } ] }`. `current` comes from the credential file. |
+| `POST /api/events/select` | Cookie required. Body `{ "id", "name" }`. An empty `id` is `bad_request`. Success is `200` and `{ "id", "name", "token_stored": true, "timeout_secs" }`. Failures carry the same `timeout_secs`. The bind uses that many seconds. A second select while a remote call is already running is `429` `select_in_progress`. The operator cookie stays. |
+| `POST /api/session` | Cookie required. Refreshes the operator lease to one minute from now. Missing or expired is `401` `session_expired`. |
 | `GET /api/binding` | No cookie. `{ "id", "name", "token_stored" }` from the credential file. `id` and `name` are `null` when unset. `token_stored` is `true` only when `project_token` is set. |
 | `GET /api/keys` | `[]`. |
 | `POST /api/keys`, `POST /api/keys/print` | No `data`. Status `501`, code `keys_later`. |
@@ -142,17 +146,17 @@ error.no_connection
 error.unknown_error
 error.session_expired
 error.login_in_progress
-exhibitions.title
-exhibitions.choose
-exhibitions.current
-exhibitions.empty
-exhibitions.token_stored
-exhibitions.token_empty
+events.title
+events.choose
+events.current
+events.empty
+events.token_stored
+events.token_empty
 keys.title
 keys.empty
 ```
 
-The Russian values for the four login errors are the sentences in `admin_ru.mustloc` (`Нет соединения с Nexpo.me`, `Неверные имя пользователя или пароль`, `Неизвестная ошибка`, `У устройства нет серийного номера`). The other keys are the Russian labels those pages used as literal HTML: `Вход в систему`, `Введите свой email`, `Введите свой пароль`, `Войти`, and the exhibition and key labels from `controlExpo.mustache` (`Текущая выставка`, `Выберите выставку`, `Ключ администратора` grouped as one keys title).
+The Russian values for the four login errors are the sentences in `admin_ru.mustloc` (`Нет соединения с Nexpo.me`, `Неверные имя пользователя или пароль`, `Неизвестная ошибка`, `У устройства нет серийного номера`). The other keys are the Russian labels those pages used as literal HTML: `Вход в систему`, `Введите свой email`, `Введите свой пароль`, `Войти`, and the event and key labels. `controlExpo.mustache` said `Текущая выставка` and `Выберите выставку`. This catalog says `Текущее мероприятие` and `Выберите мероприятие`. `Ключ администратора` is grouped as one keys title.
 
 `error.bad_request` is `Некорректный запрос`. Step 8 adds that key to `ru.json`. `not_found` and `keys_later` stay off the catalog until a screen displays them.
 
@@ -236,27 +240,27 @@ Render with the real catalog.
 
 `npm test` passes, and steps 1–2 stay green.
 
-## Step 4. Exhibition screen
+## Step 4. Event screen
 
 [Back to summary](#summary)
 
-Done. `Exhibitions.tsx` lists names, calls `onSelect` with id and name, and shows the token sentence without the token. The keys block is the title and the empty sentence.
+Done. `Events.tsx` lists names, calls `onSelect` with id and name, and shows the token sentence without the token. The keys block is the title and the empty sentence.
 
-The exhibition list, the token line, and the empty keys block. Data arrives as props.
+The event list, the token line, and the empty keys block. Data arrives as props.
 
 ### Work
 
-1. `Exhibitions.tsx` takes `exhibitions`, `current`, `tokenStored`, and `onSelect(id, name)`.
+1. `Events.tsx` takes `events`, `current`, `tokenStored`, and `onSelect(id, name)`.
 2. Each row shows `name`. Choosing it calls `onSelect`.
-3. `tokenStored` true uses `exhibitions.token_stored`. False uses `exhibitions.token_empty`.
+3. `tokenStored` true uses `events.token_stored`. False uses `events.token_empty`.
 4. The keys block uses `keys.title` and `keys.empty`. It has no add or delete control in this step.
 
 ### Test scenarios
 
 | Scenario | Assert |
 |---|---|
-| `exhibitions_lists_names` | Two exhibitions render both names. The current name sits under `Текущая выставка`. |
-| `exhibitions_selects_one` | Activating a row calls `onSelect` with that id and name. |
+| `events_lists_names` | Two events render both names. The current name sits under `Текущее мероприятие`. |
+| `events_selects_one` | Activating a row calls `onSelect` with that id and name. |
 | `token_stored_line` | `tokenStored` true shows the stored sentence. False shows the empty sentence. The token value is absent. |
 | `keys_block_empty` | The keys title is present and the empty sentence is present. |
 
@@ -307,7 +311,7 @@ Turn a URL path into a file under the build directory, or refuse it.
 2. Decode the path. Reject an empty path, `/`, a trailing slash, `\`, a segment that is `..` or `.`, and a decoded `%2e%2e`.
 3. The joined path must be a file whose canonical path is inside the canonical `root`. A directory is `None`. A missing file is `None`.
 
-`/` and `/exhibitions` are not this function's job. Step 12 serves `index.html` for those two routes.
+`/` and `/events` are not this function's job. Step 12 serves `index.html` for those two routes.
 
 ### Test scenarios
 
@@ -383,12 +387,14 @@ Done. `admin_router` serves `GET` and `HEAD` through steps 5 and 6. `304` and `H
 | `bad_password_is_invalid_cred` | Stand-in login body has no `temptoken` and `"status":1`. Status `401`, code `invalid_cred`. |
 | `down_remote_is_no_connection` | Stand-in accepts and then closes. Status `502`, code `no_connection`. |
 | `malformed_login_is_bad_request` | A body that is not JSON is `400` and `bad_request`. No stand-in was started. |
-| `failed_login_sets_no_cookie` | Those responses have no `Set-Cookie`. `GET /api/exhibitions` is `401` and `session_expired`. |
+| `failed_login_sets_no_cookie` | Those responses have no `Set-Cookie`. `GET /api/events` is `401` and `session_expired`. |
 | `login_in_progress_skips_remote` | The first `POST /api/login` is still waiting on the stand-in. A second POST is `429` and `login_in_progress`. The stand-in saw one `auth/login`. |
 
 ### Done when
 
 `cargo test --test admin_pages login_failure` passes, and steps 5–7 stay green.
+
+Done. `POST /api/login` reads `login` and `password` and calls `Remote::login` with the credential file's device id. Failures are `{ "ok": false, "error": { "code" } }` with no `Set-Cookie`, and the session map stays empty. A second login while the first is inside `Remote::login` is `429` `login_in_progress` and does not open another `auth/login`. `GET /api/events` without a session is `401` `session_expired`. `error.bad_request` is in the Russian catalog.
 
 ## Step 9. Login success
 
@@ -409,70 +415,77 @@ A good login sets the operator cookie.
 | Scenario | Assert |
 |---|---|
 | `login_sets_cookie` | `POST /api/login` against a good stand-in is `200` and `{ "ok": true, "data": {} }`. `Set-Cookie` is HttpOnly. |
-| `second_login_replaces_session` | A second good login makes `GET /api/exhibitions` with the first cookie `401`. |
+| `second_login_replaces_session` | A second good login makes `GET /api/events` with the first cookie `401`. |
 | `login_screen_shows_server_error` | A mocked `fetch` that returns `401` and `{ "ok": false, "error": { "code": "invalid_cred" } }` makes the login screen show the Russian sentence. |
 
 ### Done when
 
 `cargo test --test admin_pages login_success` and `npm test` pass, and step 8 stays green.
 
-## Step 10. Exhibition list
+Done. A successful `POST /api/login` stores one `OperatorSession` under a new local id and sets `Set-Cookie` HttpOnly, `SameSite=Lax`, `Path=/`. The body is `{ "ok": true, "data": {} }`. A second success clears the previous id, so the old cookie gets `401`. `src/api.ts` posts the form. When `ok` is false, the login screen shows `t("error." + code)`.
+
+## Step 10. Event list
 
 [Back to summary](#summary)
 
-`GET /api/exhibitions` returns the list the exhibition screen renders.
+`GET /api/events` returns the list the event screen renders.
 
 ### Work
 
 1. The operator cookie selects the session. A missing or unknown cookie is `401` and `session_expired`.
-2. Call `OperatorSession::list_exhibitions` with `limit` `1000` and `skip` `0`.
-3. `data` is `{ "current": null, "exhibitions": [ { "id": "5245081", "name": "TechCrunch" } ] }`. `id` is `uniqueId`. `name` is `Exhibition.name`. `current` is `{ "id", "name" }` from the credential file, or `null`.
+2. Call `OperatorSession::list_events` with `limit` `1000` and `skip` `0`.
+3. `data` is `{ "current": null, "events": [ { "id": "5245081", "name": "TechCrunch" } ] }`. `id` is `uniqueId`. `name` is `Event.name`. `current` is `{ "id", "name" }` from the credential file, or `null`.
 4. `SessionExpired` from the remote removes that local session and returns `401`.
 
 ### Test scenarios
 
 | Scenario | Assert |
 |---|---|
-| `exhibitions_shape` | After login, the stand-in list has one exhibition. `data.exhibitions[0].id`, `data.exhibitions[0].name`, and `data.current: null`. `ok` is `true`. |
-| `exhibitions_current_from_file` | A credential file that already has `expo_id` `5245081` and a name makes `data.current` those two fields. |
-| `exhibitions_unknown_cookie` | A cookie `nope` is `401` and `session_expired`. |
-| `exhibitions_dead_remote_cookie` | The stand-in answers `You are not logged in!`. The response is `401`, and the operator cookie no longer lists exhibitions. |
+| `events_shape` | After login, the stand-in list has one event. `data.events[0].id`, `data.events[0].name`, and `data.current: null`. `ok` is `true`. |
+| `events_current_from_file` | A credential file that already has `event_id` `5245081` and a name makes `data.current` those two fields. |
+| `events_unknown_cookie` | A cookie `nope` is `401` and `session_expired`. |
+| `events_dead_remote_cookie` | The stand-in answers `You are not logged in!`. The response is `401`, and the operator cookie no longer lists events. |
 
 ### Done when
 
-`cargo test --test admin_pages exhibitions` passes, and steps 8–9 stay green.
+`cargo test --test admin_pages events` passes, and steps 8–9 stay green.
 
-## Step 11. Choose exhibition
+Done. `GET /api/events` uses the operator cookie, calls `list_events` with limit `1000` and skip `0`, and returns `data.current` from the credential file plus `data.events` as `{ "id", "name" }`. `SessionExpired` drops that local session and returns `401`.
+
+## Step 11. Choose event
 
 [Back to summary](#summary)
 
-`POST /api/exhibitions/select` binds the device and drops the operator session. The screen can still read the stored binding.
+`POST /api/events/select` binds the device and drops the operator session. The screen can still read the stored binding.
 
 ### Work
 
 1. JSON `id` and `name`. An empty `id` is `400` and `bad_request`.
 2. Take the session out of the map, then `OperatorSession::bind` with that name.
-3. Success is `200` and `data` `{ "id", "name", "token_stored": true }`. The credential file has `expo_id`, `expo_name`, and `project_token`. The cookie is cleared.
-4. A bind error puts nothing back in the map. The credential file is unchanged when `bind` returns `Err` before it writes. A remote HTTP 500 is `500` and `unknown_error`.
+3. Success is `200` and `data` `{ "id", "name", "token_stored": true }`. The credential file has `event_id`, `event_name`, and `project_token`. The operator cookie stays so keys can still be set.
+4. A remote HTTP 500 leaves the credential file unchanged and leaves the operator session in place. `SessionExpired` drops that session.
 5. `GET /api/binding` reads the file. `token_stored` is `true` when `project_token` is set, otherwise `false`.
 6. `GET /api/keys` is `200` and `data` `[]`. `POST /api/keys` and `POST /api/keys/print` are `501` and `keys_later`.
 
-`api.ts` calls select, then the exhibition screen shows `token_stored` and `keys.empty`. A Vitest mocks those two responses.
+`api.ts` calls select, then the event screen shows `token_stored` and `keys.empty`. A Vitest mocks those two responses.
 
 ### Test scenarios
 
 | Scenario | Assert |
 |---|---|
-| `select_stores_token` | Stand-in `profile/synchdev` returns a token. After select, the credential file has that `expo_id`, the posted name, and that `project_token`. `data.token_stored` is `true`. The token string is not in the JSON. |
-| `select_drops_session` | The same cookie on a following `GET /api/exhibitions` is `401`. `GET /api/binding` still reports `token_stored` `true` and that expo id. |
-| `select_bind_failure_keeps_file` | Stand-in synchdev returns HTTP 500. The credential file still has no `project_token`. The cookie is gone. |
+| `select_stores_token` | Stand-in `profile/synchdev` returns a token. After select, the credential file has that `event_id`, the posted name, and that `project_token`. `data.token_stored` is `true`. The token string is not in the JSON. |
+| `select_keeps_session` | The same cookie on a following `GET /api/events` is still `200`. `GET /api/binding` reports `token_stored` `true` and that event id. |
+| `select_bind_failure_keeps_file` | Stand-in synchdev returns HTTP 500. The credential file still has no `project_token`. The operator cookie still lists events. |
+| `select_in_progress_skips_remote` | The first select is still waiting on synchdev. A second select is `429` `select_in_progress` and does not open synchdev again. `GET /api/events` and `POST /api/login` during that wait are `429` `in_progress` and `login_in_progress`. |
 | `keys_empty` | `GET /api/keys` is `200` and `data` `[]`. |
 | `create_key_not_implemented` | `POST /api/keys` is `501` and code `keys_later`. |
 | `screen_shows_stored_and_empty_keys` | Mocked select and keys responses render the stored sentence and `keys.empty`. |
 
 ### Done when
 
-`cargo test --test admin_pages select_exhibition` and `npm test` pass, and steps 8–10 stay green.
+`cargo test --test admin_pages select_event` and `npm test` pass, and steps 8–10 stay green.
+
+Done. `POST /api/events/select` calls `OperatorSession::bind` and stores `event_id`, `event_name`, and `project_token`. The body is `{ "id", "name", "token_stored": true }` and does not contain the token string. The operator cookie stays. It lasts one minute from login, and `POST /api/session` moves that deadline to one minute from the ping. The events page sends that ping every 30 seconds. A remote HTTP 500 leaves the file without a `project_token` and leaves the session. Login, the event list, and bind share one in-flight remote call. A second select while that call is running is `429` `select_in_progress` and does not open another `profile/synchdev`. `GET /api/binding` reads that file. `GET /api/keys` is `[]`. `POST /api/keys` and `POST /api/keys/print` are `501` `keys_later`. The event screen shows the stored-token sentence and `keys.empty`.
 
 ## Step 12. Mounted server
 
@@ -483,10 +496,10 @@ The admin API and the built files are on the router `serve` already runs, beside
 ### Work
 
 1. Merge the admin routes into `http::router`. `/api` is matched before the static fallback.
-2. `GET /` and `GET /exhibitions` return `index.html` from the build directory, with the same validators as any other static file.
+2. `GET /` and `GET /events` return `index.html` from the build directory, with the same validators as any other static file.
 3. `Config` carries the dist path. Tests pass a temp directory that contains `index.html` and `assets/app.js`. The real `npm run build` output is what the process serves.
 4. The existing inflight gate wraps these routes the same way it wraps `/health`.
-5. `App.tsx` routes `/` to `Login` and `/exhibitions` to `Exhibitions`, using `api.ts`.
+5. `App.tsx` routes `/` to `Login` and `/events` to `Events`, using `api.ts`.
 
 ### Test scenarios
 
@@ -494,7 +507,7 @@ Start `serve` the way `tests/registration_server.rs` does, with a temp dist and 
 
 | Scenario | Assert |
 |---|---|
-| `serve_index` | `GET /` and `GET /exhibitions` are `200` and the temp `index.html` bytes. |
+| `serve_index` | `GET /` and `GET /events` are `200` and the temp `index.html` bytes. |
 | `serve_asset_304` | `GET /assets/app.js` then the same GET with `If-None-Match` is `304`. |
 | `serve_login` | `POST /api/login` against the stand-in is `200` and sets the cookie. |
 | `health_still_ok` | `GET /health` is still `{"status":"ok"}`. |
@@ -504,13 +517,15 @@ Start `serve` the way `tests/registration_server.rs` does, with a temp dist and 
 
 `cargo test --test admin_pages serve_admin`, `cargo test --test registration_server`, and `npm test` pass, and steps 1–11 stay green. `npm run build` writes `registration-admin/dist`.
 
-## Following plan — exhibition sqlite and keys
+Done. `serve` mounts the admin JSON routes and the build directory on the same router as `/health`, `/registrations`, `/print`, and `/ws`. `GET /` and `GET /events` return `index.html` with the same validators as any other file. `GET /api/missing` is `404` `not_found` and is not that HTML. The inflight gate wraps these routes. `App` shows the login screen at `/` and the event screen at `/events`. A successful login moves to `/events`. `--dist` is the build directory and `--credentials` is the credential file.
 
-Not steps 1–12. Start this after step 12 is done, before [porting.md](porting.md) step 4 puts the token on the sync round.
+## Following plan — event sqlite and keys
 
-`setCurrentExpoUID` in the Scala client opens a different on-disk database for the chosen exhibition. The port does the same at `bind`: close the previous file, open the file for the new `expo_id`. Keys are rows in that file. The credential file still holds only `device_id`, `base_url`, `expo_id`, `expo_name`, and `project_token`.
+Not steps 1–12. The event file is [porting.md](porting.md) step 4, specified in [db-design.md](db-design.md). These key routes use that file. They land with that step or just after it, before step 5 attaches the token to the sync round.
 
-Step 11 left the key routes empty. This plan replaces those handlers. Responses use the same `{ "ok", "data" }` / `{ "ok", "error": { "code" } }` envelope. The exhibition screen fills `keys` from `GET /api/keys` instead of the empty sentence:
+`setCurrentExpoUID` in the Scala client opens a different on-disk database for the chosen event. Step 4 does the same at `bind`: close the previous file, open the file for the new `event_id`, and insert the two default keys when `keys` is empty. These routes then edit those rows. The credential file still holds only `device_id`, `base_url`, `event_id`, `event_name`, and `project_token`.
+
+Step 11 left the key routes empty. This plan replaces those handlers. Responses use the same `{ "ok", "data" }` / `{ "ok", "error": { "code" } }` envelope. The event screen fills `keys` from `GET /api/keys` instead of the empty sentence:
 
 | route | `data` |
 |---|---|
@@ -520,4 +535,4 @@ Step 11 left the key routes empty. This plan replaces those handlers. Responses 
 | `DELETE /api/keys/:id` | delete by id |
 | `POST /api/keys/print` | one print job for the current keys, on the server-thread print queue |
 
-Switching exhibition switches the file. Keys from the previous exhibition stay in the previous file. New strings go into `ru.json` under `keys.*`.
+Switching event switches the file. Keys from the previous event stay in the previous file. New strings go into `ru.json` under `keys.*`.

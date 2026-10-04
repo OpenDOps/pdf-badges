@@ -1,6 +1,6 @@
 # registration-server
 
-How this process shares one core. The remote login and the project token it reuses are [login-and-token.md](login-and-token.md). The order to port that login is [porting.md](porting.md). The credential file is [credentials.md](credentials.md).
+How this process shares one core. The remote login and the project token it reuses are [login-and-token.md](login-and-token.md). The order to port that login is [porting.md](porting.md). The credential file is [credentials.md](credentials.md). The event SQLite file is [db-design.md](db-design.md). How the remote probe becomes the corner signal is [network-quality.md](network-quality.md). How a badge is drawn and sent to CUPS is [printing.md](printing.md). The sync queue is the `event-sync` library in [event-sync/design.md](../event-sync/design.md). This process binds the full catalog.
 
 The process that runs on the device at the venue. The machine is one weak core, on the order of a Wi-Fi router: small RAM, Linux, no spare CPU to share evenly. The process has three jobs.
 
@@ -25,7 +25,7 @@ server thread          nice 0
 sync thread            nice 15
   current-thread runtime
     timer
-    up to 2 endpoint downloads in flight
+    up to SYNC_IN_FLIGHT downloads in flight (compiled, default 100)
     parse and store between socket reads
 ```
 
@@ -71,14 +71,17 @@ A function that runs for a long time without `.await` — a full PDF render, a l
 
 ## Remote sync
 
-The sync loop wakes on a timer. Each cycle pulls the endpoints that are due. Two downloads are in flight at a time, so two round-trips overlap, and the core parses one body at a time:
+The queue is the `event-sync` library ([event-sync/design.md](../event-sync/design.md)). This process binds the full catalog, the event file, and the gate. Other hosts bind a shorter catalog and skip the gate.
+
+The sync loop wakes on a timer and appends ready calls to one queue. The queue is as long as `SYNC_IN_FLIGHT`, which is also how many calls may wait on a response at once. It is compiled into the binary (unset is 100; `SYNC_IN_FLIGHT=2 cargo build` bakes another count). `--sync-in-flight` replaces that compiled value for one process. Downloads of the same path stay in order. Different paths, and uploads, share the queue. A free socket goes to a download that is waiting. An upload is sent on a socket that is still free. The core still parses one body at a time:
 
 ```rust
 use futures::stream::{self, StreamExt};
 
-stream::iter(endpoints)
-    .map(|url| async move { download(url).await })
-    .buffer_unordered(2)
+// `ready` is the queue: at most `in_flight` calls. One path stays in order.
+stream::iter(ready)
+    .map(|call| async move { download(call).await })
+    .buffer_unordered(in_flight)
     .for_each(|result| async move { store(result).await })
     .await;
 ```
@@ -93,11 +96,11 @@ A download that is preempted stays correct. The socket stays registered. The tas
 
 The server runtime accepts HTTP and WebSocket on one socket. One current-thread runtime polls that accept loop, so a local call is server-thread work.
 
-A request handler does its work and returns. It does not parse a remote payload and it does not render a whole document inline. Shared state (the local registration store) is readable while a sync write is in progress: the store lock is held for one row batch, then released, so a lookup waits for a batch and for the rest of the cycle.
+A request handler does its work and returns. It does not parse a remote payload and it does not render a whole document inline. Search reads the in-memory database from [db-design.md](db-design.md). The list page reads that database once the copy is ready. Until then a page turn reads the file, because the full order is not in memory yet, and copies that page into memory. The event file is the durable copy. A sync write is one transaction per row batch on that file, then the same batch is applied to the memory database.
 
 An idle WebSocket is a socket wait. It does not hold the gate. The gate closes while a message from that socket is handled, and opens again when the handler returns to waiting for the next frame. An open socket would otherwise keep the sync thread paused for the whole connection.
 
-Print jobs are a queue of one. The worker takes the next job only after the current job finishes. Between pages it awaits `tokio::task::yield_now()`, so the accept loop can take a request that arrived mid-document. A job that is already printing keeps the core until the next yield; the sync thread does not start a new parse while the gate is closed.
+One print job runs at a time. Further jobs wait on the print channel (`PRINT_QUEUE_DEPTH`, 16). The worker takes the next job only after the current job finishes. Between pages it awaits `tokio::task::yield_now()`, so the accept loop can take a request that arrived mid-document. A job that is already printing keeps the core until the next yield; the sync thread does not start a new parse while the gate is closed. What the worker renders and how it submits to CUPS is [printing.md](printing.md).
 
 ## What runs when
 
@@ -105,16 +108,17 @@ Print jobs are a queue of one. The worker takes the next job only after the curr
 |---|---|---|
 | Local HTTP and WebSocket | The server thread handles the socket as soon as it is readable | Same thread. The handler runs to its next `.await` with no sync task on this thread |
 | Print | One job, yielding between pages | Owns the server thread until the next yield. The gate is closed |
-| Remote download | Up to two sockets in flight on the sync thread. CPU only between reads | The sync thread is runnable and loses the core. In-flight reads sit in the kernel until the server thread blocks again |
+| Remote download | Up to the compiled `SYNC_IN_FLIGHT` sockets in flight on the sync thread (default 100), shared with uploads. CPU only between reads | The sync thread is runnable and loses the core. In-flight reads sit in the kernel until the server thread blocks again |
 
 ## Rules that keep the core available
 
 - The server thread and the sync thread are separate current-thread runtimes.
 - HTTP and WebSocket share the server thread. An idle WebSocket does not hold the gate.
 - The sync thread runs at `nice` 15, set on that thread's tid.
-- At most two endpoint downloads are in flight. The client pool matches that cap.
+- The ready queue and the sockets share one cap: the compiled `SYNC_IN_FLIGHT` (default 100). `--sync-in-flight` replaces it for one process. The client pool matches that cap. Downloads of the same path stay in order. A download that is waiting to be sent takes a free socket ahead of an upload.
 - Response bodies are streamed. The process does not hold every endpoint's body at once.
 - The sync loop waits while a local request is in flight or a print job is running.
+- The same thread probes the remote base every five seconds. That request does not close the gate. [network-quality.md](network-quality.md) is how two samples become the green, yellow, or red corner signal, and the timeout login and the event list use.
 - One print job runs at a time, and it yields between pages.
 - A long computation on the server thread awaits between chunks. `spawn_blocking` is reserved for a library call that has no yield point, and the blocking pool size is 1.
 
@@ -128,7 +132,8 @@ src/registration_server/
   http.rs           HTTP routes and WebSocket
   grpc.rs           Registration service, compiled for tests only
   print_queue.rs    one job at a time, yield between pages
-  sync.rs           timer, two downloads in flight, parse one body at a time
+  sync.rs           event-sync queue: timer, compiled SYNC_IN_FLIGHT calls in flight (default 100), parse one body at a time
+  net.rs            remote probe every five seconds, link quality
   gate.rs           closes while a local call or a print job is in progress
   store.rs          local registrations, locked for one batch
 proto/irbis/registration/v1/registration.proto

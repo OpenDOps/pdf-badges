@@ -1,15 +1,26 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::http::header::{
     CACHE_CONTROL, CONTENT_LENGTH, CONTENT_TYPE, ETAG, IF_MODIFIED_SINCE, IF_NONE_MATCH,
-    LAST_MODIFIED,
+    LAST_MODIFIED, SET_COOKIE,
 };
-use axum::http::{Method, StatusCode};
+use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::Router;
+use axum::routing::{get, post};
+use axum::{Json, Router};
+use cookie::{Cookie, SameSite};
+use serde::Deserialize;
+use serde_json::json;
+
+use crate::registration_server::credentials::CredentialFile;
+use crate::registration_server::current::{base_dir, CurrentEvent};
+use crate::registration_server::net::Link;
+use crate::registration_server::remote::{OperatorSession, Remote, RemoteError};
 
 pub struct FileMeta {
     pub mtime_secs: u64,
@@ -135,41 +146,65 @@ fn file_meta(path: &Path) -> Option<FileMeta> {
 }
 
 async fn static_file(State(root): State<PathBuf>, request: Request) -> Response {
-    if request.method() != Method::GET && request.method() != Method::HEAD {
+    serve_public(&root, request).await
+}
+
+/// `GET` or `HEAD` for one file under `root`, with the same validators as [`admin_router`].
+pub(crate) async fn serve_public(root: &Path, request: Request) -> Response {
+    let method = request.method().clone();
+    if method != Method::GET && method != Method::HEAD {
         return StatusCode::METHOD_NOT_ALLOWED.into_response();
     }
-    let Some(path) = safe_public_file(&root, request.uri().path()) else {
+    let Some(path) = safe_public_file(root, request.uri().path()) else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    let Some(meta) = file_meta(&path) else {
+    let headers = request.headers().clone();
+    serve_file(&path, method, &headers).await
+}
+
+/// `index.html` for `/` and `/events`, with the same validators as any other file.
+pub(crate) async fn serve_index(root: &Path, request: Request) -> Response {
+    let method = request.method().clone();
+    if method != Method::GET && method != Method::HEAD {
+        return StatusCode::METHOD_NOT_ALLOWED.into_response();
+    }
+    let Some(path) = safe_public_file(root, "/index.html") else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let headers = request.headers().clone();
+    serve_file(&path, method, &headers).await
+}
+
+async fn serve_file(path: &Path, method: Method, headers: &HeaderMap) -> Response {
+    let Some(meta) = file_meta(path) else {
         return StatusCode::NOT_FOUND.into_response();
     };
     let tag = etag(meta.mtime_secs, meta.len);
     let modified = last_modified(meta.mtime_secs);
-    let if_none_match = request
-        .headers()
+    let if_none_match = headers
         .get(IF_NONE_MATCH)
         .and_then(|value| value.to_str().ok());
-    let if_modified_since = request
-        .headers()
+    let if_modified_since = headers
         .get(IF_MODIFIED_SINCE)
         .and_then(|value| value.to_str().ok());
     let freshness = conditional_get(&meta, if_none_match, if_modified_since);
+    let kind = content_type(path);
+    let len = meta.len.to_string();
     let mut response = Response::builder()
         .header(ETAG, tag)
         .header(LAST_MODIFIED, modified)
         .header(CACHE_CONTROL, "no-cache")
-        .header(CONTENT_TYPE, content_type(&path))
-        .header(CONTENT_LENGTH, meta.len.to_string());
+        .header(CONTENT_TYPE, kind)
+        .header(CONTENT_LENGTH, len);
     if matches!(freshness, Freshness::NotModified) {
         response = response.status(StatusCode::NOT_MODIFIED);
         return finish(response, Body::empty());
     }
     response = response.status(StatusCode::OK);
-    if request.method() == Method::HEAD {
+    if method == Method::HEAD {
         return finish(response, Body::empty());
     }
-    match tokio::fs::read(&path).await {
+    match tokio::fs::read(path).await {
         Ok(bytes) => finish(response, Body::from(bytes)),
         Err(_) => StatusCode::NOT_FOUND.into_response(),
     }
@@ -179,6 +214,436 @@ fn finish(response: axum::http::response::Builder, body: Body) -> Response {
     response
         .body(body)
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
+/// Operator half of the process: the credential file, the remote client, and
+/// the in-memory sessions. A failed login leaves the session map empty.
+#[derive(Clone)]
+pub struct OperatorState {
+    credentials: Arc<CredentialFile>,
+    remote: Remote,
+    sessions: Arc<Mutex<HashMap<String, OperatorLease>>>,
+    pub link: Arc<Link>,
+    session_ttl: Duration,
+    current: Arc<Mutex<CurrentEvent>>,
+}
+
+struct OperatorLease {
+    session: OperatorSession,
+    expires_at: Instant,
+}
+
+impl OperatorState {
+    pub fn new(credentials: CredentialFile, remote: Remote) -> Self {
+        let current = Arc::new(Mutex::new(CurrentEvent::new(base_dir(credentials.path()))));
+        Self {
+            credentials: Arc::new(credentials),
+            remote,
+            sessions: Arc::new(Mutex::new(HashMap::new())),
+            link: Arc::new(Link::new()),
+            session_ttl: OPERATOR_SESSION,
+            current,
+        }
+    }
+
+    /// How long an operator cookie stays valid without a session ping.
+    pub fn with_session_ttl(mut self, ttl: Duration) -> Self {
+        self.session_ttl = ttl;
+        self
+    }
+
+    /// Use the process probe, so `/api/network` and later remote calls share one reading.
+    pub fn with_link(mut self, link: Arc<Link>) -> Self {
+        self.link = link;
+        self
+    }
+
+    /// Share the process holder, so select and the sync thread open one event.
+    pub fn with_current(mut self, current: Arc<Mutex<CurrentEvent>>) -> Self {
+        self.current = current;
+        self
+    }
+
+    pub fn current(&self) -> &Arc<Mutex<CurrentEvent>> {
+        &self.current
+    }
+
+    pub fn credential_file(&self) -> &CredentialFile {
+        &self.credentials
+    }
+}
+
+/// JSON routes for the admin page. Static files stay on [`admin_router`].
+pub fn api_router(state: OperatorState) -> Router {
+    Router::new()
+        .route("/api/login", post(login))
+        .route("/api/events", get(events))
+        .route("/api/events/select", post(select_event))
+        .route("/api/session", post(session_ping))
+        .route("/api/binding", get(binding))
+        .route("/api/keys", get(keys).post(keys_later))
+        .route("/api/keys/print", post(keys_later))
+        .route("/api/network", get(network))
+        .with_state(state)
+}
+
+#[derive(Deserialize)]
+struct LoginBody {
+    login: String,
+    password: String,
+}
+
+async fn login(State(state): State<OperatorState>, body: axum::body::Bytes) -> Response {
+    let budget = state.link.budget();
+    let timeout_secs = budget.timeout_secs;
+    let Ok(parsed) = serde_json::from_slice::<LoginBody>(&body) else {
+        return login_failure(StatusCode::BAD_REQUEST, "bad_request", timeout_secs);
+    };
+    let login = parsed.login.trim();
+    let password = parsed.password.trim();
+    if login.is_empty() || password.is_empty() {
+        return login_failure(StatusCode::BAD_REQUEST, "bad_request", timeout_secs);
+    }
+    let login = login.to_string();
+    let password = password.to_string();
+
+    let device_id = match state.credentials.load() {
+        Ok(credentials) => credentials.device_id().unwrap_or("").to_string(),
+        Err(_) => {
+            log::debug!("login failed unknown_error");
+            return login_failure(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "unknown_error",
+                timeout_secs,
+            );
+        }
+    };
+    log::debug!("login start device_id={device_id} timeout={timeout_secs}s");
+    match state
+        .remote
+        .login_for(&device_id, &login, &password, budget.limit)
+        .await
+    {
+        Ok(session) => {
+            log::debug!("login ok");
+            login_ok(&state, session, timeout_secs)
+        }
+        Err(err) => {
+            log::debug!("login failed {err}");
+            login_error(err, timeout_secs)
+        }
+    }
+}
+
+async fn network(State(state): State<OperatorState>) -> Response {
+    (
+        StatusCode::OK,
+        Json(crate::registration_server::http::network_body(
+            &state.link.snapshot(),
+        )),
+    )
+        .into_response()
+}
+
+fn login_ok(state: &OperatorState, session: OperatorSession, timeout_secs: u64) -> Response {
+    let id = uuid::Uuid::new_v4().to_string();
+    {
+        let mut sessions = state.sessions.lock().unwrap_or_else(|err| err.into_inner());
+        sessions.clear();
+        sessions.insert(
+            id.clone(),
+            OperatorLease {
+                session,
+                expires_at: Instant::now() + state.session_ttl,
+            },
+        );
+    }
+    let cookie = Cookie::build((OPERATOR_COOKIE, id))
+        .http_only(true)
+        .same_site(SameSite::Lax)
+        .path("/")
+        .build()
+        .to_string();
+    (
+        StatusCode::OK,
+        [(SET_COOKIE, cookie)],
+        Json(json!({ "ok": true, "data": { "timeout_secs": timeout_secs } })),
+    )
+        .into_response()
+}
+
+async fn events(State(state): State<OperatorState>, headers: HeaderMap) -> Response {
+    let Some(session) = live_session(&state, &headers) else {
+        return api_error(StatusCode::UNAUTHORIZED, "session_expired");
+    };
+    match session
+        .list_events_within(1000, 0, state.link.budget().limit)
+        .await
+    {
+        Ok(list) => {
+            log::debug!("events count={}", list.len());
+            let current = current_event(&state.credentials);
+            api_ok(json!({
+                "current": current,
+                "events": list
+                    .into_iter()
+                    .map(|event| json!({
+                        "id": event.unique_id,
+                        "name": event.name,
+                    }))
+                    .collect::<Vec<_>>(),
+            }))
+        }
+        Err(RemoteError::SessionExpired) => {
+            log::debug!("events failed session_expired");
+            drop_session(&state, &headers);
+            api_error(StatusCode::UNAUTHORIZED, "session_expired")
+        }
+        Err(RemoteError::InProgress) => {
+            log::debug!("events failed in_progress");
+            api_error(StatusCode::TOO_MANY_REQUESTS, "in_progress")
+        }
+        Err(err) => {
+            log::debug!("events failed {err}");
+            let (status, code) = remote_status(&err);
+            api_error(status, code)
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct SelectBody {
+    id: String,
+    name: String,
+}
+
+async fn select_event(
+    State(state): State<OperatorState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let budget = state.link.budget();
+    let timeout_secs = budget.timeout_secs;
+    let Ok(parsed) = serde_json::from_slice::<SelectBody>(&body) else {
+        return select_failure(StatusCode::BAD_REQUEST, "bad_request", timeout_secs);
+    };
+    let id = parsed.id.trim();
+    if rejected_event_id(id) {
+        return select_failure(StatusCode::BAD_REQUEST, "bad_request", timeout_secs);
+    }
+    let id = id.to_string();
+    let name = parsed.name.trim().to_string();
+    let stored_name = if name.is_empty() {
+        None
+    } else {
+        Some(name.clone())
+    };
+
+    let Some(session) = live_session(&state, &headers) else {
+        return select_failure(StatusCode::UNAUTHORIZED, "session_expired", timeout_secs);
+    };
+    match session
+        .bind_within(&state.credentials, &id, stored_name, budget.limit)
+        .await
+    {
+        Ok(()) => {
+            log::debug!("select {id} stored");
+            if let Err(err) = CurrentEvent::lock(&state.current).switch_to(&id) {
+                log::debug!("select {id} switch failed {err}");
+                return select_failure(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "unknown_error",
+                    timeout_secs,
+                );
+            }
+            api_ok(json!({
+                "id": id,
+                "name": name,
+                "token_stored": true,
+                "timeout_secs": timeout_secs,
+            }))
+        }
+        Err(RemoteError::SessionExpired) => {
+            log::debug!("select {id} failed session_expired");
+            drop_session(&state, &headers);
+            select_failure(StatusCode::UNAUTHORIZED, "session_expired", timeout_secs)
+        }
+        Err(RemoteError::InProgress) => {
+            log::debug!("select {id} failed select_in_progress");
+            select_failure(
+                StatusCode::TOO_MANY_REQUESTS,
+                "select_in_progress",
+                timeout_secs,
+            )
+        }
+        Err(err) => {
+            log::debug!("select {id} failed {err}");
+            let (status, code) = remote_status(&err);
+            select_failure(status, code, timeout_secs)
+        }
+    }
+}
+
+fn rejected_event_id(id: &str) -> bool {
+    id.is_empty()
+        || id == "."
+        || id == ".."
+        || id.contains('/')
+        || id.contains('\\')
+        || id.contains('\0')
+}
+
+fn select_failure(status: StatusCode, code: &'static str, timeout_secs: u64) -> Response {
+    (
+        status,
+        Json(json!({
+            "ok": false,
+            "error": { "code": code },
+            "timeout_secs": timeout_secs,
+        })),
+    )
+        .into_response()
+}
+
+async fn session_ping(State(state): State<OperatorState>, headers: HeaderMap) -> Response {
+    if !touch_session(&state, &headers) {
+        return api_error(StatusCode::UNAUTHORIZED, "session_expired");
+    }
+    api_ok(json!({}))
+}
+
+async fn binding(State(state): State<OperatorState>) -> Response {
+    let Ok(credentials) = state.credentials.load() else {
+        return api_error(StatusCode::INTERNAL_SERVER_ERROR, "unknown_error");
+    };
+    api_ok(json!({
+        "id": credentials.event_id(),
+        "name": credentials.event_name(),
+        "token_stored": credentials.project_token().is_some(),
+    }))
+}
+
+async fn keys() -> Response {
+    api_ok(json!([]))
+}
+
+async fn keys_later() -> Response {
+    (
+        StatusCode::NOT_IMPLEMENTED,
+        Json(json!({
+            "ok": false,
+            "error": { "code": "keys_later" }
+        })),
+    )
+        .into_response()
+}
+
+const OPERATOR_SESSION: Duration = Duration::from_secs(60);
+
+fn live_session(state: &OperatorState, headers: &HeaderMap) -> Option<OperatorSession> {
+    let id = cookie_value(headers, OPERATOR_COOKIE)?;
+    let mut sessions = state.sessions.lock().unwrap_or_else(|err| err.into_inner());
+    let lease = sessions.get(&id)?;
+    if Instant::now() >= lease.expires_at {
+        sessions.remove(&id);
+        return None;
+    }
+    Some(lease.session.clone())
+}
+
+fn touch_session(state: &OperatorState, headers: &HeaderMap) -> bool {
+    let Some(id) = cookie_value(headers, OPERATOR_COOKIE) else {
+        return false;
+    };
+    let mut sessions = state.sessions.lock().unwrap_or_else(|err| err.into_inner());
+    let Some(lease) = sessions.get_mut(&id) else {
+        return false;
+    };
+    if Instant::now() >= lease.expires_at {
+        sessions.remove(&id);
+        return false;
+    }
+    lease.expires_at = Instant::now() + state.session_ttl;
+    true
+}
+
+fn drop_session(state: &OperatorState, headers: &HeaderMap) {
+    let Some(id) = cookie_value(headers, OPERATOR_COOKIE) else {
+        return;
+    };
+    let mut sessions = state.sessions.lock().unwrap_or_else(|err| err.into_inner());
+    sessions.remove(&id);
+}
+
+fn current_event(file: &CredentialFile) -> serde_json::Value {
+    let Ok(credentials) = file.load() else {
+        return serde_json::Value::Null;
+    };
+    let Some(id) = credentials.event_id() else {
+        return serde_json::Value::Null;
+    };
+    json!({
+        "id": id,
+        "name": credentials.event_name().unwrap_or(""),
+    })
+}
+
+fn api_ok(data: serde_json::Value) -> Response {
+    (StatusCode::OK, Json(json!({ "ok": true, "data": data }))).into_response()
+}
+
+const OPERATOR_COOKIE: &str = "operator";
+
+fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
+    let raw = headers.get(axum::http::header::COOKIE)?.to_str().ok()?;
+    raw.split(';').find_map(|part| {
+        let (key, value) = part.trim().split_once('=')?;
+        (key == name).then(|| value.trim().to_string())
+    })
+}
+
+fn login_error(err: RemoteError, timeout_secs: u64) -> Response {
+    if matches!(err, RemoteError::InProgress) {
+        return login_failure(
+            StatusCode::TOO_MANY_REQUESTS,
+            "login_in_progress",
+            timeout_secs,
+        );
+    }
+    let (status, code) = remote_status(&err);
+    login_failure(status, code, timeout_secs)
+}
+
+fn login_failure(status: StatusCode, code: &'static str, timeout_secs: u64) -> Response {
+    (
+        status,
+        Json(json!({
+            "ok": false,
+            "error": { "code": code },
+            "timeout_secs": timeout_secs,
+        })),
+    )
+        .into_response()
+}
+
+fn remote_status(err: &RemoteError) -> (StatusCode, &'static str) {
+    match err {
+        RemoteError::NoDeviceId => (StatusCode::BAD_REQUEST, "no_device_id"),
+        RemoteError::InvalidCred => (StatusCode::UNAUTHORIZED, "invalid_cred"),
+        RemoteError::NoConnection => (StatusCode::BAD_GATEWAY, "no_connection"),
+        _ => (StatusCode::INTERNAL_SERVER_ERROR, "unknown_error"),
+    }
+}
+
+fn api_error(status: StatusCode, code: &'static str) -> Response {
+    (
+        status,
+        Json(json!({
+            "ok": false,
+            "error": { "code": code }
+        })),
+    )
+        .into_response()
 }
 
 #[cfg(test)]
@@ -394,7 +859,13 @@ mod tests {
         async fn static_revalidate_304() {
             let (_parent, root) = tree();
             let first = call(&root, get("/assets/app.js")).await;
-            let tag = first.headers().get(ETAG).unwrap().to_str().unwrap().to_string();
+            let tag = first
+                .headers()
+                .get(ETAG)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_string();
             let request = Request::builder()
                 .uri("/assets/app.js")
                 .header(IF_NONE_MATCH, tag)

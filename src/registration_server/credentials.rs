@@ -11,21 +11,21 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 /// File name under the device base directory.
-pub const FILE_NAME: &str = "credentials.json";
+pub const FILE_NAME: &str = "credentials.yml";
 
 const VERSION: u32 = 1;
 
 /// In-memory credential document.
 ///
-/// Logged in means both the exhibition id and the project token are set.
-/// Empty strings are unset. The exhibition id and the project token are
+/// Logged in means both the event id and the project token are set.
+/// Empty strings are unset. The event id and the project token are
 /// stored together.
 #[derive(Clone, PartialEq, Eq, Default)]
 pub struct Credentials {
     device_id: Option<String>,
     base_url: Option<String>,
-    expo_id: Option<String>,
-    expo_name: Option<String>,
+    event_id: Option<String>,
+    event_name: Option<String>,
     project_token: Option<String>,
 }
 
@@ -34,8 +34,8 @@ impl std::fmt::Debug for Credentials {
         f.debug_struct("Credentials")
             .field("device_id", &self.device_id)
             .field("base_url", &self.base_url)
-            .field("expo_id", &self.expo_id)
-            .field("expo_name", &self.expo_name)
+            .field("event_id", &self.event_id)
+            .field("event_name", &self.event_name)
             .field("project_token", &self.project_token.as_ref().map(|_| "set"))
             .finish()
     }
@@ -50,12 +50,12 @@ impl Credentials {
         self.base_url.as_deref()
     }
 
-    pub fn expo_id(&self) -> Option<&str> {
-        self.expo_id.as_deref()
+    pub fn event_id(&self) -> Option<&str> {
+        self.event_id.as_deref()
     }
 
-    pub fn expo_name(&self) -> Option<&str> {
-        self.expo_name.as_deref()
+    pub fn event_name(&self) -> Option<&str> {
+        self.event_name.as_deref()
     }
 
     pub fn project_token(&self) -> Option<&str> {
@@ -63,7 +63,7 @@ impl Credentials {
     }
 
     pub fn is_logged_in(&self) -> bool {
-        self.expo_id.is_some() && self.project_token.is_some()
+        self.event_id.is_some() && self.project_token.is_some()
     }
 
     pub fn set_device_id(&mut self, id: impl Into<String>) -> Result<(), CredentialError> {
@@ -76,32 +76,32 @@ impl Credentials {
         Ok(())
     }
 
-    /// Record the exhibition chosen at bind.
+    /// Record the event chosen at bind.
     ///
-    /// `expo_name` is the display label. Pass `None` when the bind response
+    /// `event_name` is the display label. Pass `None` when the bind response
     /// has no name.
     pub fn bind(
         &mut self,
-        expo_id: impl Into<String>,
+        event_id: impl Into<String>,
         project_token: impl Into<String>,
-        expo_name: Option<String>,
+        event_name: Option<String>,
     ) -> Result<(), CredentialError> {
-        let expo_id = require_text("expo_id", expo_id.into())?;
+        let event_id = require_text("event_id", event_id.into())?;
         let project_token = require_text("project_token", project_token.into())?;
-        let expo_name = match expo_name {
-            Some(name) => Some(require_text("expo_name", name)?),
+        let event_name = match event_name {
+            Some(name) => Some(require_text("event_name", name)?),
             None => None,
         };
-        self.expo_id = Some(expo_id);
+        self.event_id = Some(event_id);
         self.project_token = Some(project_token);
-        self.expo_name = expo_name;
+        self.event_name = event_name;
         Ok(())
     }
 
-    /// Remove the exhibition id, its name, and the project token.
+    /// Remove the event id, its name, and the project token.
     pub fn clear_binding(&mut self) {
-        self.expo_id = None;
-        self.expo_name = None;
+        self.event_id = None;
+        self.event_name = None;
         self.project_token = None;
     }
 }
@@ -219,16 +219,55 @@ impl CredentialFile {
 #[derive(Serialize, Deserialize)]
 struct Document {
     version: u32,
-    #[serde(default)]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "flexible_string"
+    )]
     device_id: Option<String>,
-    #[serde(default)]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "flexible_string"
+    )]
     base_url: Option<String>,
-    #[serde(default)]
-    expo_id: Option<String>,
-    #[serde(default)]
-    expo_name: Option<String>,
-    #[serde(default)]
+    #[serde(
+        default,
+        alias = "expo_id",
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "flexible_string"
+    )]
+    event_id: Option<String>,
+    #[serde(
+        default,
+        alias = "expo_name",
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "flexible_string"
+    )]
+    event_name: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "flexible_string"
+    )]
     project_token: Option<String>,
+}
+
+/// A YAML scalar may be a string or a bare number. Both become text.
+fn flexible_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_yaml::Value>::deserialize(deserializer)?;
+    match value.unwrap_or(serde_yaml::Value::Null) {
+        serde_yaml::Value::Null => Ok(None),
+        serde_yaml::Value::String(text) => Ok(Some(text)),
+        serde_yaml::Value::Number(number) => Ok(Some(number.to_string())),
+        serde_yaml::Value::Bool(flag) => Ok(Some(flag.to_string())),
+        _ => Err(serde::de::Error::custom(
+            "credential field must be a string",
+        )),
+    }
 }
 
 impl From<&Credentials> for Document {
@@ -237,8 +276,8 @@ impl From<&Credentials> for Document {
             version: VERSION,
             device_id: credentials.device_id.clone(),
             base_url: credentials.base_url.clone(),
-            expo_id: credentials.expo_id.clone(),
-            expo_name: credentials.expo_name.clone(),
+            event_id: credentials.event_id.clone(),
+            event_name: credentials.event_name.clone(),
             project_token: credentials.project_token.clone(),
         }
     }
@@ -261,27 +300,36 @@ fn load_path(path: &Path) -> Result<Credentials, CredentialError> {
     if text.is_empty() {
         return Ok(Credentials::default());
     }
-    if text.starts_with('{') {
-        parse_json(path, text)
+    if is_yaml_document(text) {
+        parse_yaml(path, text)
     } else {
         parse_properties(path, text)
     }
 }
 
-fn store_path(path: &Path, credentials: &Credentials) -> Result<(), CredentialError> {
-    let document = Document::from(credentials);
-    let mut bytes =
-        serde_json::to_vec_pretty(&document).map_err(|err| CredentialError::Corrupt {
-            path: path.to_path_buf(),
-            detail: format!("could not encode credentials: {err}"),
-        })?;
-    bytes.push(b'\n');
-    replace_file(path, &bytes)
+fn is_yaml_document(text: &str) -> bool {
+    let Some(line) = text.lines().find(|line| !line.trim().is_empty()) else {
+        return false;
+    };
+    let line = line.trim();
+    line.starts_with("---") || line.starts_with("version:") || line.starts_with('{')
 }
 
-fn parse_json(path: &Path, text: &str) -> Result<Credentials, CredentialError> {
+fn store_path(path: &Path, credentials: &Credentials) -> Result<(), CredentialError> {
+    let document = Document::from(credentials);
+    let mut text = serde_yaml::to_string(&document).map_err(|err| CredentialError::Corrupt {
+        path: path.to_path_buf(),
+        detail: format!("could not encode credentials: {err}"),
+    })?;
+    if !text.ends_with('\n') {
+        text.push('\n');
+    }
+    replace_file(path, text.as_bytes())
+}
+
+fn parse_yaml(path: &Path, text: &str) -> Result<Credentials, CredentialError> {
     let document: Document =
-        serde_json::from_str(text).map_err(|err| CredentialError::Corrupt {
+        serde_yaml::from_str(text).map_err(|err| CredentialError::Corrupt {
             path: path.to_path_buf(),
             detail: err.to_string(),
         })?;
@@ -295,8 +343,8 @@ fn parse_json(path: &Path, text: &str) -> Result<Credentials, CredentialError> {
         path,
         document.device_id,
         document.base_url,
-        document.expo_id,
-        document.expo_name,
+        document.event_id,
+        document.event_name,
         document.project_token,
     )
 }
@@ -304,8 +352,8 @@ fn parse_json(path: &Path, text: &str) -> Result<Credentials, CredentialError> {
 fn parse_properties(path: &Path, text: &str) -> Result<Credentials, CredentialError> {
     let mut device_id = None;
     let mut base_url = None;
-    let mut expo_id = None;
-    let mut expo_name = None;
+    let mut event_id = None;
+    let mut event_name = None;
     let mut project_token = None;
     for line in logical_lines(text) {
         let Some((key, value)) = parse_entry(path, &line)? else {
@@ -314,31 +362,38 @@ fn parse_properties(path: &Path, text: &str) -> Result<Credentials, CredentialEr
         match key.as_str() {
             "device_id" => device_id = Some(value),
             "base_url" => base_url = Some(value),
-            "current_expo_uid" => expo_id = Some(value),
-            "current_expo_name" => expo_name = Some(value),
+            "current_expo_uid" => event_id = Some(value),
+            "current_expo_name" => event_name = Some(value),
             "curentr_expo_token" | "project_token" => project_token = Some(value),
             _ => {}
         }
     }
-    from_parts(path, device_id, base_url, expo_id, expo_name, project_token)
+    from_parts(
+        path,
+        device_id,
+        base_url,
+        event_id,
+        event_name,
+        project_token,
+    )
 }
 
 fn from_parts(
     path: &Path,
     device_id: Option<String>,
     base_url: Option<String>,
-    expo_id: Option<String>,
-    expo_name: Option<String>,
+    event_id: Option<String>,
+    event_name: Option<String>,
     project_token: Option<String>,
 ) -> Result<Credentials, CredentialError> {
     let device_id = blank_to_none(device_id);
     let base_url = blank_to_none(base_url);
-    let expo_id = blank_to_none(expo_id);
-    let mut expo_name = blank_to_none(expo_name);
+    let event_id = blank_to_none(event_id);
+    let mut event_name = blank_to_none(event_name);
     let project_token = blank_to_none(project_token);
-    match (&expo_id, &project_token) {
+    match (&event_id, &project_token) {
         (Some(_), Some(_)) => {}
-        (None, None) => expo_name = None,
+        (None, None) => event_name = None,
         (Some(_), None) => {
             return Err(CredentialError::IncompleteBinding {
                 path: path.to_path_buf(),
@@ -348,15 +403,15 @@ fn from_parts(
         (None, Some(_)) => {
             return Err(CredentialError::IncompleteBinding {
                 path: path.to_path_buf(),
-                missing: "expo_id",
+                missing: "event_id",
             });
         }
     }
     Ok(Credentials {
         device_id,
         base_url,
-        expo_id,
-        expo_name,
+        event_id,
+        event_name,
         project_token,
     })
 }
@@ -623,7 +678,7 @@ mod tests {
         credentials.set_device_id("device-1").unwrap();
         credentials.set_base_url("http://kuprin.su/").unwrap();
         credentials
-            .bind("5245081", "token-value", Some("Выставка".into()))
+            .bind("5245081", "token-value", Some("Мероприятие".into()))
             .unwrap();
         credentials
     }
@@ -647,7 +702,7 @@ mod tests {
         ));
         assert!(matches!(
             credentials.bind("  ", "token", None),
-            Err(CredentialError::EmptyField("expo_id"))
+            Err(CredentialError::EmptyField("event_id"))
         ));
         assert_eq!(credentials.device_id(), Some("device-1"));
         assert_eq!(credentials.project_token(), Some("token-value"));
@@ -661,8 +716,8 @@ mod tests {
         assert!(!credentials.is_logged_in());
         assert_eq!(credentials.device_id(), Some("device-1"));
         assert_eq!(credentials.base_url(), Some("http://kuprin.su/"));
-        assert_eq!(credentials.expo_id(), None);
-        assert_eq!(credentials.expo_name(), None);
+        assert_eq!(credentials.event_id(), None);
+        assert_eq!(credentials.event_name(), None);
         assert_eq!(credentials.project_token(), None);
     }
 
@@ -684,8 +739,8 @@ mod tests {
         assert_eq!(CredentialFile::new(&path).load().unwrap(), credentials);
 
         let text = fs::read_to_string(&path).unwrap();
-        assert!(text.contains("\"version\": 1"));
-        assert!(text.contains("Выставка"));
+        assert!(text.contains("version: 1"));
+        assert!(text.contains("Мероприятие"));
         assert!(!text.contains("curentr_expo_token"));
         #[cfg(unix)]
         {
@@ -706,20 +761,44 @@ mod tests {
         let path = scratch.path().join(FILE_NAME);
         fs::write(
             &path,
-            r#"{"version":1,"device_id":"device-1","base_url":"http://kuprin.su/","expo_id":"","expo_name":"","project_token":""}"#,
+            "version: 1\n\
+             device_id: device-1\n\
+             base_url: \"http://kuprin.su/\"\n\
+             event_id: \"\"\n\
+             event_name: \"\"\n\
+             project_token: \"\"\n",
         )
         .unwrap();
         let loaded = CredentialFile::new(&path).load().unwrap();
         assert!(!loaded.is_logged_in());
         assert_eq!(loaded.device_id(), Some("device-1"));
-        assert_eq!(loaded.expo_name(), None);
+        assert_eq!(loaded.event_name(), None);
+    }
+
+    #[test]
+    fn old_field_names_load_as_event_fields() {
+        let scratch = Scratch::new();
+        let path = scratch.path().join(FILE_NAME);
+        fs::write(
+            &path,
+            "version: 1\n\
+             device_id: device-1\n\
+             expo_id: \"5245081\"\n\
+             expo_name: TechCrunch\n\
+             project_token: token-value\n",
+        )
+        .unwrap();
+        let loaded = CredentialFile::new(&path).load().unwrap();
+        assert_eq!(loaded.event_id(), Some("5245081"));
+        assert_eq!(loaded.event_name(), Some("TechCrunch"));
+        assert!(loaded.is_logged_in());
     }
 
     #[test]
     fn incomplete_binding_is_not_replaced() {
         let scratch = Scratch::new();
         let path = scratch.path().join(FILE_NAME);
-        let original = r#"{"version":1,"expo_id":"5245081","project_token":null}"#;
+        let original = "version: 1\nevent_id: \"5245081\"\nproject_token: null\n";
         fs::write(&path, original).unwrap();
         let file = CredentialFile::new(&path);
         let err = file
@@ -739,33 +818,30 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_version_and_truncated_json_stay_on_disk() {
+    fn unsupported_version_and_truncated_yaml_stay_on_disk() {
         let scratch = Scratch::new();
-        let version_path = scratch.path().join("version.json");
-        fs::write(&version_path, r#"{"version":2}"#).unwrap();
+        let version_path = scratch.path().join("version.yml");
+        fs::write(&version_path, "version: 2\n").unwrap();
         let err = CredentialFile::new(&version_path).load().unwrap_err();
         assert!(matches!(
             err,
             CredentialError::UnsupportedVersion { version: 2, .. }
         ));
-        assert_eq!(
-            fs::read_to_string(&version_path).unwrap(),
-            r#"{"version":2}"#
-        );
+        assert_eq!(fs::read_to_string(&version_path).unwrap(), "version: 2\n");
 
-        let truncated = scratch.path().join("truncated.json");
-        fs::write(&truncated, "{").unwrap();
+        let truncated = scratch.path().join("truncated.yml");
+        fs::write(&truncated, "version: [\n").unwrap();
         let file = CredentialFile::new(&truncated);
         assert!(matches!(
             file.load().unwrap_err(),
             CredentialError::Corrupt { .. }
         ));
         file.update(|_| Ok(())).unwrap_err();
-        assert_eq!(fs::read_to_string(&truncated).unwrap(), "{");
+        assert_eq!(fs::read_to_string(&truncated).unwrap(), "version: [\n");
     }
 
     #[test]
-    fn scala_properties_import_then_json_store() {
+    fn scala_properties_import_then_yaml_store() {
         let scratch = Scratch::new();
         let legacy = scratch.path().join("main.props");
         fs::write(
@@ -783,8 +859,8 @@ mod tests {
         let loaded = CredentialFile::new(&legacy).load().unwrap();
         assert!(loaded.is_logged_in());
         assert_eq!(loaded.device_id(), Some("device-1"));
-        assert_eq!(loaded.expo_id(), Some("5245081"));
-        assert_eq!(loaded.expo_name(), Some("TechФ"));
+        assert_eq!(loaded.event_id(), Some("5245081"));
+        assert_eq!(loaded.event_name(), Some("TechФ"));
         assert_eq!(loaded.project_token(), Some("abcd"));
         assert!(fs::read_to_string(&legacy)
             .unwrap()
@@ -793,8 +869,9 @@ mod tests {
         let path = scratch.path().join(FILE_NAME);
         CredentialFile::new(&path).store(&loaded).unwrap();
         let text = fs::read_to_string(&path).unwrap();
-        assert!(text.starts_with('{'));
-        assert!(text.contains("\"project_token\": \"abcd\""));
+        assert!(text.contains("version: 1"));
+        assert!(text.contains("project_token:"));
+        assert!(text.contains("abcd"));
         assert!(!text.contains("curentr_expo_token"));
         assert!(fs::read_to_string(&legacy)
             .unwrap()
@@ -823,11 +900,7 @@ mod tests {
         file.store(&first).unwrap();
         let previous = fs::read(&path).unwrap();
 
-        fs::write(
-            scratch.path().join("credentials.json.tmp-crash"),
-            "{partial",
-        )
-        .unwrap();
+        fs::write(scratch.path().join("credentials.yml.tmp-crash"), "{partial").unwrap();
         assert_eq!(file.load().unwrap(), first);
 
         let mut perms = fs::metadata(scratch.path()).unwrap().permissions();

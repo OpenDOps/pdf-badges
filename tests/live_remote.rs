@@ -6,8 +6,8 @@
 //! cargo test --test live_remote -- --email you@example.com --password secret --device-id device-1
 //! ```
 //!
-//! `--expo` also calls `profile/synchdev` and writes the project token. That
-//! attaches this device id to that exhibition on the remote server.
+//! `--event` also calls `profile/synchdev` and writes the project token. That
+//! attaches this device id to that event on the remote server.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -43,15 +43,15 @@ struct LiveArgs {
     #[arg(long, default_value_t = 0)]
     skip: u64,
 
-    /// Exhibition id to bind. Omit this to only log in and list.
+    /// Event id to bind. Omit this to only log in and list.
     #[arg(long)]
-    expo: Option<String>,
+    event: Option<String>,
 
-    /// Display name stored with --expo
+    /// Display name stored with --event
     #[arg(long)]
-    expo_name: Option<String>,
+    event_name: Option<String>,
 
-    /// Credential file written when --expo is set
+    /// Credential file written when --event is set
     #[arg(long)]
     out: Option<PathBuf>,
 }
@@ -62,7 +62,7 @@ async fn main() -> ExitCode {
     if args.email.is_none()
         && args.password.is_none()
         && args.device_id.is_none()
-        && args.expo.is_none()
+        && args.event.is_none()
     {
         println!(
             "live remote skipped. To call the server:\n  cargo test --test live_remote -- --email EMAIL --password PASSWORD --device-id DEVICE"
@@ -76,8 +76,8 @@ async fn main() -> ExitCode {
         eprintln!("--email, --password, and --device-id are required together");
         return ExitCode::FAILURE;
     };
-    if args.expo.is_some() && args.out.is_none() {
-        eprintln!("--expo writes a project token; pass --out path/to/credentials.json");
+    if args.event.is_some() && args.out.is_none() {
+        eprintln!("--event writes a project token; pass --out path/to/credentials.yml");
         return ExitCode::FAILURE;
     }
 
@@ -106,34 +106,37 @@ async fn main() -> ExitCode {
     };
     println!("logged in as {email} for device {device_id}");
 
-    let exhibitions = match session.list_exhibitions(args.limit, args.skip).await {
-        Ok(exhibitions) => exhibitions,
+    let events = match session.list_events(args.limit, args.skip).await {
+        Ok(events) => events,
         Err(err) => {
             eprintln!("list failed: {err}");
             return ExitCode::FAILURE;
         }
     };
-    println!("{} exhibitions", exhibitions.len());
-    for exhibition in &exhibitions {
-        if exhibition.name.is_empty() {
-            println!("  {}", exhibition.unique_id);
+    println!("{} events", events.len());
+    for event in &events {
+        if event.name.is_empty() {
+            println!("  {}", event.unique_id);
         } else {
-            println!("  {}  {}", exhibition.unique_id, exhibition.name);
+            println!("  {}  {}", event.unique_id, event.name);
         }
     }
 
-    let Some(expo_id) = args.expo else {
+    let Some(event_id) = args.event else {
         return ExitCode::SUCCESS;
     };
-    let out = args.out.expect("--out is required with --expo");
+    let out = args.out.expect("--out is required with --event");
     let file = CredentialFile::new(&out);
-    if let Err(err) = session.bind(&file, &expo_id, args.expo_name).await {
+    if let Err(err) = session.bind(&file, &event_id, args.event_name).await {
         eprintln!("bind failed: {err}");
         return ExitCode::FAILURE;
     }
     match file.load() {
         Ok(stored) if stored.is_logged_in() => {
-            println!("bound {expo_id}; project token stored in {}", out.display());
+            println!(
+                "bound {event_id}; project token stored in {}",
+                out.display()
+            );
             ExitCode::SUCCESS
         }
         Ok(_) => {

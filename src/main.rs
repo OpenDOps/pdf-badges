@@ -119,9 +119,29 @@ struct RegistrationServerArgs {
     #[arg(long, default_value_t = 60)]
     sync_every: u64,
 
+    /// Remote calls that may wait on a response at once. Replaces the compiled SYNC_IN_FLIGHT for this process
+    #[arg(long, default_value_t = rust_reg::registration_server::SYNC_IN_FLIGHT)]
+    sync_in_flight: usize,
+
     /// Remote endpoint to download. Repeat for each endpoint.
     #[arg(long = "endpoint")]
     endpoint: Vec<String>,
+
+    /// Built admin files (`npm run build` in registration-admin)
+    #[arg(long, default_value = "registration-admin/dist")]
+    dist: PathBuf,
+
+    /// Credential document
+    #[arg(long, default_value = "credentials.yml")]
+    credentials: PathBuf,
+
+    /// Debug lines for HTTP, login, events, select, sync, and print
+    #[arg(long)]
+    debug: bool,
+
+    /// Log every ping of the internet server. Separate from --debug
+    #[arg(long)]
+    debug_ping: bool,
 }
 
 fn registration_server_cli() -> Result<(), Box<dyn std::error::Error>> {
@@ -136,12 +156,21 @@ fn registration_server_cli() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("sync interval must be greater than zero");
         std::process::exit(1);
     }
+    if args.sync_in_flight == 0 {
+        eprintln!("sync in flight must be greater than zero");
+        std::process::exit(1);
+    }
     let remote_base = rust_reg::registration_server::remote_base_from_env()?;
     let config = rust_reg::registration_server::Config {
         http_listen: args.http.parse()?,
         endpoints: args.endpoint,
         sync_interval: std::time::Duration::from_secs(args.sync_every),
+        sync_in_flight: args.sync_in_flight,
         remote_base: remote_base.into(),
+        dist: args.dist,
+        credentials_path: args.credentials,
+        debug: args.debug,
+        debug_ping: args.debug_ping,
     };
     rust_reg::registration_server::run(config).map_err(|err| err.to_string())?;
     Ok(())
