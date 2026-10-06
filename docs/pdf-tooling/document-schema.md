@@ -144,9 +144,22 @@ There is no separate slug area: the media box is the bleed box. `CropBox` is wri
 
 ### Identity
 
-Every text box and every image placement has `id`. The extractor assigns `p{page}-t{n}` and `p{page}-i{n}` in reading order. The editor preserves ids when the user moves or scales a box. New boxes created in the editor get a new id; ids are not reused.
+Every text box, image placement, barcode, and photo has `id`. The extractor assigns `p{page}-t{n}` and `p{page}-i{n}` in reading order. The editor preserves ids when the user moves or scales a box. New boxes created in the editor get a new id; ids are not reused.
 
 The automatic tool addresses a text box only by `id`. It does not match on coordinates or on the extracted string.
+
+A content entry is one of four objects. `text` is a text box. `image` is an image placement. `barcode` is a symbol, including a QR code. `photo` is a visitor image supplied with the row. An entry has one of those keys. Zero or two of them is invalid.
+
+### Condition
+
+`ifSt` sits on the entry, next to the rectangle. It is the same rule as a badge area's `ifSt`.
+
+| Value | Draw |
+|---|---|
+| Absent, or an empty string | Yes |
+| Any other string | Only when the row's value for that key is present and is not empty, `false`, or `0` |
+
+The string is a key in the row, not a mustache hole. It is not scanned, and it is not listed as a template field. A page drawn with no row treats a non-empty `ifSt` as missing, so that entry is skipped. Text, image, barcode, and photo all use this field.
 
 ### Target text box
 
@@ -201,8 +214,9 @@ Lengths on the page (`posX`, `posY`, `width`, `height`, `padding`, `font_size`, 
 | `preentered` | Text extracted from the PDF, or the authored string. Kept so a fill can be reverted. |
 | `content` | Text written by the automatic tool or a later editor. Render `content` when it is a string, including an empty string. Render `preentered` when `content` is null or absent. |
 | `auto_scale` | Optional, on the rectangle, not inside `text`. Absent or `false` leaves every font size as authored. `true` asks the writer to shrink font sizes so the text bounds fit this box. The card box sets it `true` and uses long paragraphs so the authored size overflows. The scale rules are [Fit text to the rectangle](json-to-pdf.md#fit-text-to-the-rectangle). |
-| `template` | Optional. Absent or `false` copies the box as written. `true` scans the string the writer paints (`content` when it is a string, otherwise `preentered`) for fields wrapped by `delimiters`. Only a text box may set it. |
-| `delimiters` | Optional. Used when `template` is true. `open` and `close` are the strings that wrap a field name. Absent means `{{` and `}}`. When the key is present, both sides are required non-empty strings. They are matched as written. One box has one pair. Two boxes on a page may use different pairs. A `delimiters` key without `template: true`, or on an image placement, is invalid. |
+| `template` | Optional. Absent or `false` copies the box as written. `true` scans the string the writer paints (`content` when it is a string, otherwise `preentered`) for fields wrapped by `delimiters`. A text box or a barcode may set it. An image placement or a photo may not. |
+| `delimiters` | Optional. Used when `template` is true. `open` and `close` are the strings that wrap a field name. Absent means `{{` and `}}`. When the key is present, both sides are required non-empty strings. They are matched as written. One box has one pair. Two boxes on a page may use different pairs. A `delimiters` key without `template: true`, or on an image placement or a photo, is invalid. A barcode uses the same rule as a text box. |
+| `ifSt` | Optional, on every content entry. See [Condition](#condition). |
 
 The content box is the frame inset by padding:
 
@@ -334,6 +348,51 @@ The rectangle is the source of truth after any edit. `transformation_matrix` is 
 
 Moving a placement changes `posX` and `posY`. Scaling changes `width` and `height`, and the opposite edges when the dragged handle is not the bottom-right.
 
+### Barcode
+
+A barcode is a content entry. QR is the type `qr`. The payload is a string with the same `template`, `delimiters`, `preentered`, and `content` rules as a text box. `template` defaults to false, so a fixed code is drawn as written.
+
+```yaml
+id: ticket-code
+posX: 10
+posY: 90
+width: 50
+height: 16
+ifSt: possiblecat
+barcode:
+  type: ean13                 # ean13 | code128 | qr
+  template: true
+  preentered: "{{code}}"
+  content: null
+```
+
+| Field | Meaning |
+|---|---|
+| `type` | `ean13`, `code128`, or `qr`. Anything else is invalid and names the entry `id`. |
+| `template`, `delimiters`, `preentered`, `content` | Same as a text box. The string that is drawn is `content` when it is a string, otherwise `preentered`. A template string is filled from the row before the symbol is drawn. |
+| Rectangle | The symbol is scaled into `posX`, `posY`, `width`, `height`. EAN-13 keeps its quiet zones inside that rectangle. |
+
+`ean13` and `code128` draw those symbols from the filled string. `qr` draws a QR code of that string. The entry has no font. A barcode is drawn when the registration page is integrated. Until that work, a `barcode` key is not part of the v0 writer.
+
+### Photo
+
+A photo is a content entry. The bytes come from the row, not from `resources.images`.
+
+```yaml
+id: portrait
+posX: 62
+posY: 12
+width: 18
+height: 24
+ifSt: ""
+photo:
+  field: photo
+```
+
+`field` is a key in the row. In a string row the value is a path relative to the page file. The registration print may pass the bytes for that key directly. The file, or those bytes, is jpeg, bmp, or png. A missing key, an empty value, or a missing file leaves the rectangle undrawn. A file that is present and not one of those formats is an error that names the entry `id`. The rectangle is scaled to `width` and `height` the same way an image placement is.
+
+A photo is drawn when the registration page is integrated. Until that work, a `photo` key is not part of the v0 writer.
+
 ### Resources (target)
 
 Unchanged role: the page owns the bytes and the font identities; placements and text boxes point at them by name.
@@ -361,8 +420,8 @@ F6:
 
 | Actor | Writes |
 |---|---|
-| Extractor | Full document. `preentered` set, `content` null, ids assigned, `alignment.horizontal` from the shared edge, `alignment.vertical: top`, padding all `0`, `page_size.bleeds` from the PDF trim and bleed boxes, markup only where a run differs from the box default. Leaves `template` and `delimiters` absent. |
-| Editor | `posX`, `posY`, `width`, `height` of text boxes and image placements. May also change `alignment`, `padding`, `page_size.bleeds`, and, on a text box, `template` and `delimiters`. Does not rewrite `preentered`. |
+| Extractor | Full document. `preentered` set, `content` null, ids assigned, `alignment.horizontal` from the shared edge, `alignment.vertical: top`, padding all `0`, `page_size.bleeds` from the PDF trim and bleed boxes, markup only where a run differs from the box default. Leaves `template`, `delimiters`, `ifSt`, `barcode`, and `photo` absent. |
+| Editor | `posX`, `posY`, `width`, `height` of text boxes, image placements, barcodes, and photos. May also change `alignment`, `padding`, `page_size.bleeds`, `ifSt`, and, on a text box or a barcode, `template` and `delimiters`. Does not rewrite `preentered`. |
 | Automatic tool | `content` on a text box chosen by `id`. May use the same markup. May change `alignment` and `padding`. |
 | Writer | Nothing. Reads the tree and produces a PDF. |
 

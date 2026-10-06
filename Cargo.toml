@@ -1,3 +1,6 @@
+[workspace]
+members = [".", "modules/ticket-render"]
+
 [package]
 name = "rust-reg"
 version = "0.1.0"
@@ -30,12 +33,16 @@ tonic-reflection = "0.14.6"
 futures = "0.3"
 httpdate = "1"
 rusqlite = { version = "0.37", features = ["bundled"] }
+qrcode = { version = "0.14", default-features = false, features = ["image"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+ticket-render = { path = "modules/ticket-render" }
 
 [dev-dependencies]
 ttf-parser = "0.25.1"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 tokio-tungstenite = "0.26"
 tower = { version = "0.5", features = ["util"] }
+rqrr = "0.8"
 
 [build-dependencies]
 tonic-build = "0.14.6"

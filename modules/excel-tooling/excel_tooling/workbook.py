@@ -102,6 +102,13 @@ class Workbook:
         start = (subcolumn_row if subcolumn_row is not None else excel_row) + 1
         yield from walk_blocks(source, start, last_row, columns)
 
+    def iter_columns(self, sheet_index: int, columns):
+        """Read every used row. `columns` were not taken from a header row."""
+        self._require(sheet_index)
+        source = self._sources[sheet_index]
+        first_row, last_row, _first_col, _last_col = source.bounds()
+        yield from walk_blocks(source, first_row, last_row, columns)
+
     def read_table(
         self, sheet_index: int, excel_row: int, k: int, subcolumn_row: int | None = None
     ):

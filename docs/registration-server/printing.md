@@ -93,6 +93,24 @@ The layout JSON is the crate's document. The fields follow the Java `writeObject
 
 Render reads the JSON and `bg.png`. It replaces `{{field}}` the way `OutputArea.calculateText` does: one pass, the name lowercased, a missing name left blank. That is the whole substitution. There are no sections, no partials, and no HTML escapes. `struct_to_pdf::template::fill` escapes `&`, `<`, and `>` and looks the name up in the original case, so a badge that called it would print those escapes. ticket-render does its own pass and does not call that function. An area's condition is a separate lookup of `ifSt` in the same value map. An empty result, `false`, or `0` skips the area. An empty `ifSt` shows it. The crate then wraps text and draws. EAN-13, Code 128, and QR stay, with tests on known payloads. Photo areas load the visitor image the caller passes in. The 1-bit graphic is the `~DG` payload only. Speed, darkness, media mode, shift, top, and tear-off are Zebra settings. The registration server writes those `^XA` lines when it builds the ZPL job. The crate does not format them.
 
+### Fonts
+
+A text area names a family, a weight, and a style. The files live in `fonts/` in the process working directory. The crate keeps its copy at `modules/ticket-render/fonts/`.
+
+One directory per family. The directory name is the family in lowercase, and each run of spaces or punctuation becomes one hyphen. `pf beau sans pro` is the directory `pf-beau-sans-pro`.
+
+Files in a directory are ordered by weight, low to high. The same weight puts `normal` before `italic`. The file name is that directory name, the CSS weight, and `normal` or `italic`. The extension is `.otf` or `.ttf`.
+
+```text
+fonts/pf-beau-sans-pro/pf-beau-sans-pro-400-normal.ttf
+fonts/pf-beau-sans-pro/pf-beau-sans-pro-700-normal.ttf
+fonts/dejavu-sans/dejavu-sans-400-normal.ttf
+```
+
+`normal` from a `badge.cfg` is weight 400. `bold` is 700. A number from 1 to 1000 is that weight. `italic` and `oblique` select the italic file. When the same weight and style exist as both `.otf` and `.ttf`, the `.otf` file is drawn. A requested italic with no italic file uses the roman file. A missing weight uses the CSS rule: below 400 the next lighter face, otherwise the next heavier; 400 prefers 500; 500 prefers 400; above 500 the next heavier face, otherwise the next lighter.
+
+A family string that is a path ending in `.otf` or `.ttf` is that file. A family with no file uses DejaVu Sans 400, the file `fonts/dejavu-sans/dejavu-sans-400-normal.ttf`, compiled into the crate.
+
 Transliteration and a second copy of the badge stay in the registration server. The server builds the second field map and calls the crate again. The crate draws the map it is given.
 
 `renderQrCode` becomes a function on the same crate. Callers pass the string and the pixel size and get PNG bytes.

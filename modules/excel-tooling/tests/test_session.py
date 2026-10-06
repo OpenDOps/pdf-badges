@@ -6,12 +6,13 @@ import grpc
 import pytest
 
 from excel_tooling.model import CellValue, Grid, GridCell, SheetInfo
-from excel_tooling.scan import columns_for_header, data_rows, header_candidates
+from excel_tooling.scan import columns_for_header, data_rows, header_candidates, rows_without_header
 from excel_tooling.server import IDLE_SECONDS, MAX_UPLOAD_BYTES, serve
 from excel_tooling.workbook import SheetNotListed
 
 import excel_tooling  # noqa: F401
 from irbis.excel.v1 import excel_pb2, excel_pb2_grpc
+from irbis.table.v1 import table_pb2
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 CHANNEL_OPTIONS = [
@@ -47,6 +48,11 @@ class FakeBook:
     def read_table(self, sheet_index, excel_row, k, subcolumn_row=None):
         columns = self.select_header(sheet_index, excel_row, k, subcolumn_row)
         return columns, data_rows(self._grid(sheet_index), excel_row, columns, subcolumn_row)
+
+    def iter_columns(self, sheet_index, columns):
+        rows = rows_without_header(self._grid(sheet_index), columns)
+        if rows:
+            yield list(rows)
 
     def iter_blocks(self, sheet_index, excel_row, k, subcolumn_row=None):
         if self.hold_stream:
@@ -175,6 +181,127 @@ def test_select_header_empty_rows():
         server.stop(1)
     assert [column.name for column in table.columns] == ["Name", "City", "Amount"]
     assert list(table.rows) == []
+
+
+def _named(excel_id, name, **subs):
+    column = table_pb2.Column(excel_id=excel_id, name=name)
+    for sub_id, sub_name in subs.items():
+        column.subcolumns.add(excel_id=sub_id, name=sub_name)
+    return column
+
+
+def test_select_columns_reads_the_first_row():
+    sheet = Grid(
+        1,
+        2,
+        0,
+        2,
+        {
+            1: [text(0, "Абрамов"), text(1, "Александр"), text(2, "Авангард")],
+            2: [text(0, "Авхадыев"), text(1, "Антон"), text(2, "СёрчИнформ")],
+        },
+    )
+    book = FakeBook([(0, "Лист1", sheet)])
+    _service, server, stub = start(opener=lambda _path: book)
+    try:
+        view = upload(stub, "book.xlsx")
+        table = stub.SelectColumns(
+            excel_pb2.SelectColumnsRequest(
+                session_id=view.session_id,
+                columns=[
+                    _named("A", "surname"),
+                    _named("b", " name "),
+                    _named("C", "company name"),
+                ],
+            )
+        )
+        _batches, rows = collect(stub, view.session_id)
+    finally:
+        server.stop(1)
+    assert [(column.excel_id, column.name) for column in table.columns] == [
+        ("A", "surname"),
+        ("B", "name"),
+        ("C", "company name"),
+    ]
+    assert list(table.rows) == []
+    assert [row.excel_row for row in rows] == [1, 2]
+    assert rows[0].cells[0].value.text == "Абрамов"
+    assert [cell.excel_id for cell in rows[1].cells] == ["A", "B", "C"]
+
+
+def test_select_columns_replaces_a_header():
+    book = FakeBook([(0, "Titles", titles_grid())])
+    _service, server, stub = start(opener=lambda _path: book)
+    try:
+        view = upload(stub, "book.xlsx")
+        stub.SelectHeader(
+            excel_pb2.SelectHeaderRequest(session_id=view.session_id, excel_row=4)
+        )
+        stub.SelectColumns(
+            excel_pb2.SelectColumnsRequest(
+                session_id=view.session_id,
+                columns=[_named("A", "name")],
+            )
+        )
+        _batches, rows = collect(stub, view.session_id)
+    finally:
+        server.stop(1)
+    assert [row.excel_row for row in rows] == [2, 4, 5, 7]
+
+
+def test_select_sheet_clears_named_columns():
+    first = Grid(1, 1, 0, 0, {1: [text(0, "Alpha")]})
+    second = Grid(1, 1, 0, 0, {1: [text(0, "Beta")]})
+    book = FakeBook([(0, "First", first), (3, "Second", second)])
+    _service, server, stub = start(opener=lambda _path: book)
+    try:
+        view = upload(stub, "book.xlsx")
+        stub.SelectColumns(
+            excel_pb2.SelectColumnsRequest(
+                session_id=view.session_id,
+                columns=[_named("A", "name")],
+            )
+        )
+        stub.SelectSheet(excel_pb2.SelectSheetRequest(session_id=view.session_id, sheet_index=3))
+        code = status(
+            lambda: stub.ReadTable(excel_pb2.ReadTableRequest(session_id=view.session_id))
+        )
+    finally:
+        server.stop(1)
+    assert code == grpc.StatusCode.FAILED_PRECONDITION
+
+
+def test_select_columns_rejects_a_bad_column():
+    book = FakeBook([(0, "Лист1", Grid(1, 1, 0, 0, {1: [text(0, "Ann")]}))])
+    _service, server, stub = start(opener=lambda _path: book)
+    try:
+        view = upload(stub, "book.xlsx")
+        empty = status(
+            lambda: stub.SelectColumns(
+                excel_pb2.SelectColumnsRequest(session_id=view.session_id)
+            )
+        )
+        nested = status(
+            lambda: stub.SelectColumns(
+                excel_pb2.SelectColumnsRequest(
+                    session_id=view.session_id,
+                    columns=[_named("A", "group", B="child")],
+                )
+            )
+        )
+        duplicate = status(
+            lambda: stub.SelectColumns(
+                excel_pb2.SelectColumnsRequest(
+                    session_id=view.session_id,
+                    columns=[_named("A", "name"), _named("B", "name")],
+                )
+            )
+        )
+    finally:
+        server.stop(1)
+    assert empty == grpc.StatusCode.INVALID_ARGUMENT
+    assert nested == grpc.StatusCode.INVALID_ARGUMENT
+    assert duplicate == grpc.StatusCode.INVALID_ARGUMENT
 
 
 def test_read_matches_scan():

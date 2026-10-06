@@ -39,10 +39,115 @@
     min-height: 2.75rem;
   }
 
+  [data-network] {
+    width: 100%;
+    min-width: 0;
+    gap: 0.35rem;
+  }
+
+  [data-network][data-pinned] {
+    position: fixed;
+    top: 0.25rem;
+    right: 0.75rem;
+    z-index: 70;
+    width: min(36rem, calc(100% - 1.5rem));
+  }
+
+  [data-network] [data-signal] {
+    flex: 1 1 0;
+    min-width: 0;
+    gap: 0.35rem;
+    padding: 0.2rem 0.65rem;
+    font-size: 0.875rem;
+    line-height: 1.25rem;
+  }
+
+  [data-testid="desk-nav"] label {
+    margin-bottom: 0;
+  }
+
+  [data-testid="desk-nav"] input:not([type="checkbox"]) {
+    height: 2.125rem;
+    min-height: 2.125rem;
+    padding: 0 0.5rem;
+    font-size: 0.875rem;
+    line-height: 1.25rem;
+  }
+
+  [data-screen="visitors"] input:not([type="checkbox"]) {
+    min-height: 2.25rem;
+    height: 2.25rem;
+    padding: 0.25rem 0.5rem;
+  }
+
+  [data-screen="visitors"] [data-testid="clear-search"] {
+    position: absolute;
+    top: 50%;
+    right: 0.35rem;
+    width: 1.25rem;
+    height: 1.25rem;
+    min-height: 0;
+    padding: 0;
+    border: 1px solid #cbd5e1;
+    border-radius: 9999px;
+    background-color: #fff;
+    color: #4b5563;
+    font-size: 0.875rem;
+    line-height: 1;
+    transform: translateY(-50%);
+  }
+
+  [data-screen="visitors"] label {
+    margin-bottom: 0;
+  }
+
+  [data-screen="visitors"] [data-testid="select-all"] {
+    height: 2.25rem;
+    min-height: 2.25rem;
+    align-self: end;
+    flex-shrink: 0;
+    padding: 0.25rem 0.65rem;
+    font-size: 0.875rem;
+    line-height: 1.25rem;
+    white-space: nowrap;
+  }
+
+  [data-screen="visitors"] [data-testid="select-all"]:disabled {
+    background-color: #e5e7eb;
+    color: #6b7280;
+    cursor: default;
+  }
+
+  [data-screen="visitors"] tbody tr {
+    height: 2.75rem;
+  }
+
+  [data-screen="visitors"] :is(th, td):first-child {
+    width: 2.75rem;
+    padding: 0;
+  }
+
+  [data-screen="visitors"] :is(th, td):first-child label {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 2.75rem;
+    height: 2.75rem;
+    margin: 0;
+    cursor: pointer;
+  }
+
+  [data-screen="visitors"] input[type="checkbox"] {
+    margin: 0;
+  }
+
   input[type="checkbox"],
   input[type="radio"] {
     width: 1.125rem;
     height: 1.125rem;
+    min-width: 1.125rem;
+    min-height: 1.125rem;
+    flex-shrink: 0;
     margin-right: 0.5rem;
     accent-color: #1d4ed8;
     vertical-align: -0.15rem;
@@ -57,6 +162,24 @@
     cursor: pointer;
   }
 
+  [data-testid="discard"] button[data-choice="stay"] {
+    background-color: #fff;
+    color: #111827;
+    border: 1px solid #cbd5e1;
+  }
+
+  [data-testid="visitor-slot"] button {
+    width: 1.5rem;
+    height: 1.5rem;
+    min-height: 0;
+    margin-right: 0.25rem;
+    padding: 0;
+    background: transparent;
+    color: inherit;
+    font-size: 1.125rem;
+    line-height: 1;
+  }
+
   [data-testid="operator-bar"] label {
     margin-bottom: 0;
   }
@@ -65,11 +188,17 @@
   [data-testid="operator-bar"] input,
   [data-testid="pay"] [role="tablist"] {
     height: 2.75rem;
+    width: 100%;
+    min-width: 0;
   }
 
   [data-testid="pay"] button {
     flex: 1 1 0;
+    width: 0;
+    min-width: 0;
     height: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
     background-color: #fff;
     color: #111827;
     border: 1px solid #cbd5e1;
@@ -91,6 +220,45 @@
   [data-testid="pay"] button[aria-selected="true"] {
     background-color: #1d4ed8;
     color: #fff;
+  }
+
+  [data-testid="action-bar"] button {
+    min-height: 2rem;
+    padding: 0.25rem 0.65rem;
+    font-size: 0.875rem;
+    line-height: 1.25rem;
+    white-space: nowrap;
+  }
+
+  [data-testid="action-bar"] button[aria-pressed="false"] {
+    background-color: #fff;
+    color: #111827;
+    border: 1px solid #cbd5e1;
+  }
+
+  [data-testid="action-bar"] button[aria-pressed="true"] {
+    background-color: #1d4ed8;
+    color: #fff;
+    border: 1px solid #1d4ed8;
+  }
+
+  [data-testid="pager"] button {
+    min-width: 2rem;
+    padding: 0.25rem 0.45rem;
+    background-color: #fff;
+    color: #111827;
+    border: 1px solid #cbd5e1;
+  }
+
+  [data-testid="pager"] button:disabled {
+    color: #94a3b8;
+    cursor: default;
+  }
+
+  [data-testid="pager"] button[aria-current="page"] {
+    background-color: #1d4ed8;
+    color: #fff;
+    border-color: #1d4ed8;
   }
 
   main {

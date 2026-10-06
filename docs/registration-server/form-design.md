@@ -106,7 +106,7 @@ Empty is `null`. The stored enum uses `e_val: null`. The Angular client wrote `-
 
 ### Place lists
 
-`PlaceSelect` is the control for country, region, and city. One choice. The label is `v[locale]`. The stored value is the option id.
+Country and city use `SearchSelect`. Region uses `PlaceSelect`, a native `select`. [pickers.md](pickers.md) is how those lists are reused. One choice. The label is `v[locale]`. The stored value is the option id.
 
 Lists are cached by `(name, parent ids, locale)`.
 
@@ -180,7 +180,7 @@ The operator page lists every reachable screen on one page. From a screen, every
 
 `/register` opens on a greeting: the locale control and a start button. Start shows the first step. `form-app` draws that greeting in `start-screen`.
 
-Save on every layout is the same post: the visitor object, after the current step validates. On `/desk` that check covers every screen the conditions leave visible. On `/register`, Next that lands on `-1` posts when `print_on_save` is set. The screen then shows `Получите Ваш бейдж на стойке выдачи бейджей.`, or `Take your badge at the registration desk.`. A `ticketStatus` other than 1 shows the pay line instead: `Вы зарегистрированы. Пожалуйста оплатите участие на кассе.` / `You are registered. Please pay for your participation at the ticket desk.` A non-empty `zone_name` from `save` replaces the badge line. `zone_name` is the printer sector `POST /datapost` returned as `zoneName.ru`. `form-app` leaves that field unread (`zones` is a TODO). After 15 seconds the greeting is back and the model is empty, so the next person starts clear. On `/desk`, Save is a button on the page and posts the same way, including the printer. The desk does not show the greeting. `no_ticket_code`, `no_printer`, and `invalid_phone_email_combo` are shown on the step that is open and are not queued.
+Save on `/register` posts the visitor object after the current step validates. On `/desk` and `/visitor`, Save posts without that check. Required questions are not marked and do not block the post. On `/register`, Next that lands on `-1` posts when `print_on_save` is set. The screen then shows `Получите Ваш бейдж на стойке выдачи бейджей.`, or `Take your badge at the registration desk.`. A `ticketStatus` other than 1 shows the pay line instead: `Вы зарегистрированы. Пожалуйста оплатите участие на кассе.` / `You are registered. Please pay for your participation at the ticket desk.` A non-empty `zone_name` from `save` replaces the badge line. `zone_name` is the printer sector `POST /datapost` returned as `zoneName.ru`. `form-app` leaves that field unread (`zones` is a TODO). After 15 seconds the greeting is back and the model is empty, so the next person starts clear. On `/desk`, Save is a button on the page and posts the visitor and the printer. The desk does not show the greeting. `no_ticket_code`, `no_printer`, and `invalid_phone_email_combo` are shown on the step that is open and are not queued.
 
 A `/register` save that fails before a response, or with a 5xx, appends the visitor to `localStorage` (`registration-form.outbox`) and returns to the greeting. The badge line stays off. The queue retries one visitor at a time, on load and every 5 seconds, and removes it when `save` succeeds. The next registration can proceed while a retry is still failing. `form-app` retries 5 times on the open screen and then alerts. `/desk` does not use the queue.
 
@@ -190,7 +190,7 @@ Idle on `/register` is two minutes from the last pointer or key, unless the quer
 
 - Fetch HTML from `assets/d/ipad` or `assets/d/tyumen`, or compile a template.
 - Read the visitor, the printers, or the category from `window`.
-- Draw a different component tree per layout. The four frames share `Step`, `QuestionField`, `PlaceSelect`, `PhoneList`, `EmailList`, and `ChoiceList`.
+- Draw a different component tree per layout. The four frames share `Step`, `SearchSelect`, `PhoneList`, `EmailList`, and `ChoiceList`. [pickers.md](pickers.md) is the shared list.
 - Call the hosted shop. A next rule whose step the config marks as payment is treated as `-1`.
 - Long-poll `/was_scanned`.
-- Own the desk key, the operator menu, the visitor list, or the printer-routing screen. Those are the other routes in [registration-ui-design.md](registration-ui-design.md). This form only chooses a printer for this save.
+- Own the desk key, the operator menu, the visitor list, or the printer-routing screen. Those are the other routes in [registration-ui-design.md](registration-ui-design.md). The category and printer selects are the shared desk lists in that document. Save on this page sends the printer selected there.

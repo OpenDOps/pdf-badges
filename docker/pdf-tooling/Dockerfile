@@ -8,6 +8,7 @@ WORKDIR /src
 COPY Cargo.toml Cargo.lock build.rs ./
 COPY proto ./proto
 COPY src ./src
+COPY tests/live_remote.rs tests/live_remote.rs
 RUN cargo build --release --bin rust-reg
 
 RUN cat > /tmp/tcpcheck.c <<'EOF'

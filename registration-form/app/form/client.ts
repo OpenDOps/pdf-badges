@@ -36,6 +36,26 @@ export type FormDocuments = {
 
 const FORM = "/forms/form.json";
 
+type StatusError = Error & { status?: number; code?: string };
+
+let onUnauthorized: (() => void) | undefined;
+
+export function setUnauthorized(handler: (() => void) | undefined) {
+  onUnauthorized = handler;
+}
+
+export function isUnauthorized(error: unknown): boolean {
+  return error instanceof Error && (error as StatusError).status === 401;
+}
+
+function unauthorized(path: string): StatusError {
+  onUnauthorized?.();
+  const route = path.split("?")[0] ?? path;
+  const error = new Error(`${route} 401`) as StatusError;
+  error.status = 401;
+  return error;
+}
+
 function errorCode(body: unknown): string | undefined {
   if (!body || typeof body !== "object") return undefined;
   const error = (body as { error?: unknown }).error;
@@ -78,6 +98,20 @@ function enumCacheKey(locale: string, name: string, parents: EnumParents): strin
   return `${name}|${locale}|${ids}`;
 }
 
+function unwrapData<T>(body: unknown): T {
+  if (
+    body &&
+    typeof body === "object" &&
+    !Array.isArray(body) &&
+    "ok" in body &&
+    (body as { ok: unknown }).ok === true &&
+    "data" in body
+  ) {
+    return (body as { data: T }).data;
+  }
+  return body as T;
+}
+
 export class FormClient {
   private readonly cache = new Map<string, EnumRow[]>();
   private readonly inflight = new Map<string, Promise<EnumResult>>();
@@ -95,7 +129,10 @@ export class FormClient {
   static fromRequest(request: Request): FormClient {
     return new FormClient((input, init) => {
       const path = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-      return fetch(new URL(path, request.url), init);
+      const headers = new Headers(init?.headers);
+      const cookie = request.headers.get("cookie");
+      if (cookie && !headers.has("cookie")) headers.set("cookie", cookie);
+      return fetch(new URL(path, request.url), { ...init, headers });
     });
   }
 
@@ -146,13 +183,63 @@ export class FormClient {
     return this.getJson(`/api/registrations?${query}`);
   }
 
+  registration(id: string): Promise<unknown> {
+    return this.getJson(`/api/registrations/${encodeURIComponent(id)}`);
+  }
+
+  registrations(query: { q?: string; category?: string; limit: number; offset: number }): Promise<unknown> {
+    const params = new URLSearchParams();
+    if (query.q) params.set("q", query.q);
+    if (query.category) params.set("category", query.category);
+    params.set("limit", String(query.limit));
+    params.set("offset", String(query.offset));
+    return this.getJson(`/api/registrations?${params}`);
+  }
+
+  sync(): Promise<{ waiting: number; synced?: number; addresses?: string[]; is_admin?: boolean }> {
+    return this.getJson("/api/sync");
+  }
+
+  network(): Promise<{
+    samples: number;
+    offline: boolean;
+    quality: "good" | "fair" | "poor" | null;
+    timeout_secs: number;
+  }> {
+    return this.getJson("/api/network");
+  }
+
+  async auth(key: string): Promise<void> {
+    const path = "/api/desk/auth";
+    const response = await this.fetchImpl(path, {
+      method: "POST",
+      credentials: "include",
+      body: JSON.stringify({ key }),
+      headers: { "Content-Type": "application/json" },
+    });
+    if (response.ok) return;
+    let body: unknown = null;
+    try {
+      body = await response.json();
+    } catch {
+      body = null;
+    }
+    const code = errorCode(body);
+    const error = new Error(code ?? `${path} ${response.status}`) as StatusError;
+    error.status = response.status;
+    error.code = code;
+    throw error;
+  }
+
   async save(visitor: unknown, printer?: string): Promise<unknown> {
     const path = "/api/registrations";
     const response = await this.fetchImpl(path, {
       method: "POST",
+      credentials: "include",
       body: JSON.stringify({ visitor, printer }),
       headers: { "Content-Type": "application/json" },
     });
+    if (response.status === 401) throw unauthorized(path);
     let body: unknown = null;
     try {
       body = await response.json();
@@ -169,7 +256,32 @@ export class FormClient {
     return body;
   }
 
-  photo(id: string, bytes: Blob): Promise<unknown> {
+  async print(ids: string[], printer?: string): Promise<unknown> {
+    const path = "/api/print";
+    const response = await this.fetchImpl(path, {
+      method: "POST",
+      credentials: "include",
+      body: JSON.stringify({ ids, printer }),
+      headers: { "Content-Type": "application/json" },
+    });
+    if (response.status === 401) throw unauthorized(path);
+    let body: unknown = null;
+    try {
+      body = await response.json();
+    } catch {
+      body = null;
+    }
+    if (!response.ok) {
+      const code = errorCode(body);
+      const error = new Error(code ?? `${path} ${response.status}`) as Error & { status?: number; code?: string };
+      error.status = response.status;
+      error.code = code;
+      throw error;
+    }
+    return body;
+  }
+
+    photo(id: string, bytes: Blob): Promise<unknown> {
     return this.send(`/api/registrations/${encodeURIComponent(id)}/photo`, bytes);
   }
 
@@ -181,17 +293,33 @@ export class FormClient {
     return this.getJson("/api/forms/categories");
   }
 
+  async catalog(
+    rev: number,
+    signal?: AbortSignal,
+  ): Promise<{ rev: number; categories: unknown; printers: unknown }> {
+    const path = `/api/desk/catalog?rev=${rev}`;
+    const response = await this.fetchImpl(path, { credentials: "include", signal });
+    if (signal?.aborted) throw new DOMException("aborted", "AbortError");
+    if (response.status === 401) throw unauthorized(path);
+    if (!response.ok) throw new Error(`${path} ${response.status}`);
+    const data = unwrapData<{ rev: unknown; categories: unknown; printers: unknown }>(await response.json());
+    if (!data || typeof data !== "object" || typeof data.rev !== "number") throw new Error("catalog");
+    return { rev: data.rev, categories: data.categories, printers: data.printers };
+  }
+
   private async getJson<T>(path: string): Promise<T> {
-    const response = await this.fetchImpl(path);
+    const response = await this.fetchImpl(path, { credentials: "include" });
+    if (response.status === 401) throw unauthorized(path);
     if (!response.ok) {
       const route = path.split("?")[0] ?? path;
       throw new Error(`${route} ${response.status}`);
     }
-    return (await response.json()) as T;
+    return unwrapData<T>(await response.json());
   }
 
   private async send(path: string, body: BodyInit, headers?: HeadersInit): Promise<unknown> {
-    const response = await this.fetchImpl(path, { method: "POST", body, headers });
+    const response = await this.fetchImpl(path, { method: "POST", credentials: "include", body, headers });
+    if (response.status === 401) throw unauthorized(path);
     if (!response.ok) throw new Error(`${path} ${response.status}`);
     return response.json();
   }

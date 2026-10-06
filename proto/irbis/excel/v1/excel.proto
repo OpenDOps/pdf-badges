@@ -8,6 +8,7 @@ service ExcelTooling {
   rpc OpenWorkbook(stream OpenChunk) returns (SessionView);
   rpc SelectSheet(SelectSheetRequest) returns (SessionView);
   rpc SelectHeader(SelectHeaderRequest) returns (irbis.table.v1.Table);
+  rpc SelectColumns(SelectColumnsRequest) returns (irbis.table.v1.Table);
   rpc ReadTable(ReadTableRequest) returns (stream RowBatch);
   rpc ProvidePassword(ProvidePasswordRequest) returns (SessionView);
   rpc Close(CloseRequest) returns (CloseResponse);
@@ -54,6 +55,12 @@ message SelectHeaderRequest {
   string session_id = 1;
   uint32 excel_row = 2;
   uint32 subcolumn_row = 3;  // 0 means no subcolumn row
+}
+
+message SelectColumnsRequest {
+  string session_id = 1;
+  // excel_id is the sheet letter. name is the caller's column name. No subcolumns.
+  repeated irbis.table.v1.Column columns = 2;
 }
 
 message ReadTableRequest {

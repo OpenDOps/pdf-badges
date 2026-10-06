@@ -50,6 +50,11 @@ class ExcelToolingStub:
                 request_serializer=irbis_dot_excel_dot_v1_dot_excel__pb2.SelectHeaderRequest.SerializeToString,
                 response_deserializer=irbis_dot_table_dot_v1_dot_table__pb2.Table.FromString,
                 _registered_method=True)
+        self.SelectColumns = channel.unary_unary(
+                '/irbis.excel.v1.ExcelTooling/SelectColumns',
+                request_serializer=irbis_dot_excel_dot_v1_dot_excel__pb2.SelectColumnsRequest.SerializeToString,
+                response_deserializer=irbis_dot_table_dot_v1_dot_table__pb2.Table.FromString,
+                _registered_method=True)
         self.ReadTable = channel.unary_stream(
                 '/irbis.excel.v1.ExcelTooling/ReadTable',
                 request_serializer=irbis_dot_excel_dot_v1_dot_excel__pb2.ReadTableRequest.SerializeToString,
@@ -83,6 +88,12 @@ class ExcelToolingServicer:
         raise NotImplementedError('Method not implemented!')
 
     def SelectHeader(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def SelectColumns(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -122,6 +133,11 @@ def add_ExcelToolingServicer_to_server(servicer, server):
             'SelectHeader': grpc.unary_unary_rpc_method_handler(
                     servicer.SelectHeader,
                     request_deserializer=irbis_dot_excel_dot_v1_dot_excel__pb2.SelectHeaderRequest.FromString,
+                    response_serializer=irbis_dot_table_dot_v1_dot_table__pb2.Table.SerializeToString,
+            ),
+            'SelectColumns': grpc.unary_unary_rpc_method_handler(
+                    servicer.SelectColumns,
+                    request_deserializer=irbis_dot_excel_dot_v1_dot_excel__pb2.SelectColumnsRequest.FromString,
                     response_serializer=irbis_dot_table_dot_v1_dot_table__pb2.Table.SerializeToString,
             ),
             'ReadTable': grpc.unary_stream_rpc_method_handler(
@@ -220,6 +236,33 @@ class ExcelTooling:
             target,
             '/irbis.excel.v1.ExcelTooling/SelectHeader',
             irbis_dot_excel_dot_v1_dot_excel__pb2.SelectHeaderRequest.SerializeToString,
+            irbis_dot_table_dot_v1_dot_table__pb2.Table.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def SelectColumns(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/irbis.excel.v1.ExcelTooling/SelectColumns',
+            irbis_dot_excel_dot_v1_dot_excel__pb2.SelectColumnsRequest.SerializeToString,
             irbis_dot_table_dot_v1_dot_table__pb2.Table.FromString,
             options,
             channel_credentials,

@@ -63,7 +63,7 @@ Category 7 has 2,088 visitors. `open` on this copy adds the four `mem_u` indexes
 
 `last_add` is `ORDER BY added_ts DESC, uid`. `last_print` is `ORDER BY last_print_ts DESC, added_ts DESC, uid`. A visitor who has never been printed has `last_print_ts` `0` and sorts last.
 
-The Scala search orders only by `mem_u.ts`. Its unfiltered page is `db_view_buf`, a list that prepends a uid on print or on add and is dropped on restart. These two orders replace that list. Both timestamps are on the file, so a restart keeps them.
+The Scala search orders only by `mem_u.ts`. Its unfiltered page is `db_view_buf`, a list that prepends a uid on print or on add and is dropped on restart. `GET /api/registrations` uses `last_print`, so a stored print stays at the front after a restart. `last_add` stays the added-time sort.
 
 A search token is one word. The word is an FTS5 phrase: a `"` inside it is doubled, the word is wrapped in `"`, and a `*` is appended outside the quotes. The finished `MATCH` text is a bound parameter, so the word is not concatenated into the SQL. A word with no letter or digit is not sent to FTS, so `*`, `"`, and the operators `AND`, `OR`, `NOT`, and `NEAR` cannot change the query or raise a syntax error. Several words are AND of (`name:` OR `surname:` OR `c_name:`), which is the Scala `MATCH`. A category number is not a token: matching the digits of a category finds nothing unless those digits are in a name. Search always uses the prefix `*`.
 
@@ -190,8 +190,8 @@ A visitor write and a print both commit the file, then update memory.
 
 ### Work
 
-1. `write` takes `uid`, the JSON string, and the list columns (`name`, `surname`, `c_name`, `category`, `ticket_status`, `gotsome`, `give_packet`, `added_ts`, `org_id`, `email`).
-2. The file transaction upserts `mem_u` (`data`, `ts`, `category`, `ticket_status`, `org_id`) and the plain `u_fulltext` row, replaces that uid in `emails`, then commits.
+1. HTTP save calls `save_document` with the visitor JSON. The adapter reads the list columns from that document. `write` still accepts a prepared row for sync.
+2. The file transaction upserts `mem_u` (`data`, `ts`, `category`, `ticket_status`, `org_id`, and `barcode` when the document has one) and the plain `u_fulltext` row, replaces that uid in `emails` and, when the document carries phones, in `phones`, then commits.
 3. The memory transaction upserts `list_row` and replaces that row in `u_fts`. `last_print_ts` and `print_count` stay as they were on an update. A new uid starts them at `0`.
 4. `record_print(uid, ts)` inserts a `prints` row (`category` and `is_cert` may be null) and commits the file. Memory then sets `last_print_ts` to `ts` when `ts` is newer and increments `print_count`. There is no `prints_unique` table.
 5. A write of a uid the loader has not copied yet is visible immediately, and the loader skips it.

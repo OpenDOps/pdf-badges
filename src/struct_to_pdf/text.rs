@@ -75,7 +75,7 @@ pub fn draw_text(
     let mut fonts = load_fonts(page, text, base_dir, &parsed)?;
     let advances = build_advances(&fonts, &parsed.items, &text.id)?;
     let units = page.page_size.units;
-    let content_width = text.width - text.padding.left - text.padding.right;
+    let (content_width, _) = layout_size(text);
     let lines = if text.auto_scale {
         fit_font_sizes(page, text, &mut parsed, &advances)?
     } else {
@@ -129,7 +129,7 @@ pub fn authored_text_bounds(
     let fonts = load_fonts(page, text, base_dir, &parsed)?;
     let advances = build_advances(&fonts, &parsed.items, &text.id)?;
     let units = page.page_size.units;
-    let content_width = text.width - text.padding.left - text.padding.right;
+    let (content_width, _) = layout_size(text);
     let lines = layout(
         &parsed.items,
         &parsed.end_metrics,
@@ -148,8 +148,7 @@ fn fit_font_sizes(
     advances: &BTreeMap<String, Advances>,
 ) -> Result<Vec<LaidLine>, RenderError> {
     let units = page.page_size.units;
-    let content_width = text.width - text.padding.left - text.padding.right;
-    let content_height = text.height - text.padding.top - text.padding.bottom;
+    let (content_width, content_height) = layout_size(text);
     if content_width <= 0.0 || content_height <= 0.0 {
         return Err(RenderError {
             context: text.id.clone(),
@@ -530,10 +529,9 @@ fn paint_lines(
         return Ok(Vec::new());
     }
     let units = page.page_size.units;
-    let content_x = text.pos_x + text.padding.left;
-    let content_y = text.pos_y + text.padding.top;
-    let content_width = text.width - text.padding.left - text.padding.right;
-    let content_height = text.height - text.padding.top - text.padding.bottom;
+    let (content_width, content_height) = layout_size(text);
+    let content_x = 0.0;
+    let content_y = 0.0;
     let block_height = block_height_of(lines);
     let (first_key, first_size) = line_face(&lines[0]);
     let first_ascent = ascent(fonts, first_key, first_size);
@@ -585,7 +583,7 @@ fn paint_lines(
         for segment in &line.segments {
             let encoded = encode_segment(fonts, advances, font_index, segment, &text.id)?;
             let width_page = f64::from(segment.width_pt) / scale;
-            let (pdf_x, pdf_y) = pdf_point(page, cursor, baseline);
+            let (pdf_x, pdf_y) = place(page, text, cursor, baseline);
             let resource_name = fonts
                 .get(&segment.font_key)
                 .and_then(|used| used.resource_name.clone())
@@ -598,17 +596,7 @@ fn paint_lines(
                     Object::Real(to_points(segment.font_size, units)),
                 ],
             ));
-            operations.push(Operation::new(
-                "Tm",
-                vec![
-                    Object::Real(1.0),
-                    Object::Real(0.0),
-                    Object::Real(0.0),
-                    Object::Real(1.0),
-                    Object::Real(pdf_x),
-                    Object::Real(pdf_y),
-                ],
-            ));
+            operations.push(Operation::new("Tm", text_matrix(text.rotation, pdf_x, pdf_y)));
             operations.push(Operation::new(
                 "Tj",
                 vec![Object::String(encoded, StringFormat::Hexadecimal)],
@@ -617,11 +605,11 @@ fn paint_lines(
             if segment.underline && segment.width_pt > 0.0 {
                 let font = &fonts.get(&segment.font_key).expect("font").loaded;
                 let underline_y = baseline + underline_drop(font, segment.font_size);
-                let (x0, y) = pdf_point(page, cursor, underline_y);
-                let (x1, _) = pdf_point(page, cursor + width_page, underline_y);
+                let (x0, y0) = place(page, text, cursor, underline_y);
+                let (x1, y1) = place(page, text, cursor + width_page, underline_y);
                 operations.push(Operation::new("w", vec![Object::Real(0.5)]));
-                operations.push(Operation::new("m", vec![Object::Real(x0), Object::Real(y)]));
-                operations.push(Operation::new("l", vec![Object::Real(x1), Object::Real(y)]));
+                operations.push(Operation::new("m", vec![Object::Real(x0), Object::Real(y0)]));
+                operations.push(Operation::new("l", vec![Object::Real(x1), Object::Real(y1)]));
                 operations.push(Operation::new("S", vec![]));
             }
             cursor += width_page;
@@ -629,6 +617,49 @@ fn paint_lines(
     }
     operations.push(Operation::new("Q", vec![]));
     Ok(operations)
+}
+
+fn layout_size(text: &TextBox) -> (f64, f64) {
+    let width = text.width - text.padding.left - text.padding.right;
+    let height = text.height - text.padding.top - text.padding.bottom;
+    if text.rotation == 90 {
+        (height, width)
+    } else {
+        (width, height)
+    }
+}
+
+fn place(page: &Page, text: &TextBox, local_x: f64, local_y: f64) -> (f32, f32) {
+    let (document_x, document_y) = if text.rotation == 90 {
+        let along = text.height - text.padding.top - text.padding.bottom;
+        (
+            text.pos_x + text.padding.left + local_y,
+            text.pos_y + text.padding.top + along - local_x,
+        )
+    } else {
+        (
+            text.pos_x + text.padding.left + local_x,
+            text.pos_y + text.padding.top + local_y,
+        )
+    };
+    pdf_point(page, document_x, document_y)
+}
+
+fn text_matrix(rotation: i32, pdf_x: f32, pdf_y: f32) -> Vec<Object> {
+    let (a, b, c, d) = if rotation == 90 {
+        // Advance up the page. Glyphs stand to the left of that baseline.
+        (0.0, 1.0, -1.0, 0.0)
+    } else {
+        (1.0, 0.0, 0.0, 1.0)
+    };
+    vec![
+        Object::Real(a),
+        Object::Real(b),
+        Object::Real(c),
+        Object::Real(d),
+        Object::Real(pdf_x),
+        Object::Real(pdf_y),
+    ]
 }
 
 fn encode_segment(

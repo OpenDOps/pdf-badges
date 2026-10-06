@@ -23,12 +23,12 @@ mod sync;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::net::TcpListener;
-use tokio::sync::watch;
+use tokio::sync::{watch, Notify};
 
 pub use admin::{api_router, OperatorState};
 pub use credentials::{
@@ -62,9 +62,31 @@ pub struct App {
     pub current: Arc<Mutex<CurrentEvent>>,
     /// Set while a sync wake is inside the probe or the queue.
     sync_running: Arc<AtomicBool>,
+    /// `POST /api/sync` signals the sync thread. The handler does not open a socket.
+    sync_notify: Arc<Notify>,
+    /// Finished wakes, including one that stopped before a socket.
+    sync_passes: Arc<AtomicU64>,
 }
 
 impl App {
+    /// Ask the sync thread for one wake. A wake already inside the probe or the queue is left alone.
+    pub fn request_sync(&self) {
+        if self.sync_running.load(Ordering::Acquire) {
+            return;
+        }
+        self.sync_notify.notify_one();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn sync_passes(&self) -> u64 {
+        self.sync_passes.load(Ordering::Acquire)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn sync_busy(&self) -> bool {
+        self.sync_running.load(Ordering::Acquire)
+    }
+
     pub fn new() -> (Self, print_queue::PrintWorker) {
         let gate = Arc::new(Gate::new());
         let (prints, worker) = PrintQueue::pair(Arc::clone(&gate));
@@ -84,6 +106,8 @@ impl App {
                 dist: PathBuf::from("registration-admin/dist"),
                 current: Arc::new(Mutex::new(CurrentEvent::new("."))),
                 sync_running: Arc::new(AtomicBool::new(false)),
+                sync_notify: Arc::new(Notify::new()),
+                sync_passes: Arc::new(AtomicU64::new(0)),
             },
             worker,
         )

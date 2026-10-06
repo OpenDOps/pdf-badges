@@ -1,6 +1,12 @@
 # Rust build output
 /target/
 
+# Local badge template (fonts and layout stay on the machine)
+/scripts/badges/tadviser.yaml
+
+# Local event copy used by the form server (visitor data, not a fixture)
+/testdata/
+
 # Python
 .venv/
 venv/

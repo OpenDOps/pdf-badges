@@ -179,6 +179,22 @@ impl CurrentEvent {
         self.close()
     }
 
+    /// Store `document` on the open event. The database fills its search tables
+    /// and the memory list from that JSON.
+    pub fn save_document(
+        &self,
+        event_id: &str,
+        document: &serde_json::Value,
+    ) -> Result<(), CurrentError> {
+        let admitted = self.admit(event_id)?;
+        let result = {
+            let mut db = lock_db(&admitted.db);
+            db.save_document(document).map_err(CurrentError::from)
+        };
+        drop(admitted);
+        result
+    }
+
     /// Write `visitor` only when `event_id` is the open event.
     pub fn write(&self, event_id: &str, visitor: &VisitorWrite) -> Result<(), CurrentError> {
         let admitted = self.admit(event_id)?;
@@ -301,6 +317,34 @@ impl CurrentEvent {
             let mut db = lock_db(&admitted.db);
             db.store_barcodes(cat_id, clean_id, bc_type, date, barcodes)
                 .map_err(CurrentError::from)
+        };
+        drop(admitted);
+        result
+    }
+
+    /// Waiting rows, then rows already marked in sync. An empty holder is `(0, 0)`.
+    pub fn registration_sync_counts(&self) -> Result<(i64, i64), CurrentError> {
+        let Some(event_id) = self.event_id() else {
+            return Ok((0, 0));
+        };
+        let admitted = self.admit(&event_id)?;
+        let result = {
+            let db = lock_db(&admitted.db);
+            db.registration_sync_counts().map_err(CurrentError::from)
+        };
+        drop(admitted);
+        result
+    }
+
+    /// How many registrations still have `in_synch` unset. An empty holder is 0.
+    pub fn waiting_registration_count(&self) -> Result<i64, CurrentError> {
+        let Some(event_id) = self.event_id() else {
+            return Ok(0);
+        };
+        let admitted = self.admit(&event_id)?;
+        let result = {
+            let db = lock_db(&admitted.db);
+            db.waiting_registration_count().map_err(CurrentError::from)
         };
         drop(admitted);
         result

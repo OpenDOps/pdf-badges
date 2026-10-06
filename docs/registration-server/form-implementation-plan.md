@@ -533,6 +533,7 @@ The `/register` loader builds the form. The end of the walk can post.
 | `desk_condition_tree_shows_one_path` | Surname Иванов shows B, D, E, F. Surname Петров shows C, H, F. Any other surname shows neither path. |
 | `desk_fields_fit_three_across` | At width 1024 a scalar field uses the three-column class, the operator bar does not wrap, and Next is absent. |
 | `desk_save_posts_printer` | Save calls `save` with the visitor, the category, the ticket status, and the selected printer. |
+| `desk_saves_with_required_fields_empty` | Operator Save posts while required questions are empty. Those labels have no required mark. |
 | `desk_narrow_keeps_the_fields` | Width 767 still shows category, the unpaid tab, and the printer on one line above the questions. |
 | `desk_does_not_idle` | Past the kiosk idle interval, the typed answer is still there. |
 | `desk_failed_save_stays` | A failed save leaves the typed value on the page and leaves the queue empty. |

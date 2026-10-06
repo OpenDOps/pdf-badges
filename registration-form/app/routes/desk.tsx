@@ -1,11 +1,14 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { useLoaderData } from "react-router";
+import { useLoaderData, useLocation, useNavigate, useSearchParams } from "react-router";
 
 import { FormClient, type FormDocuments } from "../form/client";
-import { build, checkStep, openScreens, type FormState } from "../form/engine";
+import { build, loadVisitor, type FormState } from "../form/engine";
 import { Step } from "../form/step";
 import { kioskFrame, StepFrameContext, type StepFrame } from "../layouts/frame";
+import { chooseDeskCatalog, useDeskCatalog } from "../shell/catalog";
+import { openVisitor, setVisitorDirty, useOpenVisitor, useVisitorDirty, visitorHref } from "../shell/open-visitor";
+import { ClosedSelect } from "../picker";
 
 const BUSINESS = new Set(["no_ticket_code", "no_printer", "invalid_phone_email_combo"]);
 
@@ -41,52 +44,59 @@ function businessCode(error: unknown): string | undefined {
   return code;
 }
 
-function asList(body: unknown): unknown[] {
-  if (Array.isArray(body)) return body;
-  if (isRecord(body) && Array.isArray(body.data)) return body.data;
-  if (isRecord(body) && Array.isArray(body.list)) return body.list;
-  return [];
-}
-
-function textOf(value: unknown): string {
-  if (typeof value === "string") return value;
-  if (typeof value === "number") return String(value);
-  if (!isRecord(value)) return "";
-  const ru = value.ru;
-  if (typeof ru === "string") return ru;
-  if (isRecord(ru) && typeof ru.str === "string") return ru.str;
-  return typeof value.str === "string" ? value.str : "";
-}
-
-function optionsOf(body: unknown, kind: "category" | "printer"): { id: string; label: string }[] {
-  const options: { id: string; label: string }[] = [];
-  for (const item of asList(body)) {
-    if (typeof item === "string") {
-      options.push({ id: item, label: item });
-      continue;
-    }
-    if (!isRecord(item)) continue;
-    if (kind === "category") {
-      const id = item.cat_id ?? item.id;
-      const label = textOf(item.name) || textOf(id);
-      if (id === undefined || id === null || label === "") continue;
-      options.push({ id: String(id), label });
-      continue;
-    }
-    const id = textOf(item.value) || textOf(item.name) || textOf(item.id);
-    const label = textOf(item.text) || textOf(item.name) || id;
-    if (!id) continue;
-    options.push({ id, label });
-  }
-  return options;
-}
-
 function childRecord(parent: Record<string, unknown>, key: string): Record<string, unknown> {
   const current = parent[key];
   if (isRecord(current)) return current;
   const next = {};
   parent[key] = next;
   return next;
+}
+
+function textId(value: unknown): string {
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  if (typeof value === "string") return value;
+  return "";
+}
+
+function ticketOf(visitor: Record<string, unknown>): string {
+  const sub = visitor.subscribtion;
+  if (!isRecord(sub)) return "";
+  const prop = sub.jvrel_prop;
+  if (!isRecord(prop)) return "";
+  return textId(prop.ticket_status);
+}
+
+function packetOf(visitor: Record<string, unknown>): string {
+  const packs = visitor.ext_packets;
+  if (!Array.isArray(packs) || !isRecord(packs[0])) return "";
+  return textId(packs[0].pack_id);
+}
+
+function overlay(base: Record<string, unknown>, incoming: Record<string, unknown>) {
+  for (const [key, value] of Object.entries(incoming)) {
+    const current = base[key];
+    if (Array.isArray(value)) {
+      const template = Array.isArray(current) ? current.find(isRecord) : undefined;
+      if (value.length === 0 && Array.isArray(current) && current.length > 0) continue;
+      if (template && value.every(isRecord)) {
+        base[key] = value.map((item) => {
+          const row = structuredClone(template);
+          overlay(row, item);
+          return row;
+        });
+        continue;
+      }
+    }
+    if (isRecord(value) && isRecord(current)) {
+      overlay(current, value);
+      continue;
+    }
+    base[key] = value;
+  }
+}
+
+function formSnapshot(visitor: Record<string, unknown>, category: string, ticket: string, packets: string) {
+  return JSON.stringify({ visitor, category, ticket, packets });
 }
 
 function stamp(visitor: Record<string, unknown>, category: string, ticket: string, packets: string) {
@@ -108,51 +118,107 @@ export async function loader({ request }: { request: Request }) {
 export default function Desk() {
   const { form } = useLoaderData() as { form: FormDocuments };
   const { t } = useTranslation();
+  const navigate = useNavigate();
+  const { pathname } = useLocation();
+  const [searchParams] = useSearchParams();
+  const userId = searchParams.get("userId")?.trim() ?? "";
+  const opened = useOpenVisitor();
+  const dirty = useVisitorDirty();
+  const editing = pathname === "/visitor";
   const client = useMemo(() => new FormClient(), []);
   const frame = useDeskFrame();
   const [state] = useState<FormState>(() => build(form, "ru"));
   const [tick, setTick] = useState(0);
-  const [categories, setCategories] = useState<{ id: string; label: string }[]>([]);
-  const [printers, setPrinters] = useState<{ id: string; label: string }[]>([]);
-  const [category, setCategory] = useState("");
+  const catalog = useDeskCatalog();
+  const [editCategory, setEditCategory] = useState("");
   const [ticket, setTicket] = useState("");
-  const [printer, setPrinter] = useState("");
   const [packets, setPackets] = useState("");
   const [saveError, setSaveError] = useState("");
+  const categoryId = editing ? editCategory : catalog.category;
+  const saved = useRef("");
+
+  function noteEdits() {
+    if (!editing || !saved.current) return;
+    setVisitorDirty(formSnapshot(state.visitor, categoryId, ticket, packets) !== saved.current);
+  }
 
   useEffect(() => {
-    let stopped = false;
+    noteEdits();
+  }, [editing, tick, categoryId, ticket, packets, state]);
+
+  useEffect(() => {
+    if (!editing) return;
+    if (!opened) {
+      if (userId) {
+        openVisitor(userId);
+        return;
+      }
+      navigate("/visitors", { replace: true });
+      return;
+    }
+    if (userId !== opened.uid) {
+      navigate(visitorHref(opened.uid), { replace: true });
+      return;
+    }
+    let live = true;
     void client
-      .categories()
+      .registration(opened.uid)
       .then((body) => {
-        if (!stopped) setCategories(optionsOf(body, "category"));
-      })
-      .catch(() => undefined);
-    void client
-      .printers()
-      .then((body) => {
-        if (!stopped) setPrinters(optionsOf(body, "printer"));
+        if (!live || !isRecord(body)) return;
+        const filled = structuredClone(form.model);
+        overlay(filled, body);
+        if (!textId(filled.uid)) filled.uid = opened.uid;
+        const category = textId(body.category);
+        const nextTicket = ticketOf(body);
+        const nextPackets = packetOf(body);
+        loadVisitor(state, filled);
+        saved.current = formSnapshot(state.visitor, category, nextTicket, nextPackets);
+        setVisitorDirty(false);
+        setEditCategory(category);
+        setTicket(nextTicket);
+        setPackets(nextPackets);
+        refresh();
       })
       .catch(() => undefined);
     return () => {
-      stopped = true;
+      live = false;
     };
-  }, [client]);
+  }, [editing, opened, userId, client, navigate, state]);
 
   function refresh() {
     setTick((value) => value + 1);
   }
 
-  async function saveVisitor() {
-    state.step = openScreens(state);
-    const errors = await checkStep(state, client);
-    state.errors = errors;
-    refresh();
-    if (errors.length > 0) return;
-    stamp(state.visitor, category, ticket, packets);
+  async function saveVisitor(): Promise<boolean> {
+    state.errors = [];
+    stamp(state.visitor, categoryId, ticket, packets);
     try {
-      await client.save(state.visitor, printer || undefined);
+      await client.save(state.visitor, catalog.printer || undefined);
+      saved.current = formSnapshot(state.visitor, categoryId, ticket, packets);
+      setVisitorDirty(false);
       setSaveError("");
+      return true;
+    } catch (error) {
+      setSaveError(businessCode(error) ?? "");
+      return false;
+    }
+  }
+
+  function leaveVisitor() {
+    navigate("/visitors");
+  }
+
+  async function saveAndLeave() {
+    if (await saveVisitor()) leaveVisitor();
+  }
+
+  async function printVisitor() {
+    if (!opened) return;
+    if (dirty && !(await saveVisitor())) return;
+    try {
+      await client.print([opened.uid], catalog.printer || undefined);
+      setSaveError("");
+      leaveVisitor();
     } catch (error) {
       setSaveError(businessCode(error) ?? "");
     }
@@ -160,24 +226,25 @@ export default function Desk() {
 
   return (
     <StepFrameContext.Provider value={frame}>
-      <main data-testid="frame" className="flex w-full flex-col pb-bar">
-        <header data-testid="operator-bar" className="sticky top-0 z-30 flex w-full flex-nowrap items-end gap-3 border-b border-gray-200 bg-white px-4 py-3">
+      <main data-screen="form" data-testid="frame" className="flex w-full flex-col pb-bar">
+        <header data-testid="operator-bar" className="sticky top-[var(--desk-status,0px)] z-[60] flex w-full flex-nowrap items-end gap-3 border-b border-gray-200 bg-white px-4 py-3">
           <label className="flex min-w-0 flex-1 flex-col gap-1">
             <span className="text-xs font-medium text-gray-500">{t("desk.category")}</span>
-            <select aria-label={t("desk.category")} value={category} onChange={(event) => setCategory(event.target.value)}>
-              <option value="" />
-              {categories.map((item) => (
-                <option key={item.id} value={item.id}>
-                  {item.label}
-                </option>
-              ))}
-            </select>
+            <ClosedSelect
+              label={t("desk.category")}
+              options={catalog.categories}
+              value={categoryId}
+              onPick={(id) => {
+                if (editing) setEditCategory(id);
+                else chooseDeskCatalog({ category: id });
+              }}
+            />
           </label>
           <div data-testid="pay" className="flex min-w-0 flex-1 flex-col gap-1">
             <span id="ticket-status" className="text-xs font-medium text-gray-500">
               {t("desk.ticket")}
             </span>
-            <div className="flex" role="tablist" aria-labelledby="ticket-status">
+            <div className="flex w-full min-w-0" role="tablist" aria-labelledby="ticket-status">
               <button type="button" role="tab" aria-selected={ticket === "-1"} onClick={() => setTicket("-1")}>
                 {t("desk.unpaid")}
               </button>
@@ -188,14 +255,12 @@ export default function Desk() {
           </div>
           <label className="flex min-w-0 flex-1 flex-col gap-1">
             <span className="text-xs font-medium text-gray-500">{t("desk.printer")}</span>
-            <select aria-label={t("desk.printer")} value={printer} onChange={(event) => setPrinter(event.target.value)}>
-              <option value="" />
-              {printers.map((item) => (
-                <option key={item.id} value={item.id}>
-                  {item.label}
-                </option>
-              ))}
-            </select>
+            <ClosedSelect
+              label={t("desk.printer")}
+              options={catalog.printers}
+              value={catalog.printer}
+              onPick={(id) => chooseDeskCatalog({ printer: id })}
+            />
           </label>
           <label className="flex min-w-0 flex-1 flex-col gap-1">
             <span className="text-xs font-medium text-gray-500">{t("desk.packets")}</span>
@@ -203,18 +268,23 @@ export default function Desk() {
           </label>
         </header>
         <div className="px-4 py-4">
-          <Step sheet state={state} client={client} onChange={refresh} />
+          <Step sheet state={state} client={client} onChange={refresh} onEdit={noteEdits} />
         </div>
         <div data-testid="save-bar" className="fixed inset-x-0 bottom-0 z-20 flex items-center justify-end gap-4 border-t border-gray-200 bg-white px-4 py-3">
           {saveError ? <p className="mr-auto text-red-700">{t(`error.${saveError}`)}</p> : null}
           <button
             type="button"
             onClick={() => {
-              void saveVisitor();
+              void (editing ? saveAndLeave() : saveVisitor());
             }}
           >
             {t("desk.save")}
           </button>
+          {editing ? (
+            <button type="button" onClick={() => void printVisitor()}>
+              {t("desk.print")}
+            </button>
+          ) : null}
         </div>
         <span className="hidden" data-tick={tick} />
       </main>

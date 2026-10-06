@@ -12,14 +12,14 @@ Step 9 is done when steps 1 through 8 are done.
 
 | Step | What it covers | Status |
 |---|---|---|
-| [1. Liveness](#step-1-liveness) | The device is up, and which event is open | not started |
-| [2. Forms](#step-2-forms) | Config, enums, backgrounds, categories, tickets | not started |
-| [3. Visitors](#step-3-visitors) | Search, one row, save, photo, counts | not started |
+| [1. Liveness](#step-1-liveness) | The device is up, and which event is open | done |
+| [2. Forms](#step-2-forms) | Config, enums, backgrounds, categories, tickets | done |
+| [3. Visitors](#step-3-visitors) | Search, one row, save, photo, counts | done |
 | [4. Print](#step-4-print) | Print a list, a certificate, a preview | not started |
 | [5. Scans](#step-5-scans) | Zones, posted scans, a local visitor pull | not started |
-| [6. Desk](#step-6-desk) | Keys, printers, the registration flags | not started |
+| [6. Desk](#step-6-desk) | Keys, printers, the registration flags | done |
 | [7. Leadgen](#step-7-leadgen) | Org login, manager download, attachments | not started |
-| [8. Sync status](#step-8-sync-status) | How many rows are waiting, and a manual wake | not started |
+| [8. Sync status](#step-8-sync-status) | How many rows are waiting, and a manual wake | done |
 
 Shared rules:
 
@@ -143,7 +143,7 @@ Sync writes the form config, the backgrounds, the enum files, and the categories
 
 `GET /api/registrations` is the db plan's search and list page. Query fields are `q`, `name`, `surname`, `email`, `company`, `category`, `code`, `limit`, and `offset`. `code` is the barcode lookup `/get_mail_list` did. One exact uid is `GET /api/registrations/{id}` and returns the stored JSON row. The list data includes `show_gotsome` and `show_ticket_status` from the settings object.
 
-`POST /api/registrations` is `datapost`. The body is the visitor JSON the floor already posts as `data`. The handler writes the row through the db plan's write path, takes a ticket barcode when the row needs one, and enqueues a print when the settings say the floor prints on save and the body does not say `noprint`. No barcode left is 409 `no_ticket_code`. The data on success is `{ "zone_name", "ticket_status" }`. `zone_name` is the sector name of the queue the print pick chose. `ticket_status` is present when the settings show it.
+`POST /api/registrations` is `datapost`. The body is the visitor JSON the floor already posts as `data`. The handler writes the row through the db plan's write path, takes a ticket barcode when the row needs one and the pool has one, and enqueues a print when the settings say the floor prints on save and the body does not say `noprint`. An empty pool leaves the barcode empty and still writes the row. The data on success is `{ "zone_name", "ticket_status" }`. `zone_name` is the sector name of the queue the print pick chose. `ticket_status` is present when the settings show it.
 
 An email plus a phone that hit different rows is 409 `invalid_phone_email_combo`, which is the combo check inside `/userdata`. When the form settings say one row per email or per phone and the search hits one row, the response is that row instead of a list. The handler does that before insert.
 
@@ -251,7 +251,7 @@ Search, one row, save, photo, and the email and phone counts.
 ### Work
 
 1. `GET /api/registrations` and `GET /api/registrations/{id}` use the db plan.
-2. `POST /api/registrations` writes one row. No remaining barcode is 409 `no_ticket_code`. The email and phone combo check returns 409 `invalid_phone_email_combo`.
+2. `POST /api/registrations` writes one row. An empty ticket pool leaves the barcode empty and still writes the row. The email and phone combo check returns 409 `invalid_phone_email_combo`.
 3. Photo POST and GET use `photos/` under the event directory.
 4. Counts return a number.
 
@@ -261,7 +261,7 @@ Search, one row, save, photo, and the email and phone counts.
 |---|---|
 | `search_by_code` | A stored barcode is returned by `GET /api/registrations?code=`. An unknown code is an empty list. |
 | `save_writes_the_row` | `POST /api/registrations` inserts a row the following GET returns. The print flag off does not enqueue. |
-| `no_barcode_is_conflict` | An empty ticket pool returns 409 `no_ticket_code` and inserts nothing. |
+| `empty_barcode_still_saves` | An empty ticket pool writes the row and leaves the barcode unset. |
 | `photo_roundtrip` | POST bytes are the GET bytes. A missing photo is 404. |
 
 ### Done when

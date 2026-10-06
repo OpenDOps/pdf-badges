@@ -1,0 +1,4 @@
+width 15874
+height 22450
+areas 2
+text {{surname}}

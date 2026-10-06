@@ -105,6 +105,25 @@ Change the two numbers at the top of the script.
 
 `subcolumn_row` of 0 means there is no subcolumn row. A value outside `header_row + 1` through `header_row + 4` is rejected.
 
+## No header row
+
+`SelectColumns` names the columns and reads every used row, including the first. Each entry is a column letter and the name to put on the table. This replaces a previous `SelectHeader`.
+
+```python
+from irbis.table.v1 import table_pb2
+
+selected = stub.SelectColumns(excel_pb2.SelectColumnsRequest(
+    session_id=view.session_id,
+    columns=[
+        table_pb2.Column(excel_id="A", name="surname"),
+        table_pb2.Column(excel_id="B", name="name"),
+        table_pb2.Column(excel_id="C", name="company name"),
+    ],
+))
+```
+
+`ReadTable` then starts at the first used row. Row 1 is data when the sheet starts there.
+
 ## Automated tests
 
 Host tests skip anything that needs LibreOffice:

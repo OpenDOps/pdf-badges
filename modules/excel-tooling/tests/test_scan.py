@@ -2,12 +2,15 @@ import pytest
 
 from excel_tooling.model import CellValue, Grid, GridCell
 from excel_tooling.scan import (
+    BadColumn,
     DuplicateColumn,
     HeaderNotCandidate,
     SubcolumnRowOutOfRange,
     columns_for_header,
+    columns_without_header,
     data_rows,
     header_candidates,
+    rows_without_header,
 )
 
 
@@ -183,6 +186,52 @@ def test_duplicate_subcolumn_under_one_parent():
     )
     with pytest.raises(DuplicateColumn):
         columns_for_header(sheet, 1, header_candidates(sheet, 1), subcolumn_row=2)
+
+
+def test_named_columns_keep_every_row():
+    sheet = grid(
+        2,
+        2,
+        {
+            1: [text(0, "Абрамов"), text(1, "Александр"), text(2, "Авангард")],
+            2: [text(0, "Авхадыев"), text(1, "Антон"), text(2, "СёрчИнформ")],
+        },
+    )
+    columns = columns_without_header([
+        ("A", "surname"),
+        ("b", " name "),
+        ("C", "company name"),
+    ])
+    assert names(columns) == [("A", "surname"), ("B", "name"), ("C", "company name")]
+    rows = rows_without_header(sheet, columns)
+    assert [row.excel_row for row in rows] == [1, 2]
+    assert rows[0].cells[0].display == "Абрамов"
+    assert rows[1].cells[2].display == "СёрчИнформ"
+
+
+def test_named_columns_start_at_the_used_area():
+    sheet = Grid(3, 4, 0, 0, {3: [text(0, "Ann")], 4: [text(0, "Bo")]})
+    columns = columns_without_header([("A", "name")])
+    assert [row.excel_row for row in rows_without_header(sheet, columns)] == [3, 4]
+
+
+def test_named_columns_ignore_a_column_that_was_not_selected():
+    sheet = grid(1, 1, {1: [text(0, "Ann"), text(1, "Oslo")]})
+    columns = columns_without_header([("A", "name")])
+    assert [cell.col for cell in rows_without_header(sheet, columns)[0].cells] == [0]
+
+
+def test_named_columns_reject_a_bad_spec():
+    with pytest.raises(BadColumn):
+        columns_without_header([])
+    with pytest.raises(BadColumn):
+        columns_without_header([("A1", "name")])
+    with pytest.raises(BadColumn):
+        columns_without_header([("A", "  ")])
+    with pytest.raises(DuplicateColumn):
+        columns_without_header([("A", "name"), ("B", "name")])
+    with pytest.raises(DuplicateColumn):
+        columns_without_header([("A", "surname"), ("a", "name")])
 
 
 def test_subcolumn_row_window():

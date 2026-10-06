@@ -77,10 +77,13 @@ Today the Rust code still lives at the repository root (`src/`, `tests/`, the ro
 | [registration-server/sync-implementation-plan.md](registration-server/sync-implementation-plan.md) | Build sequence for the sync queue: one cap shared with the sockets, same-path downloads in order, cursors, then the event file |
 | [event-sync/design.md](event-sync/design.md) | The sync library hosts bind: registration desk, access control, a hall scanner, a door reader |
 | [registration-server/printing.md](registration-server/printing.md) | CUPS queues, IPP submit, and the ticket-render crate that draws a badge |
+| [registration-server/printing-preload.md](registration-server/printing-preload.md) | What is decoded when the event opens, and which layer is drawn before the visitor's fields |
 | [registration-server/printing-implementation-plan.md](registration-server/printing-implementation-plan.md) | Build sequence for that print path: layout, draw, find a queue, route, submit |
 | [registration-server/http-implementation-plan.md](registration-server/http-implementation-plan.md) | Build sequence for the local HTTP API: each old route, what it does, and the `/api` route that replaces it |
 | [registration-server/form-design.md](registration-server/form-design.md) | The registration form: one React engine for the desk page and the kiosk screens |
+| [registration-server/pickers.md](registration-server/pickers.md) | Shared list for category, printer, country, city, and the phone calling code |
 | [registration-server/registration-ui-design.md](registration-server/registration-ui-design.md) | Operator screens around that form: key, menu, visitor list, print, settings, printers |
+| [registration-server/registration-ui-implementation-plan.md](registration-server/registration-ui-implementation-plan.md) | Build sequence for those screens: cookie gate, lazy routes, then one tested step per screen |
 | [registration-server/form-implementation-plan.md](registration-server/form-implementation-plan.md) | Build sequence for that form: its own React Router app, tested from fixtures before printing and the local HTTP API |
 | [registration-server/credentials.md](registration-server/credentials.md) | Credential file: JSON document and atomic replace |
 | [registration-server/credentials-implementation-plan.md](registration-server/credentials-implementation-plan.md) | Build sequence for that file |

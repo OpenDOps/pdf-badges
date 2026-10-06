@@ -30,8 +30,11 @@ For each page, in order:
 
 1. Create a page whose trim is `page_size.width` by `page_size.height`. Write `MediaBox`, `BleedBox`, `TrimBox`, and `CropBox` from `page_size.bleeds` as specified in [document-schema.md](document-schema.md).
 2. Walk `contents` in array order (later entries paint above earlier ones).
-3. Image placement: load `resources.images[resource_name]`, draw the bitmap into `(posX, posY, width, height)` in the document system (top-left of the trim, y down). Shift into PDF user space by the left and bottom bleed. Clip to the media box, so artwork in the bleed is kept.
-4. Text box: choose the string (`content` if it is a string, otherwise `preentered`), parse markup, wrap, then fit font sizes when `auto_scale` is set, then draw. The same bleed shift applies.
+3. Skip an entry whose `ifSt` hides it. The rule is [Condition](document-schema.md#condition). A skipped entry is not an error and leaves no mark.
+4. Image placement: load `resources.images[resource_name]`, draw the bitmap into `(posX, posY, width, height)` in the document system (top-left of the trim, y down). Shift into PDF user space by the left and bottom bleed. Clip to the media box, so artwork in the bleed is kept.
+5. Text box: choose the string (`content` if it is a string, otherwise `preentered`), parse markup, wrap, then fit font sizes when `auto_scale` is set, then draw. The same bleed shift applies.
+6. Barcode: fill the payload the way a template box is filled, then draw `ean13`, `code128`, or `qr` into the rectangle. QR is that third type, not a separate entry.
+7. Photo: draw the row's bytes for `photo.field` into the rectangle. A missing photo leaves the rectangle empty.
 
 Empty `contents` still produces a blank page of the trim size, with the bleed boxes written. `metadata` is written to the PDF info dictionary (`title`, `author`, `creator`). `producer` identifies this writer.
 
@@ -39,7 +42,7 @@ Empty `contents` still produces a blank page of the trim size, with the bleed bo
 
 Decode the file by `file_format` (`jpg`, `jp2`, `bmp`). Place it in the rectangle with the image scaled to `width` and `height` (the editor already decided aspect ratio). Do not apply the historical `cm` matrix.
 
-Missing files and unknown formats are errors that name the placement `id` and the path. The writer does not skip a missing image.
+Missing files and unknown formats are errors that name the placement `id` and the path. The writer does not skip a missing image. A photo is the exception: a missing visitor image leaves the rectangle empty, as [Photo](document-schema.md#photo) specifies.
 
 Color: JPEG and JPEG 2000 are embedded as those filters. BMP is read as RGB or gray. A resource still marked `ICCBased` or `DeviceCMYK` waits on the image-processing work in [inventarization-plan.md](inventarization-plan.md); until the extractor stores a file the writer can embed, render fails with that color space named, rather than guessing RGB.
 
@@ -141,6 +144,9 @@ Fail the whole render on the first structural error, with a path-like context (`
 | `alignment.horizontal` other than `left`, `center`, or `right`, or `alignment.vertical` other than `top`, `middle`, or `bottom` | box id |
 | `auto_scale` present and not a boolean | box id |
 | `auto_scale: true` and the content width or height is 0 while the string is non-empty | box id |
+| `barcode.type` other than `ean13`, `code128`, or `qr` | entry id |
+| A photo file that exists and is not jpeg, bmp, or png | entry id |
+| An entry with none of `text`, `image`, `barcode`, `photo`, or with more than one | entry id |
 
 ## Tests
 
@@ -164,3 +170,4 @@ Fail the whole render on the first structural error, with a path-like context (`
 4. `auto_scale`: shrink every font size in a marked box so the text bounds fit the content rectangle.
 5. CLI `render` subcommand.
 6. HTTP handler for the webview, unchanged library.
+7. `ifSt`, barcode (`ean13`, `code128`, `qr`), and photo, drawn when the registration server integrates the page. The fields are [document-schema.md](document-schema.md). The work lands in steps 8 through 10 of [printing-implementation-plan.md](../registration-server/printing-implementation-plan.md). v0 text and image pages stay as they are until then.

@@ -24,6 +24,12 @@ pub struct PrintWorker {
     gate: Arc<Gate>,
 }
 
+impl PrintWorker {
+    pub(crate) fn try_recv(&mut self) -> Option<PrintJob> {
+        self.rx.try_recv().ok()
+    }
+}
+
 #[derive(Debug)]
 pub enum EnqueueError {
     EmptyId,

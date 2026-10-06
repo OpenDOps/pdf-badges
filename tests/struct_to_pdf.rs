@@ -653,6 +653,53 @@ fn markup_rejected_until_step_6() {
 }
 
 #[test]
+fn rotation_90_points_the_baseline_up() {
+    let yaml = r#"
+page_size:
+  width: 50
+  height: 70
+  units: mm
+  bleeds: {top: 0, right: 0, bottom: 0, left: 0}
+resources:
+  images: {}
+  fonts:
+    font1:
+      name: font1
+      font_family: LiberationSerif
+      weight: bold
+      italic: false
+      embedded: true
+      source_path: fonts/LiberationSerif-Bold.ttf
+contents:
+  - id: company
+    posX: 2
+    posY: 3
+    width: 20
+    height: 64
+    rotation: 90
+    alignment: {horizontal: center, vertical: middle}
+    padding: {top: 0, right: 0, bottom: 0, left: 0}
+    text:
+      font: font1
+      font_size: 5
+      leading: 0
+      line_height: 6
+      preentered: Hi
+      content: null
+"#;
+    let page = parse_yaml(yaml).expect("page");
+    let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/struct-to-pdf");
+    let bytes = render_page(&page, &base).unwrap();
+    let tm = content_ops(&bytes)
+        .into_iter()
+        .find(|op| op.operator == "Tm")
+        .expect("Tm");
+    approx(num(&tm.operands[0]), 0.0);
+    approx(num(&tm.operands[1]), 1.0);
+    approx(num(&tm.operands[2]), -1.0);
+    approx(num(&tm.operands[3]), 0.0);
+}
+
 fn baseline_at_top_plus_ascent() {
     let (page, base_dir) = load_fixture("text-baseline.yaml");
     let bytes = render_page(&page, &base_dir).unwrap();

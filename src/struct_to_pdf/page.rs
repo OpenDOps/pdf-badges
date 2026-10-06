@@ -133,6 +133,8 @@ pub struct TextBox {
     pub template: bool,
     pub delimiter_open: String,
     pub delimiter_close: String,
+    /// Clockwise degrees. `90` turns the text so it reads upward along the box height.
+    pub rotation: i32,
     pub text: TextBody,
 }
 
@@ -437,6 +439,7 @@ fn parse_content(index: usize, value: &Value) -> Result<ContentEntry, RenderErro
             template,
             delimiter_open,
             delimiter_close,
+            rotation: parse_rotation(obj, &id)?,
             text: parse_text(text_obj, &text_obj_id_from(obj))?,
         }))
     } else {
@@ -519,6 +522,19 @@ fn delimiter_side(map: &Map<String, Value>, side: &str, id: &str) -> Result<Stri
         _ => Err(RenderError {
             context: id.to_string(),
             message: format!("delimiters.{side} is missing"),
+        }),
+    }
+}
+
+fn parse_rotation(obj: &Map<String, Value>, id: &str) -> Result<i32, RenderError> {
+    match obj.get("rotation") {
+        None => Ok(0),
+        Some(Value::Number(number)) if number.as_i64() == Some(0) || number.as_i64() == Some(90) => {
+            Ok(number.as_i64().unwrap_or(0) as i32)
+        }
+        Some(_) => Err(RenderError {
+            context: id.to_string(),
+            message: "rotation must be 0 or 90".to_string(),
         }),
     }
 }

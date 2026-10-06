@@ -1,6 +1,6 @@
 """Header candidates and data rows."""
 
-from excel_tooling.columns import excel_id
+from excel_tooling.columns import excel_id, parse_excel_id
 from excel_tooling.model import Candidate, Column, DataRow, Grid, GridCell
 
 EMPTY_ROW_GAP = 50
@@ -23,6 +23,12 @@ class SubcolumnRowOutOfRange(Exception):
     def __init__(self, excel_row: int):
         self.excel_row = excel_row
         super().__init__(str(excel_row))
+
+
+class BadColumn(Exception):
+    def __init__(self, detail: str):
+        self.detail = detail
+        super().__init__(detail)
 
 
 def header_candidates(grid: Grid, k: int) -> tuple[Candidate, ...]:
@@ -117,14 +123,52 @@ def _block_windows(start: int, end: int, size: int):
         row = last + 1
 
 
+def columns_without_header(specs: list[tuple[str, str]]) -> tuple[Column, ...]:
+    """Name columns without taking them from a sheet row.
+
+    Each spec is `(excel_id, name)`. The name is the caller's, trimmed.
+    Every used row is then data, including the first.
+    """
+    if not specs:
+        raise BadColumn("columns")
+    columns: list[Column] = []
+    seen_ids: set[str] = set()
+    seen_names: set[str] = set()
+    for raw_id, raw_name in specs:
+        index = parse_excel_id(raw_id)
+        if index is None:
+            raise BadColumn(raw_id)
+        letter = excel_id(index)
+        if letter in seen_ids:
+            raise DuplicateColumn(letter)
+        name = raw_name.strip()
+        if not name:
+            raise BadColumn("name")
+        if name in seen_names:
+            raise DuplicateColumn(name)
+        seen_ids.add(letter)
+        seen_names.add(name)
+        columns.append(Column(index=index, excel_id=letter, name=name))
+    return tuple(columns)
+
+
+def rows_without_header(grid: Grid, columns: tuple[Column, ...]) -> tuple[DataRow, ...]:
+    """Data starts on the first used row. No row is consumed as a header."""
+    return _emit_rows(grid, grid.first_row, columns)
+
+
 def data_rows(
     grid: Grid,
     header_row: int,
     columns: tuple[Column, ...],
     subcolumn_row: int | None = None,
 ) -> tuple[DataRow, ...]:
-    header_cols = tuple(column.index for column in _leaves(columns))
     start = (subcolumn_row if subcolumn_row is not None else header_row) + 1
+    return _emit_rows(grid, start, columns)
+
+
+def _emit_rows(grid: Grid, start: int, columns: tuple[Column, ...]) -> tuple[DataRow, ...]:
+    header_cols = tuple(column.index for column in _leaves(columns))
     rows: list[DataRow] = []
     skipped = 0
     for excel_row in range(start, grid.last_row + 1):

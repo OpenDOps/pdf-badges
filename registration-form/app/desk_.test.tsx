@@ -5,6 +5,7 @@ import type { FormDocuments } from "./form/client";
 import { foldForm } from "./form/fold";
 import { readOutbox } from "./form/outbox";
 import Desk, { loader } from "./routes/desk";
+import { resetDeskCatalog } from "./shell/catalog";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -52,11 +53,13 @@ function mount(options: {
       if (url.pathname === "/forms/form.json") {
         return new Response(JSON.stringify(documents), { status: 200, headers: { "Content-Type": "application/json" } });
       }
-      if (url.pathname === "/api/forms/categories") {
-        return new Response(JSON.stringify(options.categories ?? []), { status: 200 });
-      }
-      if (url.pathname === "/api/printers") {
-        return new Response(JSON.stringify(options.printers ?? []), { status: 200 });
+      if (url.pathname === "/api/desk/catalog") {
+        const rev = url.searchParams.get("rev");
+        if (rev && rev !== "0") return new Promise(() => undefined);
+        return new Response(
+          JSON.stringify({ rev: 1, categories: options.categories ?? [], printers: options.printers ?? [] }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
       }
       if (url.pathname === "/api/registrations") {
         return new Response(JSON.stringify(options.search ?? []), { status: 200 });
@@ -77,6 +80,7 @@ function mount(options: {
 }
 
 beforeEach(() => {
+  resetDeskCatalog();
   Object.defineProperty(window, "innerWidth", { configurable: true, value: 1024 });
   Object.defineProperty(window, "innerHeight", { configurable: true, value: 768 });
   localStorage.clear();
@@ -151,7 +155,10 @@ test("desk_fields_fit_three_across", async () => {
   expect(surname.closest("[data-testid=body-row]")).toHaveClass("min-[865px]:w-1/3");
   expect(screen.getByTestId("operator-bar")).toHaveClass("flex-nowrap");
   expect(screen.getAllByTestId("choice")[0]).toHaveClass("min-[865px]:grid-cols-3");
+  const variant = screen.getAllByRole("radiogroup")[0]?.closest("[data-testid=body-row]");
+  expect(variant).toHaveClass("mb-4");
   expect(screen.queryByRole("button", { name: "Далее" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Печать" })).not.toBeInTheDocument();
   expect(screen.getByTestId("frame")).not.toHaveClass("max-w-kiosk");
 });
 
@@ -163,11 +170,16 @@ test("desk_save_posts_printer", async () => {
     categories: [{ cat_id: 3, name: { ru: "Гость" } }],
     printers: [{ name: "Zebra", text: "Zebra" }],
   });
-  await screen.findByRole("option", { name: "Гость" });
-  await screen.findByRole("option", { name: "Zebra" });
-  fireEvent.change(screen.getByLabelText("Категория"), { target: { value: "3" } });
+  const category = await screen.findByLabelText("Категория");
+  await waitFor(() => expect(category).toHaveValue("Гость"));
+  expect(screen.getByLabelText("Принтер")).toHaveValue("");
+  fireEvent.click(category);
+  expect((await screen.findAllByRole("option")).map((option) => option.textContent)).toEqual(["Гость"]);
+  expect(screen.getByRole("option", { name: "Гость" })).toHaveClass("bg-sky-100", "hover:bg-sky-200");
+  fireEvent.click(screen.getByRole("option", { name: "Гость" }));
   fireEvent.click(screen.getByRole("tab", { name: "Оплачен" }));
-  fireEvent.change(screen.getByLabelText("Принтер"), { target: { value: "Zebra" } });
+  fireEvent.click(screen.getByLabelText("Принтер"));
+  fireEvent.click(await screen.findByRole("option", { name: "Zebra" }));
   fireEvent.change(screen.getByTestId("packets"), { target: { value: "4" } });
   fireEvent.change(screen.getByLabelText("Фамилия", { exact: false }), { target: { value: "Иванов" } });
   fireEvent.click(screen.getByRole("button", { name: "Сохранить" }));
@@ -186,6 +198,53 @@ test("desk_save_posts_printer", async () => {
   expect(body.visitor.subscribtion.jvrel_prop.ticket_status).toBe(1);
   expect(body.visitor.ext_packets[0]?.pack_id).toBe(4);
   expect(body.visitor.personalData.surname).toBe("Иванов");
+});
+
+test("desk_saves_with_required_fields_empty", async () => {
+  const { posts } = mount({});
+  const surname = await screen.findByLabelText("Фамилия", { exact: false });
+  expect(document.querySelector(`label[for="${surname.id}"]`)?.textContent).toBe("Фамилия");
+  fireEvent.click(screen.getByRole("button", { name: "Сохранить" }));
+  await waitFor(() => expect(posts).toHaveLength(1));
+  expect(screen.queryByText("Заполните это поле")).not.toBeInTheDocument();
+});
+
+test("desk_category_stays_selected", async () => {
+  mount({
+    categories: [
+      { cat_id: -2, name: { ru: "Экспонент" } },
+      { cat_id: 3, name: { ru: "Гость" } },
+    ],
+    printers: [{ name: "Zebra", text: "Zebra" }],
+  });
+  const category = await screen.findByLabelText("Категория");
+  await waitFor(() => expect(category).toHaveValue("Экспонент"));
+  expect(category).toHaveAttribute("readonly");
+  fireEvent.focus(category);
+  expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+  fireEvent.click(category);
+  expect(await screen.findByRole("listbox")).toBeInTheDocument();
+  fireEvent.click(category);
+  expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+  fireEvent.click(category);
+  expect(await screen.findByRole("listbox")).toBeInTheDocument();
+  fireEvent.blur(category);
+  expect(category).toHaveValue("Экспонент");
+
+  const printer = screen.getByLabelText("Принтер");
+  expect(printer).toHaveValue("");
+  expect(printer).toHaveAttribute("readonly");
+  fireEvent.focus(printer);
+  expect(printer).toHaveAttribute("aria-expanded", "false");
+  fireEvent.click(printer);
+  expect(printer).toHaveAttribute("aria-expanded", "true");
+  fireEvent.click(printer);
+  expect(printer).toHaveAttribute("aria-expanded", "false");
+  fireEvent.click(printer);
+  fireEvent.click(await screen.findByRole("option", { name: "Zebra" }));
+  expect(printer).toHaveValue("Zebra");
+  expect(printer).toHaveAttribute("aria-expanded", "false");
+  expect(category).toHaveValue("Экспонент");
 });
 
 test("desk_narrow_keeps_the_fields", async () => {

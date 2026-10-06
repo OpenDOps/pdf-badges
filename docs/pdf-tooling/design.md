@@ -26,7 +26,9 @@ contents:
       content: null
 ```
 
-`template: true` means the box is scanned and substituted. Boxes without the flag are copied onto every page with their text unchanged, including any `{{` they happen to contain. Image placements are never templates. `template` defaults to false so existing fixtures keep drawing placeholders as literal text.
+`template: true` means the box is scanned and substituted. Boxes without the flag are copied onto every page with their text unchanged, including any `{{` they happen to contain. Image placements are never templates. A barcode may set `template` on its payload. A photo is not a template. `template` defaults to false so existing fixtures keep drawing placeholders as literal text.
+
+`ifSt` on any content entry hides that entry for a row whose value for that key is missing, empty, `false`, or `0`. An absent or empty `ifSt` draws the entry. The key is not a mustache field. Barcode types are `ean13`, `code128`, and `qr`. A photo reads `photo.field` from the row. Both are specified in [document-schema.md](document-schema.md) and drawn when the registration server integrates the page.
 
 `delimiters.open` and `delimiters.close` are the strings that wrap a field. Absent means `{{` and `}}`. The field keys are in [document-schema.md](document-schema.md#target-text-box). One box has one pair. Two boxes on a page may differ. The strings are matched exactly, so a box whose open is three braces does not also treat two braces as a field.
 
@@ -46,7 +48,7 @@ Rules for v1:
 
 - No nested delimiters, no sections, no inverted sections, no partials. An open token whose first name character is `#`, `/`, `^`, `!`, `>`, or `&` is an error that names the box id. With the default pair, `{{#row}}` is that error.
 - An empty pair (`open` immediately followed by `close`), or a second `open` before `close`, is an error that names the box id.
-- `delimiters` on a box whose `template` is not true, or on an image placement, is an error that names the box id.
+- `delimiters` on a box whose `template` is not true, or on an image placement or a photo, is an error that names the box id. A barcode may set `delimiters` when its `template` is true.
 - The scan runs on the raw string, so a placeholder sitting inside `<span>…</span>` is found. Tag names are not special-cased.
 - The same field name in several boxes, or twice in one box, is one field. The binding applies to every occurrence.
 - The reply lists each field once, in first-seen order, with the box ids that contain it.

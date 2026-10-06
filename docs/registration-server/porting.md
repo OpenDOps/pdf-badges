@@ -4,6 +4,23 @@ The device logs in once, stores the project token, opens the database for the se
 
 The remote API stays. The Scala session scraper, the properties-file side effects, and the sync loop tangled into "save the token" do not.
 
+## Summary
+
+| Step | What it covers | Status |
+|---|---|---|
+| [1. Credential file](#step-1--credential-file) | `device_id`, the base URL, and the project token on disk | done |
+| [2. Remote client](#step-2--remote-client-for-the-bind) | Login, the event list, and `profile/synchdev` | done |
+| [3. Local bind](#step-3--local-way-to-run-the-bind) | The admin app: login, choose an event, store the token | done |
+| [4. Event database](#step-4--event-database) | The event file and the memory copy | done |
+| [5. Switch](#step-5--switch-load-or-init) | Open, init, or load the selected event | done |
+| [6. Tokens](#step-6--working-with-tokens) | Send the stored token and drop a dead binding | done |
+| [7. Sync](#step-7--sync) | The download and upload queue | done |
+| [8. Printing](#step-8--printing) | Draw a badge and submit it to CUPS | not started |
+| [9. Local HTTP API](#step-9--local-http-api) | The `/api` routes the floor and the desk call | in progress |
+| [10. Registration UI](#step-10--registration-ui) | The form, then the operator screens around it | in progress |
+
+Step 10's form plan is done. Its operator-screen plan is done through the form path (step 5). Visitors, print, import, settings, and printers are not started.
+
 The stored id is `event_id`. The remote paths stay `boxapi/expos`, `eid`, and `profile/synchdev/{device_id}/{event_id}`.
 
 ## What this plan owns
@@ -26,6 +43,8 @@ The stored id is `event_id`. The remote paths stay `boxapi/expos`, `eid`, and `p
 
 ## Step 1 — Credential file
 
+Status: done.
+
 The file library is [credentials.md](credentials.md). The build sequence is [credentials-implementation-plan.md](credentials-implementation-plan.md). `CredentialFile` lives in `src/registration_server/credentials.rs`.
 
 One file, loaded at process start, written when the bind succeeds or the token is cleared.
@@ -45,6 +64,8 @@ Empty strings are not a logged-out state. Logout deletes `event_id`, `event_name
 If `event_id` and `project_token` are both present at start, the process is already logged in. It does not call `auth/login`. Opening that event's file is step 5.
 
 ## Step 2 — Remote client for the bind
+
+Status: done.
 
 `Remote` and `OperatorSession` are in `src/registration_server/remote.rs`. `reqwest` performs the calls. The `cookie` crate parses `JSESSIONID` from `Set-Cookie`, and later calls send that cookie. The temptoken is not stored. `bind` writes the project token through `CredentialFile` and drops the session, so the cookie dies with it.
 
@@ -71,6 +92,8 @@ The temptoken is exchanged in the same login action. It is not saved.
 
 ## Step 3 — Local way to run the bind
 
+Status: done.
+
 The operator uses a React admin app: log in, pick an event, and the device stores the project token. Visible copy comes from a Russian catalog through `react-i18next`. The build sequence is [admin-implementation-plan.md](admin-implementation-plan.md).
 
 The Scala pages (`admin.mustache`, `controlExpo.mustache`, jQuery, Angular) stay in the old tree. This step does not render them.
@@ -91,6 +114,8 @@ The event screen has a keys block. `GET /api/keys` returns an empty list until t
 
 ## Step 4 — Event database
 
+Status: done.
+
 The event file and the in-memory working set. [db-design.md](db-design.md) is the schema, the Scala `prepareDatabase` path, and which queries stay off the flash. The build sequence is [db-implementation-plan.md](db-implementation-plan.md).
 
 `rusqlite` opens `base/{event_id}/db.sqlite` and a shared `mode=memory` database. The file is the durable copy. Search and the registration list read the memory database. WAL is on for the file and `synchronous` is `FULL`. The server thread and the sync thread each open their own connection to each database and do not share a connection.
@@ -98,6 +123,8 @@ The event file and the in-memory working set. [db-design.md](db-design.md) is th
 The file tables from the Scala event file are created empty when the file is new. The memory database gets the FTS index and the list-page rows. `keys` gets one admin row and one operator row when it is empty. No remote payload is parsed. Which event is open, and when the memory copy runs, is step 5.
 
 ## Step 5 — Switch, load, or init
+
+Status: done.
 
 When the operator chooses an event, and again at startup when the credential file already names one, switch to that event's file. The build sequence is [switch-implementation-plan.md](switch-implementation-plan.md).
 
@@ -111,6 +138,8 @@ When the operator chooses an event, and again at startup when the credential fil
 A switch clears the sync queue for the previous event and drops calls still running for that id. The new event is probed on the next wake, and that wake fills its own queue after step 6 accepts the token.
 
 ## Step 6 — Working with tokens
+
+Status: done.
 
 The build sequence is [token-implementation-plan.md](token-implementation-plan.md). That client is its own module. `remote.rs` stays the operator bind: login, the event list, and `profile/synchdev`.
 
@@ -133,6 +162,8 @@ If a tokened response has `error_msg` `not_logged_in` or `no_pattern`, delete th
 `invalid_cred` stays local. It means the file has no token. It does not write empty properties.
 
 ## Step 7 — Sync
+
+Status: done.
 
 The build sequence is [sync-implementation-plan.md](sync-implementation-plan.md). The queue is the `event-sync` library. This process is the first host and turns on every slice. An access-control station, a phone scanning a hall, and a door reader bind the same library with a smaller catalog. [event-sync/design.md](../event-sync/design.md) is that split. Printing and the local HTTP API stay in this process.
 
@@ -179,6 +210,8 @@ Uploads follow the Scala order. A batch that the server accepts is marked synced
 
 ## Step 8 — Printing
 
+Status: not started.
+
 The design is [printing.md](printing.md). The build sequence is [printing-implementation-plan.md](printing-implementation-plan.md).
 
 The server thread finds CUPS queues, draws one badge with the `ticket-render` crate, and submits that job. The sync thread stores `badge.cfg` and `bg.png` from `boxapi/getbadge` and does not draw or print. `ticket-render` is its own crate. It returns PNG bytes or a 1-bit graphic. It does not call cupsd.
@@ -189,6 +222,8 @@ The server thread finds CUPS queues, draws one badge with the `ticket-render` cr
 - A failed submit is an error to the caller. The worker does not write a stand-in PNG and report success.
 
 ## Step 9 — Local HTTP API
+
+Status: in progress. Liveness, the form files, visitors, desk, and sync status are done. Print, scans, and leadgen are not started.
 
 The design and the build sequence are [http-implementation-plan.md](http-implementation-plan.md).
 
@@ -201,7 +236,9 @@ This is the last server step. It replaces the Scala `RegApp` routes the floor an
 
 ## Step 10 — Registration UI
 
-The form is [form-design.md](form-design.md), and its build sequence is [form-implementation-plan.md](form-implementation-plan.md). The other operator screens are [registration-ui-design.md](registration-ui-design.md).
+Status: in progress. The form plan is done. The operator screens are done through the form path. Visitors onward are not started.
+
+The form is [form-design.md](form-design.md), and its build sequence is [form-implementation-plan.md](form-implementation-plan.md). The other operator screens are [registration-ui-design.md](registration-ui-design.md), and their build sequence is [registration-ui-implementation-plan.md](registration-ui-implementation-plan.md).
 
 This is a second React project, `registration-form/`. It does not live inside `registration-admin/`. Login and the event choice stay that admin app. This app is the registration form and the operator desk around it: the key, the menu, the form, the visitor list, print progress, import, settings, and printers.
 

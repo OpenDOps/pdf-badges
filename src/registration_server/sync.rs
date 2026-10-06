@@ -104,6 +104,11 @@ pub async fn sync_loop(
                 let timeout = app.link.budget().limit;
                 sync_wake(&app, &remote, &endpoints, timeout, in_flight).await;
             }
+            _ = app.sync_notify.notified() => {
+                log::debug!("sync wake requested");
+                let timeout = app.link.budget().limit;
+                sync_wake(&app, &remote, &endpoints, timeout, in_flight).await;
+            }
             result = shutdown.changed() => {
                 if result.is_err() || *shutdown.borrow() {
                     return;
@@ -130,6 +135,7 @@ async fn sync_wake(
     if probe(app, remote, timeout).await == Probe::Accepted {
         drain_queue(app, remote, catalog(app), in_flight, timeout).await;
     }
+    app.sync_passes.fetch_add(1, Ordering::Release);
 }
 
 struct Busy<'a>(&'a AtomicBool);

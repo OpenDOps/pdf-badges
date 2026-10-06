@@ -8,13 +8,16 @@
     "back": "Back",
     "next": "Next",
     "locale": "Language",
-    "start": "Start"
+    "start": "Start",
+    "forward": "Forward",
+    "home": "Home"
   },
   "place": {
     "otherCountry": "My country is not {{country}}"
   },
   "desk": {
     "search": "Search",
+    "clearSearch": "Clear search",
     "find": "Find",
     "newVisitor": "New visitor",
     "category": "Category",
@@ -23,12 +26,76 @@
     "packets": "Packets",
     "photo": "Photo",
     "save": "Save",
+    "print": "Print",
     "paid": "Paid",
     "unpaid": "Not paid"
   },
   "end": {
     "desk": "Take your badge at the registration desk.",
     "pay": "You are registered. Please pay for your participation at the ticket desk."
+  },
+  "key": {
+    "placeholder": "Key",
+    "enter": "Enter"
+  },
+  "nav": {
+    "label": "Sections",
+    "form": "Form",
+    "visitors": "Visitors",
+    "visitor": "Visitor",
+    "close": "Close",
+    "discard": "Changes will be lost. Continue?",
+    "stay": "Stay",
+    "leave": "Continue",
+    "printers": "Printers"
+  },
+  "visitors": {
+    "all": "All categories",
+    "name": "Name",
+    "surname": "Surname",
+    "company": "Company",
+    "prev": "Previous page",
+    "next": "Next page",
+    "page": "Select page",
+    "matches": "Select all",
+    "arrived": "Mark",
+    "certificate": "Order a certificate",
+    "print": "Print"
+  },
+  "screen": {
+    "key": "Key",
+    "menu": "Home",
+    "visitors": "Visitors",
+    "print": "Print",
+    "import": "CSV upload",
+    "settings": "Settings",
+    "printers": "Printer test",
+    "registration": "Registration settings"
+  },
+  "menu": {
+    "operator": "Registration Form",
+    "print": "Print",
+    "import": "Upload database",
+    "settings": "Settings",
+    "qr": "Registration QR",
+    "waiting": "Not synced",
+    "synced": "Synced",
+    "address": "Address"
+  },
+  "network": {
+    "localUp": "Local server is reachable",
+    "localDown": "Local server is not reachable",
+    "remoteUp": "Sync server is reachable",
+    "remoteDown": "Sync server is not reachable",
+    "remoteUnknown": "Sync server has not been checked yet",
+    "good": "Connection is good",
+    "fair": "Connection is fair",
+    "poor": "Connection is poor",
+    "qualityUnknown": "Connection quality is not measured yet"
+  },
+  "settings": {
+    "printers": "Printer settings",
+    "registration": "Registration settings"
   },
   "error": {
     "title": "Page not found",
@@ -38,6 +105,7 @@
     "email": "Enter an email address",
     "no_printer": "No printer for this badge.",
     "no_ticket_code": "No ticket code is left.",
-    "invalid_phone_email_combo": "This email and phone belong to different people."
+    "invalid_phone_email_combo": "This email and phone belong to different people.",
+    "invalid_key": "Unknown key"
   }
 }

@@ -266,7 +266,9 @@ LEFT JOIN (
 pub enum ListOrder {
     /// Newest `added_ts` first, then `uid` ascending.
     LastAdd,
-    /// Newest `last_print_ts` first. A visitor who was never printed sorts last.
+    /// Newest `last_print_ts` first. A visitor who was never printed sorts last,
+    /// still by `added_ts`. This is Scala's `db_view_buf` after prints: the list
+    /// starts in `mem_u.ts` order, and each print moves that visitor to the front.
     LastPrint,
 }
 
@@ -571,17 +573,45 @@ impl EventDb {
         Ok(SearchPage { total, rows })
     }
 
+    /// Store `document` and refresh the search tables and the memory list from it.
+    ///
+    /// The caller does not name list columns. Name, company, email, phone, and
+    /// barcode are read from the visitor JSON.
+    pub fn save_document(&mut self, document: &serde_json::Value) -> Result<(), EventDbError> {
+        let added_ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_secs() as i64)
+            .unwrap_or(0);
+        self.write(&VisitorWrite {
+            uid: text_at(document, &["uid", "id"]),
+            data: serde_json::to_string(document).unwrap_or_else(|_| "{}".to_string()),
+            name: String::new(),
+            surname: String::new(),
+            c_name: String::new(),
+            category: int_at(document, "category"),
+            ticket_status: int_at(document, "ticket_status"),
+            gotsome: int_at(document, "gotsome"),
+            give_packet: packet_flag(document),
+            added_ts,
+            org_id: document.get("org_id").and_then(json_i64),
+            email: String::new(),
+        })
+    }
+
     /// Store one visitor on the file, then in `list_row` and `u_fts`.
     ///
     /// The file transaction commits before memory is touched. A uid the loader
     /// has not copied yet is searchable immediately, and a later batch skips it.
+    /// Search rows (`u_fulltext`, `emails`, `phones`) and the memory list are
+    /// filled from the stored JSON when the write does not already name them.
     pub fn write(&mut self, visitor: &VisitorWrite) -> Result<(), EventDbError> {
+        let indexed = index_visitor(visitor);
         let path = self.file_path();
         let tx = self
             .file
             .unchecked_transaction()
             .map_err(|err| sqlite_at(&path, err))?;
-        upsert_visitor_file(&tx, visitor).map_err(|err| sqlite_at(&path, err))?;
+        upsert_visitor_file(&tx, &indexed).map_err(|err| sqlite_at(&path, err))?;
         tx.commit().map_err(|err| sqlite_at(&path, err))?;
 
         let memory_path = Path::new(self.memory_uri());
@@ -589,7 +619,7 @@ impl EventDb {
             .memory
             .unchecked_transaction()
             .map_err(|err| sqlite_at(memory_path, err))?;
-        upsert_visitor_memory(&tx, visitor).map_err(|err| sqlite_at(memory_path, err))?;
+        upsert_visitor_memory(&tx, &indexed.visitor).map_err(|err| sqlite_at(memory_path, err))?;
         tx.commit().map_err(|err| sqlite_at(memory_path, err))?;
         Ok(())
     }
@@ -827,18 +857,36 @@ impl EventDb {
         Ok(())
     }
 
-    /// A registration still has to go up when `in_synch` is unset.
-    pub fn has_waiting_registration(&self) -> Result<bool, EventDbError> {
+    /// Waiting rows, then rows already marked in sync.
+    pub fn registration_sync_counts(&self) -> Result<(i64, i64), EventDbError> {
         let path = self.file_path();
-        let count: i64 = self
-            .file
+        self.file
+            .query_row(
+                "SELECT
+                    COALESCE(SUM(CASE WHEN in_synch IS NULL OR in_synch = 0 THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN in_synch IS NOT NULL AND in_synch != 0 THEN 1 ELSE 0 END), 0)
+                 FROM mem_u",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|err| sqlite_at(&path, err))
+    }
+
+    /// Rows whose `in_synch` is unset and still have to go up.
+    pub fn waiting_registration_count(&self) -> Result<i64, EventDbError> {
+        let path = self.file_path();
+        self.file
             .query_row(
                 "SELECT COUNT(*) FROM mem_u WHERE in_synch IS NULL OR in_synch = 0",
                 [],
                 |row| row.get(0),
             )
-            .map_err(|err| sqlite_at(&path, err))?;
-        Ok(count > 0)
+            .map_err(|err| sqlite_at(&path, err))
+    }
+
+    /// A registration still has to go up when `in_synch` is unset.
+    pub fn has_waiting_registration(&self) -> Result<bool, EventDbError> {
+        Ok(self.waiting_registration_count()? > 0)
     }
 
     /// Insert one downloaded scan. A later row with the same `scanid` replaces it.
@@ -1474,7 +1522,251 @@ fn fetch_visitors(
         .map_err(|err| sqlite_at(path, err))
 }
 
-fn upsert_visitor_file(conn: &Connection, visitor: &VisitorWrite) -> Result<(), rusqlite::Error> {
+struct IndexedVisitor {
+    visitor: VisitorWrite,
+    barcode: Option<String>,
+    phones: Option<Vec<String>>,
+}
+
+/// The address the visitors list shows. A personal address wins. Otherwise the
+/// first company or top-level address.
+pub fn document_email(document: &serde_json::Value) -> String {
+    collect_emails(document)
+        .into_iter()
+        .next()
+        .unwrap_or_default()
+}
+
+/// The first phone number stored on the visitor.
+pub fn document_phone(document: &serde_json::Value) -> String {
+    collect_phones(document)
+        .1
+        .into_iter()
+        .next()
+        .unwrap_or_default()
+}
+
+fn index_visitor(visitor: &VisitorWrite) -> IndexedVisitor {
+    let document =
+        serde_json::from_str::<serde_json::Value>(&visitor.data).unwrap_or(serde_json::Value::Null);
+    let mut visitor = visitor.clone();
+    if visitor.name.trim().is_empty() {
+        visitor.name = person_text(&document, "name");
+    }
+    if visitor.surname.trim().is_empty() {
+        visitor.surname = person_text(&document, "surname");
+    }
+    if visitor.c_name.trim().is_empty() {
+        visitor.c_name = company_name(&document);
+    }
+    let emails = collect_emails(&document);
+    if !emails.is_empty() {
+        visitor.email = emails[0].clone();
+    }
+    let barcode = match document.get("barcode") {
+        Some(value) => Some(json_text(value).unwrap_or_default()),
+        None => None,
+    };
+    let (present, phones) = collect_phones(&document);
+    IndexedVisitor {
+        visitor,
+        barcode,
+        phones: present.then_some(phones),
+    }
+}
+
+fn person_text(document: &serde_json::Value, key: &str) -> String {
+    if let Some(text) = document.get(key).and_then(json_text) {
+        if !text.trim().is_empty() {
+            return text;
+        }
+    }
+    document
+        .pointer(&format!("/personalData/{key}"))
+        .map(localized_text)
+        .unwrap_or_default()
+}
+
+fn company_name(document: &serde_json::Value) -> String {
+    if let Some(text) = document
+        .get("c_name")
+        .or_else(|| document.get("company"))
+        .and_then(json_text)
+    {
+        if !text.trim().is_empty() {
+            return text;
+        }
+    }
+    if let Some(text) = document.pointer("/personalData/company").and_then(json_text) {
+        if !text.trim().is_empty() {
+            return text;
+        }
+    }
+    document
+        .pointer("/personalData/companies/0/name")
+        .map(localized_text)
+        .unwrap_or_default()
+}
+
+fn localized_text(value: &serde_json::Value) -> String {
+    if let Some(text) = json_text(value) {
+        if !text.trim().is_empty() {
+            return text;
+        }
+    }
+    let Some(object) = value.as_object() else {
+        return String::new();
+    };
+    for key in ["ru", "en"] {
+        if let Some(text) = object
+            .get(key)
+            .and_then(|node| node.get("str"))
+            .and_then(json_text)
+        {
+            if !text.trim().is_empty() {
+                return text;
+            }
+        }
+    }
+    String::new()
+}
+
+fn collect_emails(document: &serde_json::Value) -> Vec<String> {
+    let mut emails = Vec::new();
+    if let Some(rows) = document
+        .pointer("/personalData/emails")
+        .and_then(|value| value.as_array())
+    {
+        push_email_rows(&mut emails, rows);
+    }
+    if let Some(text) = document.get("email").and_then(json_text) {
+        push_email(&mut emails, text);
+    }
+    if let Some(companies) = document
+        .pointer("/personalData/companies")
+        .and_then(|value| value.as_array())
+    {
+        for company in companies {
+            let Some(addresses) = company.get("addresses").and_then(|value| value.as_array()) else {
+                continue;
+            };
+            for address in addresses {
+                if let Some(rows) = address.get("emails").and_then(|value| value.as_array()) {
+                    push_email_rows(&mut emails, rows);
+                }
+            }
+        }
+    }
+    emails
+}
+
+fn push_email_rows(emails: &mut Vec<String>, rows: &[serde_json::Value]) {
+    for row in rows {
+        if let Some(text) = row.get("email").and_then(json_text) {
+            push_email(emails, text);
+        }
+    }
+}
+
+fn push_email(emails: &mut Vec<String>, text: String) {
+    let text = text.trim().to_string();
+    if text.is_empty() || emails.iter().any(|email| email == &text) {
+        return;
+    }
+    emails.push(text);
+}
+
+fn collect_phones(document: &serde_json::Value) -> (bool, Vec<String>) {
+    let mut present = false;
+    let mut phones = Vec::new();
+    if document.get("phone").is_some() {
+        present = true;
+        if let Some(text) = document.get("phone").and_then(json_text) {
+            push_phone(&mut phones, text);
+        }
+    }
+    if let Some(companies) = document
+        .pointer("/personalData/companies")
+        .and_then(|value| value.as_array())
+    {
+        for company in companies {
+            let Some(addresses) = company.get("addresses").and_then(|value| value.as_array()) else {
+                continue;
+            };
+            for address in addresses {
+                let Some(rows) = address
+                    .get("contact_phones")
+                    .and_then(|value| value.as_array())
+                else {
+                    continue;
+                };
+                present = true;
+                for row in rows {
+                    if let Some(text) = row.get("str_number").and_then(json_text) {
+                        push_phone(&mut phones, text);
+                    }
+                }
+            }
+        }
+    }
+    (present, phones)
+}
+
+fn push_phone(phones: &mut Vec<String>, text: String) {
+    let text = text.trim().to_string();
+    if text.is_empty() || phones.iter().any(|phone| phone == &text) {
+        return;
+    }
+    phones.push(text);
+}
+
+fn text_at(document: &serde_json::Value, keys: &[&str]) -> String {
+    for key in keys {
+        if let Some(text) = document.get(*key).and_then(json_text) {
+            if !text.is_empty() {
+                return text;
+            }
+        }
+    }
+    String::new()
+}
+
+fn int_at(document: &serde_json::Value, key: &str) -> i64 {
+    document.get(key).and_then(json_i64).unwrap_or(0)
+}
+
+fn json_i64(value: &serde_json::Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_str().and_then(|text| text.parse().ok()))
+}
+
+fn json_text(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(text) => Some(text.clone()),
+        serde_json::Value::Number(number) => Some(number.to_string()),
+        _ => None,
+    }
+}
+
+fn packet_flag(document: &serde_json::Value) -> i64 {
+    let explicit = int_at(document, "give_packet");
+    if explicit != 0 {
+        return explicit;
+    }
+    let marked = document
+        .get("ext_packets")
+        .and_then(|value| value.as_array())
+        .map(|rows| {
+            rows.iter()
+                .any(|row| row.get("has").and_then(json_i64).unwrap_or(0) > 0)
+        })
+        .unwrap_or(false);
+    i64::from(marked)
+}
+
+fn upsert_visitor_file(conn: &Connection, indexed: &IndexedVisitor) -> Result<(), rusqlite::Error> {
+    let visitor = &indexed.visitor;
     let updated = conn.execute(
         "UPDATE mem_u
          SET data = ?1, ts = ?2, category = ?3, ticket_status = ?4, org_id = ?5,
@@ -1536,6 +1828,12 @@ fn upsert_visitor_file(conn: &Connection, visitor: &VisitorWrite) -> Result<(), 
             ],
         )?;
     }
+    if let Some(barcode) = &indexed.barcode {
+        conn.execute(
+            "UPDATE mem_u SET barcode = ?1 WHERE uid = ?2",
+            rusqlite::params![barcode, visitor.uid],
+        )?;
+    }
     conn.execute(
         "DELETE FROM emails WHERE uid = CAST(?1 AS INTEGER)",
         [&visitor.uid],
@@ -1545,6 +1843,20 @@ fn upsert_visitor_file(conn: &Connection, visitor: &VisitorWrite) -> Result<(), 
             "INSERT INTO emails (uid, email) VALUES (CAST(?1 AS INTEGER), ?2)",
             rusqlite::params![visitor.uid, visitor.email],
         )?;
+    }
+    if let Some(phones) = &indexed.phones {
+        if visitor.uid.chars().all(|ch| ch.is_ascii_digit()) {
+            conn.execute(
+                "DELETE FROM phones WHERE uid = CAST(?1 AS INTEGER)",
+                [&visitor.uid],
+            )?;
+            for phone in phones {
+                conn.execute(
+                    "INSERT INTO phones (uid, phone) VALUES (CAST(?1 AS INTEGER), ?2)",
+                    rusqlite::params![visitor.uid, phone],
+                )?;
+            }
+        }
     }
     Ok(())
 }
@@ -2327,7 +2639,8 @@ mod tests {
 
     mod open {
         use super::super::{
-            EventDb, EventDbError, IndexState, CONFIG_FILE, DB_FILE, FILE_TABLES, KEY_ALPHABET,
+            EventDb, EventDbError, IndexState, ListOrder, VisitorWrite, CONFIG_FILE, DB_FILE,
+            FILE_TABLES, KEY_ALPHABET,
         };
         use rusqlite::Connection;
         use serde::Deserialize;
@@ -2494,6 +2807,107 @@ mod tests {
             assert!(config_file(scratch.path()).is_none());
             assert!(!db.needs_full_reload().unwrap());
             assert!(backups(&scratch.path().join("EVENT")).is_empty());
+        }
+
+        #[test]
+        fn save_refreshes_search_and_list() {
+            let scratch = Scratch::new();
+            let mut db = EventDb::open(scratch.path(), "EVENT").unwrap();
+            let document = serde_json::json!({
+                "uid": "9",
+                "barcode": "HAVE",
+                "personalData": {
+                    "name": "Kat",
+                    "surname": "Lee",
+                    "emails": [{"email": "long.email@gmail.com"}],
+                    "companies": [{
+                        "name": {"ru": {"str": "Hands"}},
+                        "addresses": [{"contact_phones": [{"str_number": "+74951234567"}]}]
+                    }]
+                }
+            });
+            db.save_document(&document).unwrap();
+            let page = db
+                .search("Lee", &[], ListOrder::LastAdd, None, None)
+                .unwrap();
+            assert_eq!(page.rows[0].email, "long.email@gmail.com");
+            assert_eq!(page.rows[0].c_name, "Hands");
+            assert_eq!(page.rows[0].name, "Kat");
+            let email: String = db
+                .file()
+                .query_row("SELECT email FROM emails WHERE uid = 9", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(email, "long.email@gmail.com");
+            let phone: String = db
+                .file()
+                .query_row("SELECT phone FROM phones WHERE uid = 9", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(phone, "+74951234567");
+            let barcode: String = db
+                .file()
+                .query_row("SELECT barcode FROM mem_u WHERE uid = '9'", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(barcode, "HAVE");
+
+            let again = serde_json::json!({
+                "uid": "9",
+                "personalData": {
+                    "name": "Kat",
+                    "surname": "Lee",
+                    "emails": [{"email": "other@gmail.com"}],
+                    "companies": [{
+                        "name": {"ru": {"str": "Hands"}},
+                        "addresses": [{"contact_phones": [{"str_number": "+70000000000"}]}]
+                    }]
+                }
+            });
+            db.save_document(&again).unwrap();
+            let page = db
+                .search("Lee", &[], ListOrder::LastAdd, None, None)
+                .unwrap();
+            assert_eq!(page.rows[0].email, "other@gmail.com");
+            let count: i64 = db
+                .file()
+                .query_row("SELECT COUNT(*) FROM emails WHERE uid = 9", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, 1);
+            let phone: String = db
+                .file()
+                .query_row("SELECT phone FROM phones WHERE uid = 9", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(phone, "+70000000000");
+
+            let nested = serde_json::json!({
+                "uid": "10",
+                "personalData": {
+                    "surname": "Moss",
+                    "emails": [{"email": "moss@example.com"}]
+                }
+            });
+            db.write(&VisitorWrite {
+                uid: "10".to_string(),
+                data: nested.to_string(),
+                name: String::new(),
+                surname: String::new(),
+                c_name: String::new(),
+                category: 0,
+                ticket_status: 0,
+                gotsome: 0,
+                give_packet: 0,
+                added_ts: 3,
+                org_id: None,
+                email: String::new(),
+            })
+            .unwrap();
+            let found = db
+                .search("Moss", &[], ListOrder::LastAdd, None, None)
+                .unwrap();
+            assert_eq!(found.rows[0].uid, "10");
+            assert_eq!(found.rows[0].email, "moss@example.com");
         }
 
         #[test]

@@ -106,7 +106,8 @@ test("step_phone_mask_and_country_search", async () => {
     },
   };
   render(<Step state={state} client={catalog} />);
-  expect(await screen.findByRole("button", { name: "+7" })).toBeInTheDocument();
+  const russia = await screen.findByRole("button", { name: "+7" });
+  expect(russia.querySelector("img")).toHaveAttribute("src", "/flags/ru.svg");
   const phone = screen.getByTestId("phone") as HTMLInputElement;
   fireEvent.focus(phone);
   expect(phone).toHaveValue("(___) ___-__-__");
@@ -122,14 +123,18 @@ test("step_phone_mask_and_country_search", async () => {
   expect(screen.queryByTestId("phone")).not.toBeInTheDocument();
   fireEvent.change(search, { target: { value: "Бел" } });
   const option = await screen.findByRole("option", { name: "Беларусь +375" });
+  expect(option).toHaveClass("hover:bg-sky-100");
   expect(screen.queryByRole("option", { name: "Россия +7" })).not.toBeInTheDocument();
-  fireEvent.mouseDown(option);
-  expect(await screen.findByRole("button", { name: "+375" })).toBeInTheDocument();
-  expect(screen.getByTestId("phone")).toHaveValue("(49) 5");
+  fireEvent.click(option);
+  const belarus = await screen.findByRole("button", { name: "+375" });
+  expect(belarus.querySelector("img")).toHaveAttribute("src", "/flags/by.svg");
+  const cleared = await screen.findByTestId("phone");
+  expect(cleared).toHaveValue("(__) ___-__-__");
+  expect(cleared).toHaveFocus();
   const personal = state.visitor.personalData as {
     companies: { addresses: { contact_phones: { str_number: string }[] }[] }[];
   };
-  expect(personal.companies[0].addresses[0].contact_phones[0].str_number).toBe("+375495");
+  expect(personal.companies[0].addresses[0].contact_phones[0].str_number).toBe("+375");
 });
 
 test("step_shows_the_advice", () => {
@@ -201,7 +206,7 @@ test("step_city_filters_the_catalog", async () => {
   fireEvent.change(city, { target: { value: "Московс" } });
   const match = await screen.findByRole("option", { name: "Московский" });
   expect(screen.queryByRole("option", { name: "Москва" })).not.toBeInTheDocument();
-  fireEvent.mouseDown(match);
+  fireEvent.click(match);
   await waitFor(() => {
     const personal = state.visitor.personalData as {
       companies: { addresses: { city_db: { e_val: number }; region_db: { e_val: number } }[] }[];
@@ -238,8 +243,8 @@ test("step_city_matches_a_word_and_keeps_the_default", async () => {
   };
   expect(await names()).toEqual(["Моя страна не Россия", "Москва"]);
   const opened = await screen.findByRole("listbox");
-  expect(within(opened).getByRole("option", { name: "Моя страна не Россия" })).toHaveClass("bg-amber-100");
-  expect(within(opened).getByRole("option", { name: "Москва" })).toHaveClass("bg-sky-100", "font-semibold");
+  expect(within(opened).getByRole("option", { name: "Моя страна не Россия" })).toHaveClass("bg-amber-100", "hover:bg-amber-200");
+  expect(within(opened).getByRole("option", { name: "Москва" })).toHaveClass("bg-sky-100", "font-semibold", "hover:bg-sky-200");
   fireEvent.change(city, { target: { value: "М" } });
   expect(await names()).toEqual(["Моя страна не Россия", "Москва", "Бородино (Московская обл.)"]);
   fireEvent.change(city, { target: { value: "Б" } });
@@ -304,7 +309,7 @@ test("step_city_other_country_follows_the_language", async () => {
   expect(await screen.findByRole("option", { name: "My country is not Russia" })).toBeInTheDocument();
   setLocale(state, "ru");
   view.rerender(<Step state={state} client={catalog} />);
-  fireEvent.mouseDown(await screen.findByRole("option", { name: "Моя страна не Россия" }));
+  fireEvent.click(await screen.findByRole("option", { name: "Моя страна не Россия" }));
   const country = await screen.findByLabelText("Страна", { exact: false });
   expect(country.tagName).toBe("INPUT");
   expect(country).toHaveAttribute("role", "combobox");
@@ -314,9 +319,9 @@ test("step_city_other_country_follows_the_language", async () => {
   expect(stack).not.toContainElement(screen.getByLabelText("Фамилия", { exact: false }));
   await waitFor(() => expect(country).toHaveValue("Россия"));
   expect(country).toHaveFocus();
-  expect(screen.getByRole("option", { name: "Россия" })).toHaveClass("bg-sky-100", "font-semibold");
+  expect(screen.getByRole("option", { name: "Россия" })).toHaveClass("bg-sky-100", "font-semibold", "hover:bg-sky-200");
   fireEvent.change(country, { target: { value: "Бел" } });
-  fireEvent.mouseDown(await screen.findByRole("option", { name: "Беларусь" }));
+  fireEvent.click(await screen.findByRole("option", { name: "Беларусь" }));
   await waitFor(() => {
     const personal = state.visitor.personalData as {
       companies: { addresses: { country_db: { e_val: number } }[] }[];
@@ -347,7 +352,7 @@ test("step_city_uses_the_country_already_on_the_step", async () => {
   expect(screen.getAllByLabelText("Страна", { exact: false })).toHaveLength(1);
   const city = screen.getByLabelText("Город", { exact: false });
   fireEvent.focus(city);
-  fireEvent.mouseDown(await screen.findByRole("option", { name: "Моя страна не Россия" }));
+  fireEvent.click(await screen.findByRole("option", { name: "Моя страна не Россия" }));
   expect(screen.getAllByLabelText("Страна", { exact: false })).toHaveLength(1);
   const country = screen.getByLabelText("Страна", { exact: false });
   expect(country).toHaveFocus();

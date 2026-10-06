@@ -16,7 +16,13 @@ from grpc_reflection.v1alpha import reflection
 from excel_tooling.columns import excel_id
 from excel_tooling.model import CellValue, Column
 from excel_tooling.password import needs_password
-from excel_tooling.scan import DuplicateColumn, HeaderNotCandidate, SubcolumnRowOutOfRange
+from excel_tooling.scan import (
+    BadColumn,
+    DuplicateColumn,
+    HeaderNotCandidate,
+    SubcolumnRowOutOfRange,
+    columns_without_header,
+)
 from excel_tooling.workbook import BadFile, NoData, PasswordRequired, SheetNotListed
 
 import excel_tooling  # noqa: F401  (puts generated stubs on sys.path)
@@ -51,6 +57,7 @@ class Session:
     candidates: tuple
     header_row: int | None
     subcolumn_row: int | None
+    named_columns: tuple | None
     last_used: float
     calc: threading.Lock
     closed: bool = False
@@ -184,6 +191,7 @@ class ExcelToolingService(excel_pb2_grpc.ExcelToolingServicer):
             session.candidates = candidates
             session.header_row = None
             session.subcolumn_row = None
+            session.named_columns = None
             session.last_used = self._clock()
             return _view(session)
 
@@ -203,6 +211,26 @@ class ExcelToolingService(excel_pb2_grpc.ExcelToolingServicer):
                 context.abort(grpc.StatusCode.INVALID_ARGUMENT, "header")
             session.header_row = request.excel_row
             session.subcolumn_row = subcolumn_row
+            session.named_columns = None
+            session.last_used = self._clock()
+            return _table(columns, ())
+
+    def SelectColumns(self, request, context):
+        specs = []
+        for column in request.columns:
+            if column.subcolumns:
+                context.abort(grpc.StatusCode.INVALID_ARGUMENT, "column")
+            specs.append((column.excel_id, column.name))
+        try:
+            columns = columns_without_header(specs)
+        except (BadColumn, DuplicateColumn):
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, "column")
+        session = self._borrow(request.session_id, context)
+        with session.calc:
+            self._ensure_open(session, context)
+            session.named_columns = columns
+            session.header_row = None
+            session.subcolumn_row = None
             session.last_used = self._clock()
             return _table(columns, ())
 
@@ -217,14 +245,9 @@ class ExcelToolingService(excel_pb2_grpc.ExcelToolingServicer):
             context.abort(grpc.StatusCode.INVALID_ARGUMENT, "channel")
         with session.calc:
             self._ensure_open(session, context)
-            if session.header_row is None:
+            if not _columns_chosen(session):
                 context.abort(grpc.StatusCode.FAILED_PRECONDITION, "header")
-            blocks = session.book.iter_blocks(
-                session.selected_sheet_index,
-                session.header_row,
-                session.limit,
-                session.subcolumn_row,
-            )
+            blocks = _blocks(session)
             try:
                 yield from _walk(session, blocks, context.is_active, self._clock)
             except Exception:
@@ -233,25 +256,28 @@ class ExcelToolingService(excel_pb2_grpc.ExcelToolingServicer):
     def _start_background(self, session: Session, context) -> None:
         with session.calc:
             self._ensure_open(session, context)
-            if session.header_row is None:
+            if not _columns_chosen(session):
                 context.abort(grpc.StatusCode.FAILED_PRECONDITION, "header")
             sheet = session.selected_sheet_index
             header = session.header_row
             limit = session.limit
             subcolumn = session.subcolumn_row
+            named = session.named_columns
         threading.Thread(
             target=self._background_read,
-            args=(session, sheet, header, limit, subcolumn),
+            args=(session, sheet, header, limit, subcolumn, named),
             name="read-table",
             daemon=True,
         ).start()
 
-    def _background_read(self, session: Session, sheet, header, limit, subcolumn) -> None:
+    def _background_read(self, session: Session, sheet, header, limit, subcolumn, named) -> None:
         with session.calc:
-            if session.closed or session.header_row is None:
+            if session.closed:
                 return
             try:
-                blocks = session.book.iter_blocks(sheet, header, limit, subcolumn)
+                blocks = _blocks_from(session, sheet, header, limit, subcolumn, named)
+                if blocks is None:
+                    return
                 for batch in _walk(session, blocks, lambda: True, self._clock):
                     _QUEUE.write(batch)
             except Exception:
@@ -333,6 +359,7 @@ class ExcelToolingService(excel_pb2_grpc.ExcelToolingServicer):
             candidates=candidates,
             header_row=None,
             subcolumn_row=None,
+            named_columns=None,
             last_used=self._clock(),
             calc=calc,
         )
@@ -506,6 +533,29 @@ class _QueueChannel:
 
 
 _QUEUE = _QueueChannel()
+
+
+def _columns_chosen(session: Session) -> bool:
+    return session.header_row is not None or session.named_columns is not None
+
+
+def _blocks(session: Session):
+    return _blocks_from(
+        session,
+        session.selected_sheet_index,
+        session.header_row,
+        session.limit,
+        session.subcolumn_row,
+        session.named_columns,
+    )
+
+
+def _blocks_from(session: Session, sheet, header, limit, subcolumn, named):
+    if named is not None:
+        return session.book.iter_columns(sheet, named)
+    if header is None:
+        return None
+    return session.book.iter_blocks(sheet, header, limit, subcolumn)
 
 
 def _walk(session: Session, blocks, active, clock):

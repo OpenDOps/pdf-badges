@@ -10,8 +10,8 @@ Google Sheets and Yandex Tables are later openers on this same service. After a 
 
 1. Upload a workbook. The reply already contains the non-empty sheets and the header candidates of the first sheet, which is selected.
 2. If another sheet is wanted, select it. The reply is that sheet's header candidates.
-3. Select one candidate row as the column names. The reply is the ordered column list.
-4. Read the table as a stream. Data rows start under the chosen header. Fully empty rows are skipped. Reading stops after 50 empty rows in a row, or at the end of the used area, whichever comes first. Column names arrived with `SelectHeader`. Each `ReadTable` message carries the next processed rows, at most 100.
+3. Select one candidate row as the column names, or name the columns yourself when the sheet has no header row. The reply is the ordered column list.
+4. Read the table as a stream. After `SelectHeader`, data rows start under the chosen header. After `SelectColumns`, every used row is data, including the first. Fully empty rows are skipped. Reading stops after 50 empty rows in a row, or at the end of the used area, whichever comes first. Column names arrived with `SelectHeader` or `SelectColumns`. Each `ReadTable` message carries the next processed rows, at most 100.
 
 ```text
 OpenWorkbook
@@ -23,10 +23,10 @@ OpenWorkbook
            on the selected sheet
                  │
                  ▼
-         SelectHeader(row)
-                 │
-                 ▼
-              ReadTable
+         SelectHeader(row)          SelectColumns(excel_id, name)
+                 │                                  │
+                 ▼                                  ▼
+              ReadTable  (after the header)      ReadTable  (every used row)
 ```
 
 "List" in the product language is a worksheet. The API calls it a sheet.
@@ -58,6 +58,21 @@ row 7   Bo   |     | 3            data, City omitted
 ... 50 empty rows ...             stop, later rows are not read
 ```
 
+## Columns without a header
+
+A sheet can have no column-name row. `SelectColumns` names the columns itself. Each entry is an `excel_id` (`A`, `B`, `AA`) and the name the caller wants on the table, such as a template field. `a` is the same column as `A`. Names are trimmed. An empty list, an empty name, a repeated name, a repeated column, a value that is not a column letter, or a column that lists subcolumns is rejected. There is no subcolumn row on this call.
+
+`ReadTable` then starts at the first row of the used area. That row is data. No row is skipped as a title or a header. Empty rows and the 50-row stop are unchanged. A selected column that has no value on a row is omitted from that row, the same way an empty header cell is omitted.
+
+`SelectColumns` and `SelectHeader` replace each other. `SelectSheet` clears both. `ReadTable` before either call fails.
+
+```text
+row 1   Абрамов | Александр | Медиа группа Авангард    data
+row 2   Авхадыев | Антон    | СёрчИнформ                data
+```
+
+The call that reads this sheet is `SelectColumns` with `A`/`surname`, `B`/`name`, and `C`/`company name`.
+
 ## Subcolumns
 
 The column-name row can have a second row under it. That row is optional. It is not another candidate for the column names. The caller sets it only after the column row is chosen, and only on one of the next four sheet rows: `column_row + 1` through `column_row + 4`. A row outside that window is rejected. `0` means there is no subcolumn row.
@@ -78,7 +93,7 @@ Calc loads the whole file on open, and `calculateAll()` runs in that process. UN
 
 Empty sheet rows inside a block count toward the 50-row stop and are not messages. A stop or the end of the used area ends the stream. If the client cancels, the walk stops before the next block. `ReadTable` with `background` and `channel` `queue` keeps walking after the RPC returns and discards each batch. Any other channel is rejected, and `channel` without `background` is rejected. A failure mid-stream fails the RPC. The client does not treat a short successful prefix as the whole table.
 
-Header candidates are the first K non-empty rows only. That prefix is read once for a sheet and a K, then reused by `SelectHeader` and `ReadTable`. Opening a workbook does not copy every data cell into Python. Column names from `SelectHeader` stay for the session. They are one row.
+Header candidates are the first K non-empty rows only. That prefix is read once for a sheet and a K, then reused by `SelectHeader` and `ReadTable`. Opening a workbook does not copy every data cell into Python. Column names from `SelectHeader` or `SelectColumns` stay for the session. A header is one row. Named columns are the list the caller sent.
 
 `EXCEL_MAX_SESSIONS` caps open workbooks. The default is 100. Opening one more closes the workbook that has been idle the longest. A workbook that is inside a Calc call stays open. If every open workbook is busy, the new open is rejected.
 
@@ -108,6 +123,7 @@ service ExcelTooling {
   rpc OpenWorkbook(stream OpenChunk) returns (SessionView);
   rpc SelectSheet(SelectSheetRequest) returns (SessionView);
   rpc SelectHeader(SelectHeaderRequest) returns (irbis.table.v1.Table);
+  rpc SelectColumns(SelectColumnsRequest) returns (irbis.table.v1.Table);
   rpc ReadTable(ReadTableRequest) returns (stream RowBatch);
   rpc ProvidePassword(ProvidePasswordRequest) returns (SessionView);
   rpc Close(CloseRequest) returns (CloseResponse);
@@ -156,6 +172,11 @@ message SelectHeaderRequest {
   uint32 subcolumn_row = 3;  // 0 means no subcolumn row
 }
 
+message SelectColumnsRequest {
+  string session_id = 1;
+  repeated irbis.table.v1.Column columns = 2;  // excel_id and name; no subcolumns
+}
+
 message ReadTableRequest {
   string session_id = 1;
   bool background = 2;
@@ -178,7 +199,7 @@ message CloseRequest {
 message CloseResponse {}
 ```
 
-`SelectHeader` returns a `Table` with `columns` set and `rows` empty, so the caller can show the names before reading. `subcolumn_row` is `0` or one of the four rows after the chosen column row. When it is set, each parent column that spans empty cells on the column row lists those subcolumns, and data starts after the subcolumn row. `ReadTable` then streams `RowBatch` messages, each with at most 100 data rows and no column list. The client already has the names. `ReadTable` before `SelectHeader` fails. Selecting a sheet clears a previous header choice, including a subcolumn row. The server's max send size stays 64 MiB so one batch is not capped by the default.
+`SelectHeader` and `SelectColumns` each return a `Table` with `columns` set and `rows` empty, so the caller can show the names before reading. `subcolumn_row` is `0` or one of the four rows after the chosen column row. When it is set, each parent column that spans empty cells on the column row lists those subcolumns, and data starts after the subcolumn row. `SelectColumns` has no subcolumn row: the names in the request are the column names, and data starts on the first used row. `ReadTable` then streams `RowBatch` messages, each with at most 100 data rows and no column list. The client already has the names. `ReadTable` before `SelectHeader` or `SelectColumns` fails. Selecting a sheet clears a previous header choice and a previous column choice, including a subcolumn row. The server's max send size stays 64 MiB so one batch is not capped by the default.
 
 The upload is client-streaming so a workbook is not capped by the default gRPC message size. Set the server's max receive size to 64 MiB as well, for a single large chunk.
 
@@ -186,7 +207,7 @@ An encrypted workbook is not opened until a password is available, so Calc never
 
 Sessions live in memory in the process that opened them. Idle time is 15 minutes from the last call on that workbook. A timer and every RPC drop each session that has been idle that long, then discard its file and Calc document. `Close` discards its session immediately. A restart drops every session. There is no shared volume protocol in v1: the bytes on the stream are the file.
 
-Errors are gRPC status codes with a short reason: invalid file, no non-empty sheet, unknown session, sheet index not in the non-empty list, header row not in the candidate list, duplicate column name.
+Errors are gRPC status codes with a short reason: invalid file, no non-empty sheet, unknown session, sheet index not in the non-empty list, header row not in the candidate list, duplicate column name, or a `SelectColumns` entry that is empty, repeated, not a column letter, or has subcolumns.
 
 ## Process shape
 

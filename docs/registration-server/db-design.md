@@ -121,7 +121,7 @@ The memory database holds two tables. Search text is the only thing in the full-
 
 `mem_u.data` stays on the file. Opening one visitor reads that one JSON row from flash.
 
-The Scala unfiltered list is `db_view_buf`: a print or an add prepends that uid, and a restart throws the list away and sorts by `mem_u.ts` again. The Rust list does not keep that buffer. `last_add` and `last_print` are the two orders, and both survive a restart because both timestamps are on the file.
+The Scala unfiltered list is `db_view_buf`. It is filled in `mem_u.ts` order. A save and a print both move that uid to the front, and a restart throws the buffer away and sorts by `mem_u.ts` again. `GET /api/registrations` keeps the prints at the front: newest `last_print_ts` first, and a visitor who was never printed follows in `added_ts` order. A search and a category use that same order. `last_add` remains the added-time sort.
 
 Barcode pools were also read from the working connection. When that slice arrives, the memory database holds them too, so taking the next barcode does not read flash.
 

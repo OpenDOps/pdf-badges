@@ -1,0 +1,12 @@
+category -2
+name Екатерина
+surname Майорова
+patronymic 
+company Collagene 3D Medical
+position менеджер
+cups_name ЕКАТЕРИНА
+cups_surname МАЙОРОВА
+cups_patronymic 
+cups_company COLLAGENE 3D MEDICAL
+cups_position МЕНЕДЖЕР
+booth-id 26

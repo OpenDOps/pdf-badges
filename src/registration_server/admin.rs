@@ -4,16 +4,17 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::body::Body;
-use axum::extract::{Request, State};
+use axum::extract::{Path as AxumPath, Request, State};
 use axum::http::header::{
     CACHE_CONTROL, CONTENT_LENGTH, CONTENT_TYPE, ETAG, IF_MODIFIED_SINCE, IF_NONE_MATCH,
     LAST_MODIFIED, SET_COOKIE,
 };
 use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use cookie::{Cookie, SameSite};
+use rusqlite::OptionalExtension;
 use serde::Deserialize;
 use serde_json::json;
 
@@ -226,6 +227,7 @@ pub struct OperatorState {
     pub link: Arc<Link>,
     session_ttl: Duration,
     current: Arc<Mutex<CurrentEvent>>,
+    prints: Option<crate::registration_server::PrintQueue>,
 }
 
 struct OperatorLease {
@@ -243,7 +245,14 @@ impl OperatorState {
             link: Arc::new(Link::new()),
             session_ttl: OPERATOR_SESSION,
             current,
+            prints: None,
         }
+    }
+
+    /// Print channel key badges use. Absent until the registration router attaches it.
+    pub fn with_prints(mut self, prints: crate::registration_server::PrintQueue) -> Self {
+        self.prints = Some(prints);
+        self
     }
 
     /// How long an operator cookie stays valid without a session ping.
@@ -281,8 +290,9 @@ pub fn api_router(state: OperatorState) -> Router {
         .route("/api/events/select", post(select_event))
         .route("/api/session", post(session_ping))
         .route("/api/binding", get(binding))
-        .route("/api/keys", get(keys).post(keys_later))
-        .route("/api/keys/print", post(keys_later))
+        .route("/api/keys", get(keys).post(create_key))
+        .route("/api/keys/{id}", patch(edit_key).delete(remove_key))
+        .route("/api/keys/print", post(print_keys))
         .route("/api/network", get(network))
         .with_state(state)
 }
@@ -523,11 +533,136 @@ async fn binding(State(state): State<OperatorState>) -> Response {
     }))
 }
 
-async fn keys() -> Response {
-    api_ok(json!([]))
+async fn keys(State(state): State<OperatorState>, headers: HeaderMap) -> Response {
+    if !desk_event_open(&state) {
+        return api_ok(json!([]));
+    }
+    if !key_caller(&state, &headers) {
+        return api_error(StatusCode::UNAUTHORIZED, "unauthorized");
+    }
+    match key_rows(&state) {
+        Ok(rows) => api_ok(json!(rows)),
+        Err(err) => {
+            log::debug!("keys: {err}");
+            api_error(StatusCode::INTERNAL_SERVER_ERROR, "unknown_error")
+        }
+    }
 }
 
-async fn keys_later() -> Response {
+async fn create_key(
+    State(state): State<OperatorState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    if !desk_event_open(&state) {
+        return keys_later();
+    }
+    if !key_caller(&state, &headers) {
+        return api_error(StatusCode::UNAUTHORIZED, "unauthorized");
+    }
+    let comment = serde_json::from_slice::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("comment")
+                .and_then(|item| item.as_str())
+                .map(str::to_string)
+        });
+    match insert_operator_key(&state, comment.as_deref()) {
+        Ok(row) => api_ok(row),
+        Err(err) => {
+            log::debug!("create key: {err}");
+            api_error(StatusCode::INTERNAL_SERVER_ERROR, "unknown_error")
+        }
+    }
+}
+
+async fn edit_key(
+    State(state): State<OperatorState>,
+    AxumPath(id): AxumPath<i64>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    if !desk_event_open(&state) {
+        return api_error(StatusCode::CONFLICT, "no_event");
+    }
+    if !key_caller(&state, &headers) {
+        return api_error(StatusCode::UNAUTHORIZED, "unauthorized");
+    }
+    let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(&body) else {
+        return api_error(StatusCode::BAD_REQUEST, "bad_request");
+    };
+    let key = parsed
+        .get("key")
+        .and_then(|item| item.as_str())
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string);
+    let comment = parsed.get("comment").and_then(|item| item.as_str());
+    if key.is_none() && comment.is_none() {
+        return api_error(StatusCode::BAD_REQUEST, "bad_request");
+    }
+    match update_key(&state, id, key.as_deref(), comment) {
+        Ok(true) => api_ok(json!({})),
+        Ok(false) => api_error(StatusCode::NOT_FOUND, "not_found"),
+        Err(err) => {
+            log::debug!("edit key: {err}");
+            api_error(StatusCode::INTERNAL_SERVER_ERROR, "unknown_error")
+        }
+    }
+}
+
+async fn remove_key(
+    State(state): State<OperatorState>,
+    AxumPath(id): AxumPath<i64>,
+    headers: HeaderMap,
+) -> Response {
+    if !desk_event_open(&state) {
+        return api_error(StatusCode::CONFLICT, "no_event");
+    }
+    if !key_caller(&state, &headers) {
+        return api_error(StatusCode::UNAUTHORIZED, "unauthorized");
+    }
+    match delete_key(&state, id) {
+        Ok(true) => api_ok(json!({})),
+        Ok(false) => api_error(StatusCode::NOT_FOUND, "not_found"),
+        Err(err) => {
+            log::debug!("delete key: {err}");
+            api_error(StatusCode::INTERNAL_SERVER_ERROR, "unknown_error")
+        }
+    }
+}
+
+async fn print_keys(State(state): State<OperatorState>, headers: HeaderMap) -> Response {
+    if !desk_event_open(&state) {
+        return keys_later();
+    }
+    if !key_caller(&state, &headers) {
+        return api_error(StatusCode::UNAUTHORIZED, "unauthorized");
+    }
+    let Some(prints) = state.prints.clone() else {
+        return keys_later();
+    };
+    let Ok(rows) = key_rows(&state) else {
+        return api_error(StatusCode::INTERNAL_SERVER_ERROR, "unknown_error");
+    };
+    for row in &rows {
+        let key = row.get("key").and_then(|item| item.as_str()).unwrap_or("");
+        if key.is_empty() {
+            continue;
+        }
+        if let Err(err) = prints.enqueue(crate::registration_server::PrintJob {
+            id: key.to_string(),
+            pages: 1,
+        }) {
+            log::debug!("print keys: {err:?}");
+            return api_error(StatusCode::CONFLICT, "no_printer");
+        }
+    }
+    api_ok(json!({}))
+}
+
+fn keys_later() -> Response {
     (
         StatusCode::NOT_IMPLEMENTED,
         Json(json!({
@@ -536,6 +671,115 @@ async fn keys_later() -> Response {
         })),
     )
         .into_response()
+}
+
+const DESK_COOKIE: &str = "desk";
+
+fn key_caller(state: &OperatorState, headers: &HeaderMap) -> bool {
+    live_session(state, headers).is_some() || desk_row(state, headers).is_some()
+}
+
+fn desk_event_open(state: &OperatorState) -> bool {
+    crate::registration_server::current::CurrentEvent::lock(state.current())
+        .event_id()
+        .is_some()
+}
+
+fn desk_row(state: &OperatorState, headers: &HeaderMap) -> Option<String> {
+    let key = cookie_value(headers, DESK_COOKIE)?;
+    let found = crate::registration_server::current::CurrentEvent::lock(state.current())
+        .with_db(|db| {
+            db.file()
+                .query_row("SELECT key FROM keys WHERE key = ?1", [&key], |row| {
+                    row.get::<_, String>(0)
+                })
+                .optional()
+        })?
+        .ok()?;
+    found
+}
+
+fn key_rows(state: &OperatorState) -> Result<Vec<serde_json::Value>, rusqlite::Error> {
+    crate::registration_server::current::CurrentEvent::lock(state.current())
+        .with_db(|db| {
+            let mut stmt = db
+                .file()
+                .prepare("SELECT id, key, comment, IFNULL(is_admin, 0) FROM keys ORDER BY id")?;
+            let rows = stmt.query_map([], |row| {
+                Ok(json!({
+                    "id": row.get::<_, i64>(0)?,
+                    "key": row.get::<_, String>(1)?,
+                    "comment": row.get::<_, Option<String>>(2)?,
+                    "is_admin": row.get::<_, i64>(3)? != 0,
+                }))
+            })?;
+            rows.collect()
+        })
+        .ok_or(rusqlite::Error::QueryReturnedNoRows)?
+}
+
+fn insert_operator_key(
+    state: &OperatorState,
+    comment: Option<&str>,
+) -> Result<serde_json::Value, rusqlite::Error> {
+    crate::registration_server::current::CurrentEvent::lock(state.current())
+        .with_db(|db| {
+            for _ in 0..8 {
+                let key = format!("K{}", uuid::Uuid::new_v4().simple());
+                match db.file().execute(
+                    "INSERT INTO keys (key, is_admin, comment) VALUES (?1, 0, ?2)",
+                    rusqlite::params![key, comment],
+                ) {
+                    Ok(_) => {
+                        return Ok(json!({
+                            "id": db.file().last_insert_rowid(),
+                            "key": key,
+                        }));
+                    }
+                    Err(rusqlite::Error::SqliteFailure(err, _))
+                        if err.code == rusqlite::ErrorCode::ConstraintViolation =>
+                    {
+                        continue;
+                    }
+                    Err(err) => return Err(err),
+                }
+            }
+            Err(rusqlite::Error::QueryReturnedNoRows)
+        })
+        .ok_or(rusqlite::Error::QueryReturnedNoRows)?
+}
+
+fn update_key(
+    state: &OperatorState,
+    id: i64,
+    key: Option<&str>,
+    comment: Option<&str>,
+) -> Result<bool, rusqlite::Error> {
+    crate::registration_server::current::CurrentEvent::lock(state.current())
+        .with_db(|db| {
+            let changed = if let Some(key) = key {
+                db.file().execute(
+                    "UPDATE keys SET key = ?1, comment = ?2 WHERE id = ?3",
+                    rusqlite::params![key, comment, id],
+                )?
+            } else {
+                db.file().execute(
+                    "UPDATE keys SET comment = ?1 WHERE id = ?2",
+                    rusqlite::params![comment, id],
+                )?
+            };
+            Ok(changed > 0)
+        })
+        .ok_or(rusqlite::Error::QueryReturnedNoRows)?
+}
+
+fn delete_key(state: &OperatorState, id: i64) -> Result<bool, rusqlite::Error> {
+    crate::registration_server::current::CurrentEvent::lock(state.current())
+        .with_db(|db| {
+            let changed = db.file().execute("DELETE FROM keys WHERE id = ?1", [id])?;
+            Ok(changed > 0)
+        })
+        .ok_or(rusqlite::Error::QueryReturnedNoRows)?
 }
 
 const OPERATOR_SESSION: Duration = Duration::from_secs(60);

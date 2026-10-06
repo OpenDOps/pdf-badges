@@ -2,8 +2,10 @@ import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState
 import { useTranslation } from "react-i18next";
 
 import { StepFrameContext, type StepFrame } from "../layouts/frame";
+import { PickerMenu, SearchSelect, pickerClass, type PickerRow } from "../picker";
 import type { EnumParents, EnumResult, Screen } from "./client";
 import { choiceOptions, choose } from "./choices";
+import { flagSrc } from "./flags";
 import { back, check, next, openScreens, readValue, setGrouped, setValue, type FormState, type Question, type StepError } from "./engine";
 import { watchCities } from "./files";
 import {
@@ -49,12 +51,13 @@ function isRequired(question: Question, locale: string): boolean {
 }
 
 function FieldLabel({ question, locale, htmlFor }: { question: Question; locale: string; htmlFor: string }) {
+  const sheet = useContext(SheetContext);
   return (
     <label className="block" htmlFor={htmlFor}>
       {labelOf(question, locale)}
-      {isRequired(question, locale) ? (
+      {sheet || !isRequired(question, locale) ? null : (
         <span className="text-red-700" aria-hidden="true"> *</span>
-      ) : null}
+      )}
     </label>
   );
 }
@@ -87,7 +90,7 @@ const SheetContext = createContext(false);
 const ERROR_GAP = 16;
 
 function sheetWidth(question: Question): string {
-  if (question.many || question.radios) return "w-full px-2";
+  if (question.many || question.radios) return "mb-4 w-full px-2";
   return "box-border w-full px-2 min-[601px]:w-1/2 min-[865px]:w-1/3";
 }
 
@@ -163,7 +166,6 @@ function CountryField({
   const ref = useRef<HTMLInputElement>(null);
   const queryRef = useRef(countryLabel(state, path));
   const [query, setQuery] = useState(queryRef.current);
-  const [open, setOpen] = useState(false);
   const selected = countryValue(state, path);
   const named = countryLabel(state, path);
   const filtering = query.trim() !== "" && query !== named;
@@ -195,73 +197,36 @@ function CountryField({
     if (state.countryFocus !== question.id) return;
     state.countryFocus = undefined;
     ref.current?.focus();
-    setOpen(true);
   });
 
   async function pick(id: number, name: string) {
-    if (!client.enums) return;
-    try {
-      await setCountry(state, { enums: client.enums.bind(client) }, path, id);
-      show(name);
-      setOpen(false);
-      onEdit();
-    } catch {
-      setOpen(true);
-    }
+    if (!client.enums) throw new Error("enums");
+    await setCountry(state, { enums: client.enums.bind(client) }, path, id);
+    show(name);
+    onEdit();
   }
 
+  const rows: PickerRow[] = hits.map((hit) => ({
+    id: String(hit.id),
+    label: hit.name,
+    selected: hit.id === selected,
+  }));
+
   return (
-    <div className={open ? "relative z-50 w-full" : "relative z-30 w-full"}>
-      <input
-        ref={ref}
-        id={question.id}
-        className="w-full"
-        data-testid="country"
-        role="combobox"
-        aria-expanded={open}
-        autoComplete="off"
-        value={query}
-        onFocus={() => setOpen(true)}
-        onBlur={() => {
-          setOpen(false);
-          show(countryLabel(state, path));
-        }}
-        onChange={(event) => {
-          show(event.target.value);
-          setOpen(true);
-        }}
-        onKeyDown={(event) => {
-          if (event.key !== "Enter" || hits.length === 0) return;
-          event.preventDefault();
-          const first = hits[0];
-          void pick(first.id, first.name);
-        }}
-      />
-      {open && hits.length > 0 ? (
-        <ul
-          role="listbox"
-          className="absolute top-full z-20 mt-1 max-h-60 w-full overflow-auto rounded-md border border-slate-300 bg-white shadow"
-        >
-          {hits.map((hit) => (
-            <li
-              key={hit.id}
-              role="option"
-              className={
-                hit.id === selected
-                  ? "cursor-pointer bg-sky-100 px-3 py-2 text-left font-semibold text-gray-900"
-                  : "cursor-pointer bg-white px-3 py-2 text-left text-gray-900"
-              }
-              onMouseDown={(event) => {
-                event.preventDefault();
-                void pick(hit.id, hit.name);
-              }}
-            >
-              {hit.name}
-            </li>
-          ))}
-        </ul>
-      ) : null}
-    </div>
+    <SearchSelect
+      id={question.id}
+      testId="country"
+      inputRef={ref}
+      value={query}
+      rows={rows}
+      onChange={show}
+      onBlur={() => show(countryLabel(state, path))}
+      onPick={(id) => {
+        const hit = hits.find((item) => String(item.id) === id);
+        if (!hit) return;
+        return pick(hit.id, hit.name);
+      }}
+    />
   );
 }
 
@@ -280,7 +245,6 @@ function CitySearch({
   const path = question.id.slice(0, question.id.lastIndexOf("."));
   const queryRef = useRef("");
   const [query, setQuery] = useState("");
-  const [open, setOpen] = useState(false);
   const [hits, setHits] = useState(() => [] as ReturnType<typeof searchCities>);
   const selectedCountry = countryValue(state, path);
   const [seenCountry, setSeenCountry] = useState(selectedCountry);
@@ -330,19 +294,13 @@ function CitySearch({
   }, [state, client, path, state.locale]);
 
   async function pick(id: number, name: string) {
-    if (!client.enums) return;
-    try {
-      await setCity(state, { enums: client.enums.bind(client) }, path, id);
-      show(name);
-      setOpen(false);
-      onEdit();
-    } catch {
-      setOpen(true);
-    }
+    if (!client.enums) throw new Error("enums");
+    await setCity(state, { enums: client.enums.bind(client) }, path, id);
+    show(name);
+    onEdit();
   }
 
   function showCountryField() {
-    setOpen(false);
     const present = visibleCountryId(state);
     const countryId = countryQuestionId(question.id);
     if (!present) {
@@ -355,74 +313,46 @@ function CitySearch({
     onEdit();
   }
 
+  const rows: PickerRow[] = [
+    ...(otherCountry ? [{ id: "other-country", label: otherCountry, tone: "notice" as const }] : []),
+    ...hits.map((hit) => ({
+      id: String(hit.id),
+      label: hit.name,
+      selected: hit.id === question.def,
+    })),
+  ];
+
   return (
-    <div className={open ? "relative z-50 w-full" : "relative z-30 w-full"}>
-      <input
-        id={question.id}
-        className="w-full"
-        data-testid="place"
-        role="combobox"
-        aria-expanded={open}
-        autoComplete="off"
-        value={query}
-        onFocus={() => {
-          setHits(searchCities(state, path, queryRef.current).slice(0, CITY_MATCHES));
-          setOpen(true);
-        }}
-        onBlur={() => setOpen(false)}
-        onChange={(event) => {
-          show(event.target.value);
-          setOpen(true);
-          if (event.target.value.trim() === "") setValue(state, question.id, state.locale, null);
-        }}
-        onKeyDown={(event) => {
-          if (event.key !== "Enter" || hits.length === 0) return;
-          event.preventDefault();
-          const first = hits[0];
-          void pick(first.id, first.name);
-        }}
-      />
-      {open && (otherCountry || hits.length > 0) ? (
-        <ul
-          role="listbox"
-          className="absolute top-full z-20 mt-1 max-h-60 w-full overflow-auto rounded-md border border-slate-300 bg-white shadow"
-        >
-          {otherCountry ? (
-            <li
-              role="option"
-              className="cursor-pointer bg-amber-100 px-3 py-2 text-left font-semibold text-gray-900"
-              onMouseDown={(event) => {
-                event.preventDefault();
-                showCountryField();
-              }}
-            >
-              {otherCountry}
-            </li>
-          ) : null}
-          {hits.map((hit) => (
-            <li
-              key={hit.id}
-              role="option"
-              className={
-                hit.id === question.def
-                  ? "cursor-pointer bg-sky-100 px-3 py-2 text-left font-semibold text-gray-900"
-                  : "cursor-pointer bg-white px-3 py-2 text-left text-gray-900"
-              }
-              onMouseDown={(event) => {
-                event.preventDefault();
-                void pick(hit.id, hit.name);
-              }}
-            >
-              {hit.name}
-            </li>
-          ))}
-        </ul>
-      ) : null}
-    </div>
+    <SearchSelect
+      id={question.id}
+      testId="place"
+      value={query}
+      rows={rows}
+      onFocus={() => setHits(searchCities(state, path, queryRef.current).slice(0, CITY_MATCHES))}
+      onChange={(next) => {
+        show(next);
+        if (next.trim() === "") setValue(state, question.id, state.locale, null);
+      }}
+      onPick={(id) => {
+        if (id === "other-country") {
+          showCountryField();
+          return;
+        }
+        const hit = hits.find((item) => String(item.id) === id);
+        if (!hit) return;
+        return pick(hit.id, hit.name);
+      }}
+    />
   );
 }
 
 const PHONE_MATCHES = 12;
+
+function Flag({ countryId }: { countryId: number | null }) {
+  const src = flagSrc(countryId);
+  if (!src) return null;
+  return <img src={src} alt="" className="h-4 w-6 shrink-0 object-cover" />;
+}
 
 function PhoneList({
   state,
@@ -437,6 +367,7 @@ function PhoneList({
 }) {
   const address = question.id.replace(/\.(?:contact_phones|phones_faxes|faxes)\.str_number$/, "");
   const inputRef = useRef<HTMLInputElement>(null);
+  const resumeRef = useRef(false);
   const editRef = useRef(onEdit);
   editRef.current = onEdit;
   const [focused, setFocused] = useState(false);
@@ -460,7 +391,12 @@ function PhoneList({
 
   useLayoutEffect(() => {
     const input = inputRef.current;
-    if (!input || !focused || searching) return;
+    if (!input || searching) return;
+    if (resumeRef.current) {
+      resumeRef.current = false;
+      input.focus();
+    }
+    if (!focused) return;
     const slot = input.value.indexOf("_");
     const caret = slot < 0 ? input.value.length : slot;
     input.setSelectionRange(caret, caret);
@@ -501,16 +437,27 @@ function PhoneList({
     } catch {
       return;
     }
+    setNational(state, address, "");
+    resumeRef.current = true;
     setSearching(false);
+    setFocused(true);
     setQuery("");
     onEdit();
   }
 
+  const countryId = phoneCountryId(state, address);
+  const codeRows: PickerRow[] = matches.map((row) => ({
+    id: String(row.id),
+    label: `${row.name} ${row.code}`,
+    selected: row.id === countryId,
+    leading: <Flag countryId={row.id} />,
+  }));
+
   return (
-    <div className={searching ? "relative z-50 flex w-full" : "relative z-30 flex w-full"}>
+    <div className={pickerClass(searching, "row")}>
       <button
         type="button"
-        className="shrink-0 rounded-r-none border border-slate-300 bg-white px-3 text-gray-900"
+        className="inline-flex shrink-0 items-center gap-2 rounded-r-none border border-slate-300 bg-white px-3 text-gray-900"
         onMouseDown={(event) => {
           event.preventDefault();
           setFocused(false);
@@ -522,6 +469,7 @@ function PhoneList({
             .catch(() => undefined);
         }}
       >
+        <Flag countryId={phoneCountryId(state, address)} />
         {code}
       </button>
       {searching ? (
@@ -551,26 +499,7 @@ function PhoneList({
           onChange={(event) => writeDigits(event.target.value)}
         />
       )}
-      {searching && matches.length > 0 ? (
-        <ul
-          role="listbox"
-          className="absolute top-full z-20 mt-1 max-h-60 w-full overflow-auto rounded-md border border-slate-300 bg-white shadow"
-        >
-          {matches.map((row) => (
-            <li
-              key={row.id}
-              role="option"
-              className="cursor-pointer bg-white px-3 py-2 text-left text-gray-900"
-              onMouseDown={(event) => {
-                event.preventDefault();
-                void pick(row.id);
-              }}
-            >
-              {row.name} {row.code}
-            </li>
-          ))}
-        </ul>
-      ) : null}
+      {searching ? <PickerMenu rows={codeRows} onPick={(id) => void pick(Number(id))} /> : null}
     </div>
   );
 }
@@ -777,12 +706,14 @@ export function Step({
   state,
   client,
   onChange,
+  onEdit,
   onBack,
   sheet = false,
 }: {
   state: FormState;
   client: StepClient;
   onChange?: () => void;
+  onEdit?: () => void;
   onBack?: () => void;
   sheet?: boolean;
 }) {
@@ -796,6 +727,7 @@ export function Step({
     const previous = state.errors[0]?.id;
     if (state.errors.length > 0) state.errors = check(state, shown(), state.locale);
     refresh();
+    onEdit?.();
     const nextId = state.errors[0]?.id;
     if (nextId && nextId !== previous) setScrollRequest((value) => value + 1);
   };
