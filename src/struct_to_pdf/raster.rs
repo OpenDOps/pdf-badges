@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 use std::io::Cursor;
 use std::path::Path;
+use std::sync::Mutex;
 
-use fontdue::{Font, FontSettings};
+use fontdue::{Font, FontSettings, Metrics};
 use image::imageops::FilterType;
 use image::{DynamicImage, ImageFormat, RgbImage, Rgba, RgbaImage};
 
@@ -19,7 +20,104 @@ pub struct Raster {
     pub bmp: Vec<u8>,
 }
 
+pub(crate) struct FaceSet {
+    faces: HashMap<String, CachedFace>,
+}
+
+struct CachedFace {
+    font: Font,
+    glyphs: Mutex<HashMap<(u32, char), (Metrics, Vec<u8>)>>,
+}
+
+impl FaceSet {
+    pub(crate) fn from_page(page: &Page) -> Self {
+        let mut faces = HashMap::new();
+        for (key, resource) in &page.fonts {
+            let Some(bytes) = resource.bytes.clone() else {
+                continue;
+            };
+            let Ok(font) = Font::from_bytes(bytes, FontSettings::default()) else {
+                continue;
+            };
+            faces.insert(
+                key.clone(),
+                CachedFace {
+                    font,
+                    glyphs: Mutex::new(HashMap::new()),
+                },
+            );
+        }
+        FaceSet { faces }
+    }
+
+    fn get(&self, key: &str) -> Option<&CachedFace> {
+        self.faces.get(key)
+    }
+}
+
+pub(crate) fn render_pixels(
+    page: &Page,
+    dpi: f64,
+    base_dir: &Path,
+    faces: &FaceSet,
+) -> Result<RgbaImage, RenderError> {
+    paint(page, dpi, base_dir, Some(faces))
+}
+
+pub(crate) fn png_bytes(image: RgbaImage) -> Result<Vec<u8>, RenderError> {
+    let mut bytes = Vec::new();
+    DynamicImage::ImageRgba8(image)
+        .write_to(&mut Cursor::new(&mut bytes), ImageFormat::Png)
+        .map_err(|err| RenderError {
+            context: "page".to_string(),
+            message: err.to_string(),
+        })?;
+    Ok(bytes)
+}
+
+pub(crate) fn bmp_bytes(image: RgbaImage) -> Result<Vec<u8>, RenderError> {
+    let rgb = DynamicImage::ImageRgba8(image).into_rgb8();
+    encode_bmp(&rgb)
+}
+
 pub fn render(page: &Page, dpi: f64, base_dir: &Path) -> Result<Raster, RenderError> {
+    if dpi <= 0.0 {
+        return Err(RenderError {
+            context: "page".to_string(),
+            message: "dpi must be positive".to_string(),
+        });
+    }
+    let width = page_px(
+        page.page_size.width + page.page_size.bleeds.left + page.page_size.bleeds.right,
+        page.page_size.units,
+        dpi,
+    );
+    let height = page_px(
+        page.page_size.height + page.page_size.bleeds.top + page.page_size.bleeds.bottom,
+        page.page_size.units,
+        dpi,
+    );
+    if width == 0 || height == 0 {
+        return Err(RenderError {
+            context: "page".to_string(),
+            message: "page has no pixels".to_string(),
+        });
+    }
+    let image = paint(page, dpi, base_dir, None)?;
+    Ok(Raster {
+        width,
+        height,
+        png: encode_png(&image)?,
+        bmp: encode_bmp(&DynamicImage::ImageRgba8(image).to_rgb8())?,
+    })
+}
+
+fn paint(
+    page: &Page,
+    dpi: f64,
+    base_dir: &Path,
+    faces: Option<&FaceSet>,
+) -> Result<RgbaImage, RenderError> {
     if dpi <= 0.0 {
         return Err(RenderError {
             context: "page".to_string(),
@@ -47,7 +145,7 @@ pub fn render(page: &Page, dpi: f64, base_dir: &Path) -> Result<Raster, RenderEr
     for entry in &page.contents {
         match entry {
             ContentEntry::Text(text) => {
-                draw_text(page, text, dpi, base_dir, &mut fonts, &mut image)?
+                draw_text(page, text, dpi, base_dir, &mut fonts, faces, &mut image)?
             }
             ContentEntry::Image(placement) => {
                 draw_resource(page, placement, dpi, base_dir, &mut image)?
@@ -56,12 +154,7 @@ pub fn render(page: &Page, dpi: f64, base_dir: &Path) -> Result<Raster, RenderEr
             ContentEntry::Photo(photo) => draw_photo(page, photo, dpi, &mut image)?,
         }
     }
-    Ok(Raster {
-        width,
-        height,
-        png: encode_png(&image)?,
-        bmp: encode_bmp(&DynamicImage::ImageRgba8(image).to_rgb8())?,
-    })
+    Ok(image)
 }
 
 fn encode_png(image: &RgbaImage) -> Result<Vec<u8>, RenderError> {
@@ -142,18 +235,22 @@ fn draw_resource(
             context: placement.id.clone(),
             message: format!("unknown image resource {}", placement.resource_name),
         })?;
-    let relative = resource
-        .extracted_path
-        .as_deref()
-        .ok_or_else(|| RenderError {
+    let bytes = if let Some(bytes) = resource.bytes.clone() {
+        bytes
+    } else {
+        let relative = resource
+            .extracted_path
+            .as_deref()
+            .ok_or_else(|| RenderError {
+                context: placement.id.clone(),
+                message: "extracted_path is missing".to_string(),
+            })?;
+        let path = base_dir.join(relative);
+        std::fs::read(&path).map_err(|err| RenderError {
             context: placement.id.clone(),
-            message: "extracted_path is missing".to_string(),
-        })?;
-    let path = base_dir.join(relative);
-    let bytes = std::fs::read(&path).map_err(|err| RenderError {
-        context: placement.id.clone(),
-        message: format!("{}: {err}", path.display()),
-    })?;
+            message: format!("{}: {err}", path.display()),
+        })?
+    };
     let (start_x, start_y, end_x, end_y) = entry_box(
         page,
         placement.pos_x,
@@ -203,6 +300,7 @@ fn draw_text(
     dpi: f64,
     base_dir: &Path,
     fonts: &mut HashMap<String, Font>,
+    faces: Option<&FaceSet>,
     image: &mut RgbaImage,
 ) -> Result<(), RenderError> {
     let shown = text
@@ -214,7 +312,14 @@ fn draw_text(
     if shown.is_empty() {
         return Ok(());
     }
-    let font = open_font(page, &text.text.font, base_dir, fonts, &text.id)?;
+    let cached = faces.and_then(|faces| faces.get(&text.text.font));
+    let owned;
+    let (font, glyphs) = if let Some(face) = cached {
+        (&face.font, Some(&face.glyphs))
+    } else {
+        owned = open_font(page, &text.text.font, base_dir, fonts, &text.id)?;
+        (owned, None)
+    };
     let (box_x, box_y, box_right, box_bottom) =
         entry_box(page, text.pos_x, text.pos_y, text.width, text.height, dpi);
     let pad_left = length_px(text.padding.left, page.page_size.units, dpi).round() as i32;
@@ -235,7 +340,7 @@ fn draw_text(
         dpi,
     )
     .max(1.0);
-    let lines = wrap(font, shown, size, content_w as f32);
+    let lines = wrap(font, glyphs, shown, size, content_w as f32);
     let block_h = line_h * lines.len() as f64;
     let top = match text.vertical {
         VerticalAlign::Top => 0.0,
@@ -243,7 +348,7 @@ fn draw_text(
         VerticalAlign::Bottom => (content_h as f64) - block_h,
     };
     for (index, line) in lines.iter().enumerate() {
-        let width = line_width(font, line, size);
+        let width = line_width(font, glyphs, line, size);
         let left = match text.horizontal {
             HorizontalAlign::Left => 0.0,
             HorizontalAlign::Center => (content_w as f32 - width) / 2.0,
@@ -253,6 +358,7 @@ fn draw_text(
         blit_line(
             image,
             font,
+            glyphs,
             line,
             size,
             origin_x as f32 + left,
@@ -278,15 +384,19 @@ fn open_font<'a>(
             context: id.to_string(),
             message: format!("unknown font {key}"),
         })?;
-        let relative = resource.source_path.as_deref().ok_or_else(|| RenderError {
-            context: id.to_string(),
-            message: "source_path is missing".to_string(),
-        })?;
-        let path = base_dir.join(relative);
-        let bytes = std::fs::read(&path).map_err(|_| RenderError {
-            context: id.to_string(),
-            message: format!("font file not found: {}", path.display()),
-        })?;
+        let bytes = if let Some(bytes) = resource.bytes.clone() {
+            bytes
+        } else {
+            let relative = resource.source_path.as_deref().ok_or_else(|| RenderError {
+                context: id.to_string(),
+                message: "source_path is missing".to_string(),
+            })?;
+            let path = base_dir.join(relative);
+            std::fs::read(&path).map_err(|_| RenderError {
+                context: id.to_string(),
+                message: format!("font file not found: {}", path.display()),
+            })?
+        };
         let font = Font::from_bytes(bytes, FontSettings::default()).map_err(|err| RenderError {
             context: id.to_string(),
             message: err.to_string(),
@@ -296,13 +406,21 @@ fn open_font<'a>(
     Ok(fonts.get(key).expect("font was inserted"))
 }
 
-fn wrap(font: &Font, text: &str, size: f32, max_width: f32) -> Vec<String> {
+type GlyphCache = Mutex<HashMap<(u32, char), (Metrics, Vec<u8>)>>;
+
+fn wrap(
+    font: &Font,
+    glyphs: Option<&GlyphCache>,
+    text: &str,
+    size: f32,
+    max_width: f32,
+) -> Vec<String> {
     let mut lines = Vec::new();
     for paragraph in text.split('\n') {
         let mut line = String::new();
         for word in paragraph.split_inclusive(' ') {
             let candidate = format!("{line}{word}");
-            if !line.is_empty() && line_width(font, &candidate, size) > max_width {
+            if !line.is_empty() && line_width(font, glyphs, &candidate, size) > max_width {
                 lines.push(std::mem::take(&mut line));
             }
             line.push_str(word);
@@ -315,15 +433,35 @@ fn wrap(font: &Font, text: &str, size: f32, max_width: f32) -> Vec<String> {
     lines
 }
 
-fn line_width(font: &Font, text: &str, size: f32) -> f32 {
+fn line_width(font: &Font, glyphs: Option<&GlyphCache>, text: &str, size: f32) -> f32 {
     text.chars()
-        .map(|ch| font.rasterize(ch, size).0.advance_width)
+        .map(|ch| rasterize(font, glyphs, ch, size).0.advance_width)
         .sum()
+}
+
+fn rasterize(
+    font: &Font,
+    glyphs: Option<&GlyphCache>,
+    ch: char,
+    size: f32,
+) -> (Metrics, Vec<u8>) {
+    let Some(glyphs) = glyphs else {
+        return font.rasterize(ch, size);
+    };
+    let key = (size.to_bits(), ch);
+    let mut cache = glyphs.lock().unwrap_or_else(|err| err.into_inner());
+    if let Some((metrics, bitmap)) = cache.get(&key) {
+        return (*metrics, bitmap.clone());
+    }
+    let (metrics, bitmap) = font.rasterize(ch, size);
+    cache.insert(key, (metrics, bitmap.clone()));
+    (metrics, bitmap)
 }
 
 fn blit_line(
     image: &mut RgbaImage,
     font: &Font,
+    glyphs: Option<&GlyphCache>,
     text: &str,
     size: f32,
     left: f32,
@@ -337,7 +475,7 @@ fn blit_line(
     let ascent = metrics.map(|metrics| metrics.ascent).unwrap_or(size * 0.8);
     let mut cursor = left;
     for ch in text.chars() {
-        let (glyph, bitmap) = font.rasterize(ch, size);
+        let (glyph, bitmap) = rasterize(font, glyphs, ch, size);
         let glyph_x = cursor + glyph.xmin as f32;
         let glyph_y = top + ascent - glyph.ymin as f32 - glyph.height as f32;
         for row in 0..glyph.height {

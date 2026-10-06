@@ -22,7 +22,7 @@ Step 8 is done when steps 1 through 18 are done.
 | [8. Page file](#step-8-page-file) | A YAML page becomes PDF bytes | done |
 | [9. Raster file](#step-9-raster-file) | That page becomes PNG and BMP | done |
 | [10. ZPL file](#step-10-zpl-file) | That page becomes ZPL | done |
-| [11. Prepare](#step-11-prepare) | Both badges are decoded on a switch and when sync stores one category | not started |
+| [11. Prepare](#step-11-prepare) | Both badges are decoded on a switch and when sync stores one category | done |
 | [12. Queues](#step-12-queues) | `CUPS-Get-Printers` becomes one `Printer` per queue | not started |
 | [13. Devices](#step-13-devices) | A live device marks the queue connected. A new device is installed once | not started |
 | [14. Files](#step-14-files) | Settings on the device, routing on the event | not started |

@@ -12,6 +12,7 @@ use crate::registration_server::event_db::{
     check_event_id, EventDb, EventDbError, IndexState, ListOrder, OutgoingAttachment, OutgoingScan,
     ScanWrite, SearchPage, VisitorWrite, WaitingRegistration,
 };
+use crate::registration_server::print::{self, Badges};
 use crate::registration_server::remote_server::RemoteServer;
 
 /// At most one open event, shared by the server thread and the sync thread.
@@ -34,6 +35,7 @@ struct State {
     event_id: Option<String>,
     phase: Phase,
     inflight: u32,
+    badges: Badges,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -128,6 +130,7 @@ impl CurrentEvent {
                 event_id: None,
                 phase: Phase::Closed,
                 inflight: 0,
+                badges: Badges::default(),
             }),
             idle: Condvar::new(),
             remote: Mutex::new(None),
@@ -614,11 +617,16 @@ impl CurrentEvent {
         self.pause_point();
         let opened = EventDb::open(&base, event_id);
         let mut state = self.lock_state();
+        let badges = opened
+            .as_ref()
+            .ok()
+            .map(|_| print::prepare_event(&base.join(event_id)));
         match opened {
             Ok(db) => {
                 let previous = state.event_id.clone();
                 state.db = Some(Arc::new(Mutex::new(db)));
                 state.event_id = Some(event_id.to_string());
+                state.badges = badges.unwrap_or_default();
                 state.phase = Phase::Ready;
                 drop(state);
                 self.finish_switch(previous, event_id);
@@ -647,6 +655,7 @@ impl CurrentEvent {
         if state.db.is_none() {
             state.phase = Phase::Closed;
             state.event_id = None;
+            state.badges = Badges::default();
             return Ok(());
         }
         state.phase = Phase::Switching;
@@ -655,8 +664,85 @@ impl CurrentEvent {
         }
         state.db = None;
         state.event_id = None;
+        state.badges = Badges::default();
         state.phase = Phase::Closed;
         Ok(())
+    }
+
+    /// The prepared layout size for `category`, or the decode error kept for that directory.
+    pub fn badge_layout(&self, category: i64) -> Option<Result<(i32, i32), String>> {
+        self.lock_state().badges.layout_size(category)
+    }
+
+    /// Template field names of the prepared page for `category`.
+    pub fn badge_fields(&self, category: i64) -> Option<Result<Vec<String>, String>> {
+        self.lock_state().badges.page_fields(category)
+    }
+
+    /// Draw the prepared layout. The call uses the bytes kept at prepare time.
+    pub fn badge_png(&self, category: i64) -> Option<Result<Vec<u8>, String>> {
+        self.lock_state()
+            .badges
+            .layout_png(category, &std::collections::HashMap::new(), 72)
+    }
+
+    pub fn badge_graphic(&self, category: i64) -> Option<Result<Vec<u8>, String>> {
+        self.lock_state()
+            .badges
+            .layout_graphic(category, &std::collections::HashMap::new(), 72)
+    }
+
+    /// Draw the prepared page. The call uses the bytes kept at prepare time.
+    pub fn badge_page_pdf(&self, category: i64) -> Option<Result<Vec<u8>, String>> {
+        self.lock_state().badges.page_pdf_bytes(
+            category,
+            &std::collections::HashMap::new(),
+            &std::collections::HashMap::new(),
+        )
+    }
+
+    pub fn badge_page_png(&self, category: i64) -> Option<Result<Vec<u8>, String>> {
+        self.lock_state().badges.page_raster_png(
+            category,
+            &std::collections::HashMap::new(),
+            &std::collections::HashMap::new(),
+            72.0,
+        )
+    }
+
+    /// Reload `badge/{category}/badge.cfg` and `bg.png` when `event_id` is the open event.
+    pub fn store_badge_cfg(&self, event_id: &str, category: i64) {
+        self.store_badge(event_id, category, true);
+    }
+
+    /// Reload `badge/{category}/page.yaml` when `event_id` is the open event.
+    pub fn store_page_file(&self, event_id: &str, category: i64) {
+        self.store_badge(event_id, category, false);
+    }
+
+    fn store_badge(&self, event_id: &str, category: i64, layout: bool) {
+        let state = self.lock_state();
+        if state.phase != Phase::Ready || state.event_id.as_deref() != Some(event_id) {
+            return;
+        }
+        let dir = state
+            .base
+            .join(event_id)
+            .join("badge")
+            .join(category.to_string());
+        drop(state);
+        let next_layout = layout.then(|| print::prepare_layout(&dir));
+        let next_page = (!layout).then(|| print::prepare_page(&dir));
+        let mut state = self.lock_state();
+        if state.phase != Phase::Ready || state.event_id.as_deref() != Some(event_id) {
+            return;
+        }
+        if let Some(layout) = next_layout {
+            state.badges.replace_layout(category, layout);
+        }
+        if let Some(page) = next_page {
+            state.badges.replace_page(category, page);
+        }
     }
 
     fn admit(&self, event_id: &str) -> Result<Admitted<'_>, CurrentError> {

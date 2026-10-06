@@ -73,18 +73,23 @@ pub fn paint_contents(page: &Page, base_dir: &Path) -> Result<PaintedPage, Rende
                         message: format!("{format} not in v0 yet"),
                     });
                 }
-                let relative = resource
-                    .extracted_path
-                    .as_deref()
-                    .ok_or_else(|| RenderError {
+                let bytes = if let Some(bytes) = resource.bytes.clone() {
+                    bytes
+                } else {
+                    let relative =
+                        resource
+                            .extracted_path
+                            .as_deref()
+                            .ok_or_else(|| RenderError {
+                                context: placement.id.clone(),
+                                message: "extracted_path is missing".to_string(),
+                            })?;
+                    let path = base_dir.join(relative);
+                    fs::read(&path).map_err(|_| RenderError {
                         context: placement.id.clone(),
-                        message: "extracted_path is missing".to_string(),
-                    })?;
-                let path = base_dir.join(relative);
-                let bytes = fs::read(&path).map_err(|_| RenderError {
-                    context: placement.id.clone(),
-                    message: format!("image file not found: {}", path.display()),
-                })?;
+                        message: format!("image file not found: {}", path.display()),
+                    })?
+                };
 
                 let name = format!("Im{}", xobjects.len() + 1);
                 let stream = match format.as_str() {

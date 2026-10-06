@@ -23,6 +23,10 @@ pub fn load_font(path: &Path, context: &str) -> Result<LoadedFont, RenderError> 
         context: context.to_string(),
         message: format!("font file not found: {}", path.display()),
     })?;
+    load_font_bytes(bytes, context)
+}
+
+pub fn load_font_bytes(bytes: Vec<u8>, context: &str) -> Result<LoadedFont, RenderError> {
     let face = ttf_parser::Face::parse(&bytes, 0).map_err(|err| RenderError {
         context: context.to_string(),
         message: format!("font file is not a valid TTF: {err}"),

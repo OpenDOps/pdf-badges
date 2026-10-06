@@ -620,6 +620,9 @@ async fn parse_job(app: &App, job: &Job, bytes: &[u8]) {
     if endpoint(&job.path) == "boxapi/getconf" && field(job, "conf_id").is_empty() {
         remember_zone(app, job, bytes);
     }
+    if endpoint(&job.path) == "boxapi/getbadge" {
+        store_getbadge(app, job, bytes);
+    }
     if endpoint(&job.path) == "boxapi/uploadreg" {
         accept_uploaded(app, job, bytes);
     }
@@ -1852,6 +1855,89 @@ fn field<'a>(job: &'a Job, name: &str) -> &'a str {
         .find(|(key, _)| key == name)
         .map(|(_, value)| value.as_str())
         .unwrap_or("")
+}
+
+/// `boxapi/getbadge` is a zip of `badge.cfg` and `bg.png`. Writing those files
+/// rebuilds that category in the open event. A certificate is stored at
+/// `cat_id + 1000`. A body that is not that zip is left unused.
+fn store_getbadge(app: &App, job: &Job, bytes: &[u8]) {
+    let Ok(cat_id) = field(job, "cat_id").parse::<i64>() else {
+        return;
+    };
+    let category = if field(job, "is_cert") == "true" {
+        cat_id.saturating_add(1000)
+    } else {
+        cat_id
+    };
+    let dir = CurrentEvent::lock(&app.current)
+        .base_dir()
+        .join(&job.event_id)
+        .join("badge")
+        .join(category.to_string());
+    let Ok(wrote) = unpack_badge(&dir, bytes) else {
+        return;
+    };
+    let current = CurrentEvent::lock(&app.current);
+    if wrote.cfg || (wrote.background && dir.join("badge.cfg").is_file()) {
+        current.store_badge_cfg(&job.event_id, category);
+    }
+    if wrote.page {
+        current.store_page_file(&job.event_id, category);
+    }
+}
+
+struct UnpackedBadge {
+    cfg: bool,
+    background: bool,
+    page: bool,
+}
+
+fn unpack_badge(dir: &Path, bytes: &[u8]) -> Result<UnpackedBadge, ()> {
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(|_| ())?;
+    std::fs::create_dir_all(dir).map_err(|_| ())?;
+    let mut wrote = UnpackedBadge {
+        cfg: false,
+        background: false,
+        page: false,
+    };
+    for index in 0..archive.len() {
+        let mut file = archive.by_index(index).map_err(|_| ())?;
+        if file.is_dir() {
+            continue;
+        }
+        let name = file
+            .name()
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or("")
+            .to_string();
+        let kind = match name.as_str() {
+            "badge.cfg" => "cfg",
+            "bg.png" => "background",
+            "page.yaml" | "page.yml" | "page.json" => "page",
+            _ => continue,
+        };
+        if file.size() > 64 * 1024 * 1024 {
+            return Err(());
+        }
+        let mut buf = Vec::new();
+        std::io::Read::read_to_end(&mut file, &mut buf).map_err(|_| ())?;
+        if buf.len() > 64 * 1024 * 1024 {
+            return Err(());
+        }
+        std::fs::write(dir.join(&name), &buf).map_err(|_| ())?;
+        match kind {
+            "cfg" => wrote.cfg = true,
+            "background" => wrote.background = true,
+            "page" => wrote.page = true,
+            _ => {}
+        }
+    }
+    if !wrote.cfg && !wrote.background && !wrote.page {
+        Err(())
+    } else {
+        Ok(wrote)
+    }
 }
 
 fn store_barcodes(app: &App, job: &Job, bytes: &[u8]) {
@@ -4471,6 +4557,77 @@ mod tests {
             })
             .await;
             pending.await.unwrap();
+        }
+
+        #[tokio::test]
+        async fn getbadge_rebuilds_the_open_category() {
+            let (venue, dir) = venue("EVT1");
+            let cfg = include_bytes!("../../modules/ticket-render/fixtures/event/badge.cfg");
+            let png = red_png();
+            parse_job(
+                &venue.app,
+                &getbadge_job("EVT1", 7, false),
+                &badge_zip(cfg, &png, None),
+            )
+            .await;
+            let current = CurrentEvent::lock(&venue.app.current);
+            assert!(current.badge_layout(7).unwrap().is_ok());
+            assert!(dir
+                .join("EVT1")
+                .join("badge")
+                .join("7")
+                .join("badge.cfg")
+                .is_file());
+            drop(current);
+
+            parse_job(
+                &venue.app,
+                &getbadge_job("EVT1", 7, true),
+                &badge_zip(cfg, &png, None),
+            )
+            .await;
+            let current = CurrentEvent::lock(&venue.app.current);
+            assert!(current.badge_layout(1007).unwrap().is_ok());
+            assert!(current.badge_layout(7).unwrap().is_ok());
+            drop(current);
+
+            parse_job(
+                &venue.app,
+                &getbadge_job("EVT1", 7, false),
+                &badge_zip(&[0xac, 0xed, 0x00, 0x04], &png, None),
+            )
+            .await;
+            let current = CurrentEvent::lock(&venue.app.current);
+            assert!(current.badge_layout(7).unwrap().is_err());
+            assert!(current.badge_layout(1007).unwrap().is_ok());
+        }
+
+        fn red_png() -> Vec<u8> {
+            let image = image::RgbaImage::from_pixel(2, 2, image::Rgba([255, 0, 0, 255]));
+            let mut bytes = Vec::new();
+            image::DynamicImage::ImageRgba8(image)
+                .write_to(
+                    &mut std::io::Cursor::new(&mut bytes),
+                    image::ImageFormat::Png,
+                )
+                .unwrap();
+            bytes
+        }
+
+        fn badge_zip(cfg: &[u8], png: &[u8], page: Option<&str>) -> Vec<u8> {
+            let mut cursor = std::io::Cursor::new(Vec::new());
+            let mut zip = zip::ZipWriter::new(&mut cursor);
+            let options = zip::write::SimpleFileOptions::default();
+            zip.start_file("badge.cfg", options).unwrap();
+            std::io::Write::write_all(&mut zip, cfg).unwrap();
+            zip.start_file("bg.png", options).unwrap();
+            std::io::Write::write_all(&mut zip, png).unwrap();
+            if let Some(page) = page {
+                zip.start_file("page.yaml", options).unwrap();
+                std::io::Write::write_all(&mut zip, page.as_bytes()).unwrap();
+            }
+            zip.finish().unwrap();
+            cursor.into_inner()
         }
 
         #[tokio::test]

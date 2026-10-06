@@ -54,6 +54,8 @@ pub struct FontResource {
     pub italic: Option<bool>,
     pub embedded: Option<bool>,
     pub source_path: Option<String>,
+    /// Set when the page is prepared. A render uses these bytes and does not open `source_path`.
+    pub bytes: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -63,6 +65,8 @@ pub struct ImageResource {
     pub height: Option<f64>,
     pub file_format: Option<String>,
     pub extracted_path: Option<String>,
+    /// Set when the page is prepared. A render uses these bytes and does not open `extracted_path`.
+    pub bytes: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -354,6 +358,7 @@ fn parse_fonts(resources: Option<&Value>) -> Result<BTreeMap<String, FontResourc
                 italic: obj.get("italic").and_then(Value::as_bool),
                 embedded: obj.get("embedded").and_then(Value::as_bool),
                 source_path: optional_string(obj, "source_path"),
+                bytes: None,
             },
         );
     }
@@ -381,6 +386,7 @@ fn parse_images(resources: Option<&Value>) -> Result<BTreeMap<String, ImageResou
                 height: optional_number(obj, "height"),
                 file_format: optional_string(obj, "file_format"),
                 extracted_path: optional_string(obj, "extracted_path"),
+                bytes: None,
             },
         );
     }

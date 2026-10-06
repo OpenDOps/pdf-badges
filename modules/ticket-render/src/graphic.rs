@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use image::Rgba;
 
 use crate::layout::Layout;
-use crate::page::{err, PageError};
-use crate::render_png;
+use crate::page::{err, render_rgba, PageError};
+use crate::PreparedFace;
 
 pub fn render_graphic(
     layout: &Layout,
@@ -12,37 +12,71 @@ pub fn render_graphic(
     dpi: i32,
     bg: &[u8],
 ) -> Result<Vec<u8>, PageError> {
-    let png = render_png(layout, values, dpi, bg, None)?;
-    png_graphic(&png)
+    let image = render_rgba(layout, values, dpi, bg, None, None)?;
+    Ok(rgba_graphic(&image))
+}
+
+pub fn render_graphic_prepared(
+    layout: &Layout,
+    values: &HashMap<String, String>,
+    dpi: i32,
+    background: &image::RgbaImage,
+    faces: &[PreparedFace],
+    scaled: Option<&image::RgbaImage>,
+) -> Result<Vec<u8>, PageError> {
+    let image = crate::render_rgba_prepared(layout, values, dpi, background, None, faces, scaled)?;
+    Ok(rgba_graphic(&image))
 }
 
 pub fn png_graphic(png: &[u8]) -> Result<Vec<u8>, PageError> {
     let image = image::load_from_memory(png)
         .map_err(|error| err(error.to_string()))?
         .into_rgba8();
-    let width = image.width();
-    let height = image.height();
+    Ok(rgba_graphic(&image))
+}
+
+const HEX: &[u8; 16] = b"0123456789ABCDEF";
+
+pub fn rgba_graphic(image: &image::RgbaImage) -> Vec<u8> {
+    let width = image.width() as usize;
+    let height = image.height() as usize;
+    let row_chars = width.div_ceil(4);
     let total = (width * height).div_ceil(8);
     let row_bytes = width.div_ceil(8);
-    let mut out = format!("~DGBADGE,{total},{row_bytes},\n");
+    let mut out = Vec::with_capacity(24 + height * (row_chars + 1));
+    out.extend_from_slice(format!("~DGBADGE,{total},{row_bytes},\n").as_bytes());
+    let pixels = image.as_raw();
     for y in 0..height {
+        let row = &pixels[y * width * 4..(y + 1) * width * 4];
         let mut nibble = 0u8;
         let mut count = 0u8;
-        for x in 0..width {
-            nibble = (nibble << 1) | u8::from(is_black(*image.get_pixel(x, y)));
+        for px in row.chunks_exact(4) {
+            nibble = (nibble << 1) | u8::from(is_black_bytes(px[0], px[1], px[2], px[3]));
             count += 1;
             if count == 4 {
-                out.push(hex(nibble));
+                out.push(HEX[nibble as usize]);
                 nibble = 0;
                 count = 0;
             }
         }
         if count > 0 {
-            out.push(hex(nibble << (4 - count)));
+            out.push(HEX[(nibble << (4 - count)) as usize]);
         }
-        out.push('\n');
+        out.push(b'\n');
     }
-    Ok(out.into_bytes())
+    out
+}
+
+fn is_black_bytes(red: u8, green: u8, blue: u8, alpha: u8) -> bool {
+    if alpha == 255 {
+        if red >= 200 && green >= 200 && blue >= 200 {
+            return false;
+        }
+        if red <= 80 && green <= 80 && blue <= 80 {
+            return true;
+        }
+    }
+    is_black(Rgba([red, green, blue, alpha]))
 }
 
 fn is_black(pixel: Rgba<u8>) -> bool {
@@ -55,16 +89,11 @@ fn is_black(pixel: Rgba<u8>) -> bool {
     (value + 0.5).floor() >= 1.0
 }
 
-fn hex(nibble: u8) -> char {
-    char::from_digit(u32::from(nibble & 0xf), 16)
-        .unwrap()
-        .to_ascii_uppercase()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::layout::{Alignment, Area, AreaKind, Layout, Rect, TextPart};
+    use crate::render_png;
     use image::{DynamicImage, ImageFormat, RgbaImage};
     use std::io::Cursor;
 
@@ -75,6 +104,23 @@ mod tests {
             .write_to(&mut Cursor::new(&mut bytes), ImageFormat::Png)
             .unwrap();
         bytes
+    }
+
+    #[test]
+    fn fast_pixels_match_the_luma() {
+        for red in (0..=255).step_by(17) {
+            for green in (0..=255).step_by(17) {
+                for blue in (0..=255).step_by(17) {
+                    for alpha in [0, 80, 128, 200, 255] {
+                        assert_eq!(
+                            is_black_bytes(red, green, blue, alpha),
+                            is_black(Rgba([red, green, blue, alpha])),
+                            "{red},{green},{blue},{alpha}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]

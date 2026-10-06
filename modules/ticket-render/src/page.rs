@@ -2,8 +2,9 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
-use fontdue::{Font, FontSettings};
+use fontdue::{Font, FontSettings, Metrics};
 use image::{DynamicImage, ImageFormat, Rgba, RgbaImage};
 
 use crate::codes::{symbol, Symbol};
@@ -37,6 +38,47 @@ pub(crate) fn err(message: impl Into<String>) -> PageError {
     }
 }
 
+pub struct PreparedFace {
+    pub families: Vec<String>,
+    pub weight: String,
+    pub style: String,
+    pub bytes: Vec<u8>,
+    font: Font,
+    glyphs: Mutex<HashMap<(u32, char), (Metrics, Vec<u8>)>>,
+}
+
+pub fn capture_face(families: &[String], weight: &str, style: &str) -> PreparedFace {
+    let bytes = face_bytes(families, weight, style);
+    let font = Font::from_bytes(bytes.clone(), FontSettings::default()).unwrap_or_else(|_| {
+        Font::from_bytes(TEST_FONT.to_vec(), FontSettings::default()).expect("embedded font")
+    });
+    PreparedFace {
+        families: families.to_vec(),
+        weight: weight.to_string(),
+        style: style.to_string(),
+        bytes,
+        font,
+        glyphs: Mutex::new(HashMap::new()),
+    }
+}
+
+impl PreparedFace {
+    fn matches(&self, families: &[String], weight: &str, style: &str) -> bool {
+        self.families == families && self.weight == weight && self.style == style
+    }
+
+    fn rasterize(&self, ch: char, size: f32) -> (Metrics, Vec<u8>) {
+        let key = (size.to_bits(), ch);
+        let mut glyphs = self.glyphs.lock().unwrap_or_else(|err| err.into_inner());
+        if let Some((metrics, bitmap)) = glyphs.get(&key) {
+            return (*metrics, bitmap.clone());
+        }
+        let (metrics, bitmap) = self.font.rasterize(ch, size);
+        glyphs.insert(key, (metrics, bitmap.clone()));
+        (metrics, bitmap)
+    }
+}
+
 pub fn render_png(
     layout: &Layout,
     values: &HashMap<String, String>,
@@ -44,23 +86,92 @@ pub fn render_png(
     bg: &[u8],
     photo: Option<&[u8]>,
 ) -> Result<Vec<u8>, PageError> {
-    let (width, height) = page_px(layout, dpi)?;
+    encode_png(render_rgba(layout, values, dpi, bg, photo, None)?)
+}
+
+pub(crate) fn render_rgba(
+    layout: &Layout,
+    values: &HashMap<String, String>,
+    dpi: i32,
+    bg: &[u8],
+    photo: Option<&[u8]>,
+    faces: Option<&[PreparedFace]>,
+) -> Result<RgbaImage, PageError> {
     let source = image::load_from_memory(bg).map_err(|error| err(error.to_string()))?;
-    let mut image = image::imageops::resize(
-        &source.to_rgba8(),
+    let mut image = scale_background(layout, &source.to_rgba8(), dpi)?;
+    paint_areas(&mut image, layout, values, dpi, photo, faces)?;
+    Ok(image)
+}
+
+pub fn render_png_prepared(
+    layout: &Layout,
+    values: &HashMap<String, String>,
+    dpi: i32,
+    background: &RgbaImage,
+    photo: Option<&[u8]>,
+    faces: &[PreparedFace],
+    scaled: Option<&RgbaImage>,
+) -> Result<Vec<u8>, PageError> {
+    let image = render_rgba_prepared(layout, values, dpi, background, photo, faces, scaled)?;
+    encode_png(image)
+}
+
+pub fn render_rgba_prepared(
+    layout: &Layout,
+    values: &HashMap<String, String>,
+    dpi: i32,
+    background: &RgbaImage,
+    photo: Option<&[u8]>,
+    faces: &[PreparedFace],
+    scaled: Option<&RgbaImage>,
+) -> Result<RgbaImage, PageError> {
+    let mut image = if let Some(scaled) = scaled {
+        scaled.clone()
+    } else {
+        scale_background(layout, background, dpi)?
+    };
+    paint_areas(&mut image, layout, values, dpi, photo, Some(faces))?;
+    Ok(image)
+}
+
+/// Resize the decoded background to this layout at `dpi`. The pixels stay in memory.
+pub fn scale_background(
+    layout: &Layout,
+    background: &RgbaImage,
+    dpi: i32,
+) -> Result<RgbaImage, PageError> {
+    let (width, height) = page_px(layout, dpi)?;
+    Ok(image::imageops::resize(
+        background,
         width,
         height,
         image::imageops::FilterType::Nearest,
-    );
+    ))
+}
+
+fn paint_areas(
+    image: &mut RgbaImage,
+    layout: &Layout,
+    values: &HashMap<String, String>,
+    dpi: i32,
+    photo: Option<&[u8]>,
+    faces: Option<&[PreparedFace]>,
+) -> Result<(), PageError> {
     for area in replace_areas(&layout.areas, values) {
         match &area.kind {
-            AreaKind::Text { .. } => draw_text(&mut image, &area, dpi, layout.dots_per_point)?,
-            AreaKind::Barcode { barcode_type } => {
-                draw_barcode(&mut image, &area, barcode_type)?;
+            AreaKind::Text { .. } => {
+                draw_text(image, &area, dpi, layout.dots_per_point, faces)?
             }
-            AreaKind::Photo => draw_photo(&mut image, &area, photo)?,
+            AreaKind::Barcode { barcode_type } => {
+                draw_barcode(image, &area, barcode_type)?;
+            }
+            AreaKind::Photo => draw_photo(image, &area, photo)?,
         }
     }
+    Ok(())
+}
+
+fn encode_png(image: RgbaImage) -> Result<Vec<u8>, PageError> {
     let mut bytes = Vec::new();
     DynamicImage::ImageRgba8(image)
         .write_to(&mut Cursor::new(&mut bytes), ImageFormat::Png)
@@ -119,6 +230,7 @@ fn draw_text(
     area: &Area,
     dpi: i32,
     dots_per_point: f32,
+    faces: Option<&[PreparedFace]>,
 ) -> Result<(), PageError> {
     let AreaKind::Text {
         font_size,
@@ -159,7 +271,7 @@ fn draw_text(
     let center_y = (start_y + end_y) as f32 / 2.0;
 
     let mut scale = 1.0f32;
-    let mut measured = measure_lines(&lines, dpi, dots_per_point, scale)?;
+    let mut measured = measure_lines(&lines, dpi, dots_per_point, scale, faces)?;
     let width = measured.iter().map(|line| line.width).fold(0.0, f32::max);
     let height = measured.iter().map(|line| line.line_h).sum::<f32>();
     if width > content_w || height > content_h {
@@ -171,7 +283,7 @@ fn draw_text(
         };
         scale = fit_w.min(fit_h).min(1.0);
         if scale < 1.0 {
-            measured = measure_lines(&lines, dpi, dots_per_point, scale)?;
+            measured = measure_lines(&lines, dpi, dots_per_point, scale, faces)?;
         }
     }
     let block_h = measured.iter().map(|line| line.line_h).sum::<f32>();
@@ -392,10 +504,11 @@ fn measure_lines(
     dpi: i32,
     dots_per_point: f32,
     scale: f32,
+    faces: Option<&[PreparedFace]>,
 ) -> Result<Vec<MeasuredLine>, PageError> {
     let mut measured = Vec::new();
     for line in lines {
-        measured.push(measure_line(line, dpi, dots_per_point, scale)?);
+        measured.push(measure_line(line, dpi, dots_per_point, scale, faces)?);
     }
     Ok(measured)
 }
@@ -405,14 +518,15 @@ fn measure_line(
     dpi: i32,
     dots_per_point: f32,
     scale: f32,
+    faces: Option<&[PreparedFace]>,
 ) -> Result<MeasuredLine, PageError> {
     let mut glyphs = Vec::new();
     let mut cursor = 0.0f32;
     let mut line_h = 1.0f32;
     for run in line {
         let size = font_px(run.font_size * scale, dpi, dots_per_point);
-        let font = open_font(run.families, run.weight, run.style)?;
-        let metrics = font.horizontal_line_metrics(size);
+        let font = open_font(run.families, run.weight, run.style, faces)?;
+        let metrics = font.line_metrics(size);
         let ascent = metrics.map(|metrics| metrics.ascent).unwrap_or(size * 0.8);
         line_h = line_h.max(metrics.map(|metrics| metrics.new_line_size).unwrap_or(size));
         let color = rgb(run.color);
@@ -501,28 +615,76 @@ fn rgb(color: i32) -> [u8; 3] {
     [(color >> 16) as u8, (color >> 8) as u8, color as u8]
 }
 
-fn open_font(families: &[String], weight: &str, style: &str) -> Result<Font, PageError> {
+enum DrawnFont<'a> {
+    Prepared(&'a PreparedFace),
+    Owned(Font),
+}
+
+impl DrawnFont<'_> {
+    fn line_metrics(&self, size: f32) -> Option<fontdue::LineMetrics> {
+        match self {
+            DrawnFont::Prepared(face) => face.font.horizontal_line_metrics(size),
+            DrawnFont::Owned(font) => font.horizontal_line_metrics(size),
+        }
+    }
+
+    fn rasterize(&self, ch: char, size: f32) -> (Metrics, Vec<u8>) {
+        match self {
+            DrawnFont::Prepared(face) => face.rasterize(ch, size),
+            DrawnFont::Owned(font) => font.rasterize(ch, size),
+        }
+    }
+}
+
+fn open_font<'a>(
+    families: &[String],
+    weight: &str,
+    style: &str,
+    faces: Option<&'a [PreparedFace]>,
+) -> Result<DrawnFont<'a>, PageError> {
+    if let Some(faces) = faces {
+        if let Some(face) = faces
+            .iter()
+            .find(|face| face.matches(families, weight, style))
+        {
+            return Ok(DrawnFont::Prepared(face));
+        }
+        let font = Font::from_bytes(TEST_FONT.to_vec(), FontSettings::default())
+            .map_err(|message| err(message))?;
+        return Ok(DrawnFont::Owned(font));
+    }
+    let bytes = face_bytes(families, weight, style);
+    Font::from_bytes(bytes, FontSettings::default())
+        .map(|font| DrawnFont::Owned(font))
+        .map_err(|message| err(message))
+}
+
+fn face_bytes(families: &[String], weight: &str, style: &str) -> Vec<u8> {
     let weight = css_weight(weight);
     let italic = css_italic(style);
     for family in families {
-        if let Some(font) = font_file(Path::new(family)) {
-            return Ok(font);
+        if let Some(bytes) = read_font(Path::new(family)) {
+            return bytes;
         }
-        if let Some(font) = font_for_family(family, weight, italic) {
-            return Ok(font);
+        if let Some(bytes) = family_bytes(family, weight, italic) {
+            return bytes;
         }
     }
-    Font::from_bytes(TEST_FONT, FontSettings::default()).map_err(|message| err(message))
+    TEST_FONT.to_vec()
 }
 
-fn font_for_family(family: &str, weight: u16, italic: bool) -> Option<Font> {
+fn family_bytes(family: &str, weight: u16, italic: bool) -> Option<Vec<u8>> {
     let slug = family_slug(family);
     if slug.is_empty() {
         return None;
     }
     let faces = list_faces(&Path::new("fonts").join(&slug), &slug);
     let path = choose_face(&faces, weight, italic)?;
-    font_file(path)
+    read_font(path)
+}
+
+fn read_font(path: &Path) -> Option<Vec<u8>> {
+    fs::read(path).ok()
 }
 
 struct FaceFile {
@@ -674,15 +836,6 @@ fn family_slug(family: &str) -> String {
     slug
 }
 
-fn font_file(path: &Path) -> Option<Font> {
-    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
-    if ext != "ttf" && ext != "otf" {
-        return None;
-    }
-    let bytes = fs::read(path).ok()?;
-    Font::from_bytes(bytes, FontSettings::default()).ok()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -750,9 +903,9 @@ mod tests {
 
     #[test]
     fn otf_weight_is_selected() {
-        let regular = open_font(&["Sample".to_string()], "normal", "normal").unwrap();
-        let bold = open_font(&["Sample".to_string()], "bold", "normal").unwrap();
-        let italic = open_font(&["Sample".to_string()], "400", "italic").unwrap();
+        let regular = open_font(&["Sample".to_string()], "normal", "normal", None).unwrap();
+        let bold = open_font(&["Sample".to_string()], "bold", "normal", None).unwrap();
+        let italic = open_font(&["Sample".to_string()], "400", "italic", None).unwrap();
         let regular_width = regular.rasterize('A', 100.0).0.advance_width;
         let bold_width = bold.rasterize('A', 100.0).0.advance_width;
         assert!(bold_width > regular_width);

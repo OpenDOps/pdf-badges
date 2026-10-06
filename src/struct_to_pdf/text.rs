@@ -283,11 +283,15 @@ fn load_fonts(
             context: text.id.clone(),
             message: format!("unknown font {key}"),
         })?;
-        let relative = resource.source_path.as_deref().ok_or_else(|| RenderError {
-            context: text.id.clone(),
-            message: "source_path is missing".to_string(),
-        })?;
-        let loaded = fonts::load_font(&base_dir.join(relative), &text.id)?;
+        let loaded = if let Some(bytes) = resource.bytes.clone() {
+            fonts::load_font_bytes(bytes, &text.id)?
+        } else {
+            let relative = resource.source_path.as_deref().ok_or_else(|| RenderError {
+                context: text.id.clone(),
+                message: "source_path is missing".to_string(),
+            })?;
+            fonts::load_font(&base_dir.join(relative), &text.id)?
+        };
         fonts.insert(
             key,
             UsedFont {
