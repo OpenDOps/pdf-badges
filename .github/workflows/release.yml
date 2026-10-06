@@ -39,7 +39,7 @@ jobs:
       sha: ${{ steps.meta.outputs.sha }}
       matrix: ${{ steps.meta.outputs.matrix }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           persist-credentials: true
@@ -135,14 +135,35 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJson(needs.select.outputs.matrix) }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.select.outputs.sha }}
       - uses: dtolnay/rust-toolchain@stable
-      - uses: arduino/setup-protoc@v3
-        with:
-          repo-token: ${{ github.token }}
-      - uses: actions/setup-node@v4
+      - name: Install protoc
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=29.3
+          case "$(uname -s)-$(uname -m)" in
+            Linux-x86_64) asset="protoc-${version}-linux-x86_64.zip" ;;
+            Darwin-arm64) asset="protoc-${version}-osx-aarch_64.zip" ;;
+            Darwin-x86_64) asset="protoc-${version}-osx-x86_64.zip" ;;
+            MINGW*-*|MSYS*-*|CYGWIN*-*) asset="protoc-${version}-win64.zip" ;;
+            *)
+              echo "unsupported runner $(uname -s)-$(uname -m)" >&2
+              exit 1
+              ;;
+          esac
+          curl -fsSL -o protoc.zip "https://github.com/protocolbuffers/protobuf/releases/download/v${version}/${asset}"
+          mkdir -p "$RUNNER_TEMP/protoc"
+          if command -v unzip >/dev/null 2>&1; then
+            unzip -q protoc.zip -d "$RUNNER_TEMP/protoc"
+          else
+            tar -xf protoc.zip -C "$RUNNER_TEMP/protoc"
+          fi
+          echo "$RUNNER_TEMP/protoc/bin" >> "$GITHUB_PATH"
+          rm protoc.zip
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
       - id: pack
@@ -155,7 +176,7 @@ jobs:
           bash scripts/release/pack.sh | tee "target/release/sha256-${{ matrix.platform }}.txt"
           name=$(awk '{print $2}' "target/release/sha256-${{ matrix.platform }}.txt")
           echo "name=${name}" >> "$GITHUB_OUTPUT"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release-${{ matrix.platform }}
           if-no-files-found: error
@@ -167,13 +188,14 @@ jobs:
     needs: [select, build]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: release-*
           merge-multiple: true
           path: dist
       - env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           TAG: ${{ needs.select.outputs.tag }}
           VERSION: ${{ needs.select.outputs.version }}
         run: |
@@ -197,6 +219,7 @@ jobs:
             gh release edit "$TAG" "${mark[@]}"
           else
             gh release create "$TAG" "${files[@]}" \
+              --verify-tag \
               --title "$TAG" \
               --notes "rust-reg ${VERSION}" \
               "${mark[@]}"
