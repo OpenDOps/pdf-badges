@@ -28,7 +28,14 @@ struct Args {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(result) = rust_reg::registration_server::take_pack_command() {
+        return result;
+    }
     match std::env::args().nth(1).as_deref() {
+        Some("version") => {
+            println!("{}", rust_reg::registration_server::release_tag());
+            return Ok(());
+        }
         Some("render-page") => return render_page_cli(),
         Some("serve") => return serve_cli(),
         Some("registration-server") => return registration_server_cli(),

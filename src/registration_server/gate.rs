@@ -47,21 +47,38 @@ impl Gate {
         self.inflight.load(Ordering::Acquire) == 0 && !self.printing.load(Ordering::Acquire)
     }
 
+    pub fn is_printing(&self) -> bool {
+        self.printing.load(Ordering::Acquire)
+    }
+
     pub async fn wait_until_idle(&self) {
+        self.wait_until(false).await;
+    }
+
+    /// Idle aside from the request that is calling. A print still waits.
+    pub async fn wait_until_others_idle(&self) {
+        self.wait_until(true).await;
+    }
+
+    async fn wait_until(&self, allow_own_request: bool) {
         loop {
             let notified = self.idle.notified();
             tokio::pin!(notified);
-            if self.is_idle() {
+            let requests = self.inflight.load(Ordering::Acquire);
+            let quiet = if allow_own_request {
+                requests <= 1
+            } else {
+                requests == 0
+            };
+            if quiet && !self.printing.load(Ordering::Acquire) {
                 return;
             }
             notified.await;
         }
     }
 
-    fn notify_if_idle(&self) {
-        if self.is_idle() {
-            self.idle.notify_waiters();
-        }
+    fn wake(&self) {
+        self.idle.notify_waiters();
     }
 }
 
@@ -74,14 +91,14 @@ impl Default for Gate {
 impl Drop for RequestGuard {
     fn drop(&mut self) {
         self.gate.inflight.fetch_sub(1, Ordering::AcqRel);
-        self.gate.notify_if_idle();
+        self.gate.wake();
     }
 }
 
 impl Drop for PrintGuard {
     fn drop(&mut self) {
         self.gate.printing.store(false, Ordering::Release);
-        self.gate.notify_if_idle();
+        self.gate.wake();
     }
 }
 
@@ -116,5 +133,33 @@ mod tests {
         assert!(!waiting.is_finished());
         drop(guard);
         waiting.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_calling_request_does_not_block_itself() {
+        let gate = Arc::new(Gate::new());
+        let own = gate.enter_request();
+        gate.wait_until_others_idle().await;
+
+        let other = gate.enter_request();
+        let waiting = {
+            let gate = Arc::clone(&gate);
+            tokio::spawn(async move { gate.wait_until_others_idle().await })
+        };
+        tokio::task::yield_now().await;
+        assert!(!waiting.is_finished());
+        drop(other);
+        waiting.await.unwrap();
+
+        let printing = gate.enter_print();
+        let waiting = {
+            let gate = Arc::clone(&gate);
+            tokio::spawn(async move { gate.wait_until_others_idle().await })
+        };
+        tokio::task::yield_now().await;
+        assert!(!waiting.is_finished());
+        drop(printing);
+        waiting.await.unwrap();
+        drop(own);
     }
 }

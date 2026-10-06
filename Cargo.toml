@@ -5,6 +5,7 @@ members = [".", "modules/ticket-render"]
 name = "rust-reg"
 version = "0.1.0"
 edition = "2021"
+default-run = "rust-reg"
 
 [lib]
 crate-type = ["rlib", "cdylib", "staticlib"]
@@ -16,6 +17,7 @@ flate2 = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = "0.9"
+sha2 = "0.11"
 ttf-parser = "0.25.1"
 log = "0.4"
 tonic = "0.14.6"

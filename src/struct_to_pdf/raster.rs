@@ -439,12 +439,7 @@ fn line_width(font: &Font, glyphs: Option<&GlyphCache>, text: &str, size: f32) -
         .sum()
 }
 
-fn rasterize(
-    font: &Font,
-    glyphs: Option<&GlyphCache>,
-    ch: char,
-    size: f32,
-) -> (Metrics, Vec<u8>) {
+fn rasterize(font: &Font, glyphs: Option<&GlyphCache>, ch: char, size: f32) -> (Metrics, Vec<u8>) {
     let Some(glyphs) = glyphs else {
         return font.rasterize(ch, size);
     };

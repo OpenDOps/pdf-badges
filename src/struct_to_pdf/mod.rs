@@ -20,8 +20,8 @@ pub use page::{
     ImagePlacement, ImageResource, Padding, Page, PageSize, Photo, RenderError, SourceFormat,
     TextBody, TextBox, Units, VerticalAlign,
 };
-pub use raster::{render, Raster};
 pub(crate) use raster::{bmp_bytes, png_bytes, render_pixels, FaceSet};
+pub use raster::{render, Raster};
 pub use template::{
     fill, fill_raw, index_template, scan, Hole, IndexedBox, TemplateField, TemplateIndex,
 };

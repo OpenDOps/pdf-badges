@@ -1,0 +1,200 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "release-*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version (x.x.x, x.x.x-alpha.N, x.x.x-beta.N, or x.x.x-rc.N)
+        required: true
+        type: string
+      linux:
+        description: Linux
+        type: boolean
+        default: true
+      mac:
+        description: macOS
+        type: boolean
+        default: true
+      windows:
+        description: Windows
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref_name }}-${{ inputs.version || 'tag' }}
+  cancel-in-progress: false
+
+jobs:
+  select:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      tag: ${{ steps.meta.outputs.tag }}
+      sha: ${{ steps.meta.outputs.sha }}
+      matrix: ${{ steps.meta.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+      - id: meta
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_LINUX: ${{ inputs.linux }}
+          INPUT_MAC: ${{ inputs.mac }}
+          INPUT_WINDOWS: ${{ inputs.windows }}
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            version="$INPUT_VERSION"
+            branch="$REF_NAME"
+          else
+            version="${REF_NAME#release-}"
+            branch="$DEFAULT_BRANCH"
+          fi
+          version_re='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(alpha|beta|rc)\.(0|[1-9][0-9]*))?$'
+          if [[ ! "$version" =~ $version_re ]]; then
+            echo "version must be x.x.x, x.x.x-alpha.N, x.x.x-beta.N, or x.x.x-rc.N, got: ${version}" >&2
+            exit 1
+          fi
+
+          include=()
+          selected() {
+            if [[ "$EVENT_NAME" != "workflow_dispatch" || "$1" == "true" ]]; then
+              include+=("{\"platform\":\"$2\",\"os\":\"$3\"}")
+            fi
+          }
+          selected "$INPUT_LINUX" linux ubuntu-latest
+          selected "$INPUT_MAC" macos macos-latest
+          selected "$INPUT_WINDOWS" windows windows-latest
+          if [[ ${#include[@]} -eq 0 ]]; then
+            echo "select at least one system" >&2
+            exit 1
+          fi
+          joined=$(IFS=,; echo "${include[*]}")
+          echo "matrix={\"include\":[${joined}]}" >> "$GITHUB_OUTPUT"
+
+          python3 - "$version" <<'PY'
+          import pathlib, sys
+          version = sys.argv[1]
+          cargo = pathlib.Path("Cargo.toml")
+          lines = cargo.read_text().splitlines(keepends=True)
+          in_pkg = False
+          written = False
+          out = []
+          for line in lines:
+              if line.startswith("[package]"):
+                  in_pkg = True
+              elif line.startswith("[") and in_pkg:
+                  in_pkg = False
+              if in_pkg and not written and line.startswith("version = "):
+                  line = f'version = "{version}"\n'
+                  written = True
+              out.append(line)
+          if not written:
+              raise SystemExit("Cargo.toml has no package version")
+          cargo.write_text("".join(out))
+
+          lock = pathlib.Path("Cargo.lock")
+          text = lock.read_text()
+          marker = 'name = "rust-reg"\nversion = "'
+          start = text.find(marker)
+          if start < 0:
+              raise SystemExit("Cargo.lock has no rust-reg package")
+          value_at = start + len(marker)
+          end = text.find('"', value_at)
+          text = text[:value_at] + version + text[end:]
+          lock.write_text(text)
+          PY
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "tag=release-${version}" >> "$GITHUB_OUTPUT"
+          if git diff --quiet -- Cargo.toml Cargo.lock; then
+            echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add Cargo.toml Cargo.lock
+            git commit -m "Set the package version to ${version}."
+            git push origin "HEAD:${branch}"
+            echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: select
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.select.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.select.outputs.sha }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - id: pack
+        shell: bash
+        env:
+          REGISTRATION_RELEASE_TAG: v${{ needs.select.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p target/release
+          bash scripts/release/pack.sh | tee "target/release/sha256-${{ matrix.platform }}.txt"
+          name=$(awk '{print $2}' "target/release/sha256-${{ matrix.platform }}.txt")
+          echo "name=${name}" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.platform }}
+          if-no-files-found: error
+          path: |
+            target/release/${{ steps.pack.outputs.name }}
+            target/release/sha256-${{ matrix.platform }}.txt
+
+  publish:
+    needs: [select, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: dist
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.select.outputs.tag }}
+          VERSION: ${{ needs.select.outputs.version }}
+        run: |
+          set -euo pipefail
+          : > dist/SHA256SUMS
+          for name in linux macos windows; do
+            line="dist/sha256-${name}.txt"
+            if [[ -f "$line" ]]; then
+              cat "$line" >> dist/SHA256SUMS
+            fi
+          done
+          rm -f dist/sha256-*.txt
+          files=(dist/*)
+          if [[ "$VERSION" == *-alpha.* || "$VERSION" == *-beta.* || "$VERSION" == *-rc.* ]]; then
+            mark=(--prerelease)
+          else
+            mark=(--prerelease=false)
+          fi
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${files[@]}" --clobber
+            gh release edit "$TAG" "${mark[@]}"
+          else
+            gh release create "$TAG" "${files[@]}" \
+              --title "$TAG" \
+              --notes "rust-reg ${VERSION}" \
+              "${mark[@]}"
+          fi

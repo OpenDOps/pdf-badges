@@ -129,7 +129,7 @@ A screen's module is fetched when a link to it is on the screen the operator is 
 1. Four links, in this order: "Оператор" to `/form`, "Печать" to `/visitors`, "Загрузить базу" to `/import`, "Настройки" to `/settings`. All four render after any accepted key.
 2. `GET /api/sync` is the `{ "waiting" }` count already used as the cookie probe. The screen shows that number.
 3. The QR image is `GET /api/qr?text=` plus the origin and `/register`.
-4. The screen has no "Обновить" control, no "Включить модерацию" checkbox, and no list of local addresses.
+4. The screen has no "Обновить" control, no "Включить модерацию" checkbox, and no list of local addresses. The update control arrives in [release-implementation-plan.md](release-implementation-plan.md), and only when a newer release is waiting.
 
 ### Test scenarios
 

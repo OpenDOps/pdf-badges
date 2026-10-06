@@ -1,17 +1,28 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 import { setUnauthorized } from "./form/client";
+import { foldForm } from "./form/fold";
 import { resetScreenLoads } from "./shell/screens";
 import { renderAt } from "./shell/test-router";
+
+function pathnameOf(input: RequestInfo | URL): string {
+  const raw = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+  return new URL(raw, "http://localhost").pathname;
+}
 
 function stubSync(waiting: number, admin = false) {
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: RequestInfo | URL) => {
-      const raw = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-      const pathname = new URL(raw, "http://localhost").pathname;
+      const pathname = pathnameOf(input);
       if (pathname === "/api/sync") {
         return new Response(JSON.stringify({ waiting, is_admin: admin }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      if (pathname === "/api/update") {
+        return new Response(JSON.stringify({ ok: true, data: { version: "0.1.0", newer: null } }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
       }
       return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } });
     }),
@@ -184,4 +195,92 @@ test("menu_omits_update_and_moderation", async () => {
   expect(await screen.findByRole("link", { name: "Форма регистрации" })).toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Обновить" })).not.toBeInTheDocument();
   expect(screen.queryByRole("checkbox", { name: "Включить модерацию" })).not.toBeInTheDocument();
+});
+
+test("menu_hides_update_when_the_read_fails", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL) => {
+      const pathname = pathnameOf(input);
+      if (pathname === "/api/sync") {
+        return new Response(JSON.stringify({ waiting: 0 }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      if (pathname === "/api/update") return new Response("no", { status: 500 });
+      return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } });
+    }),
+  );
+  const { view } = renderAt("/");
+  render(view);
+  expect(await screen.findByRole("link", { name: "Форма регистрации" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Обновить" })).not.toBeInTheDocument();
+});
+
+test("menu_offers_the_update", async () => {
+  const calls: { href: string; path: string; method: string; credentials?: RequestCredentials }[] = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const raw = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      const url = new URL(raw, "http://localhost");
+      const method = init?.method ?? "GET";
+      calls.push({ href: url.href, path: url.pathname, method, credentials: init?.credentials });
+      if (url.pathname === "/api/sync") {
+        return new Response(JSON.stringify({ waiting: 0, is_admin: false }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (url.pathname === "/api/update" && method === "GET") {
+        return new Response(JSON.stringify({ ok: true, data: { version: "0.1.0", newer: "0.2.0" } }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (url.pathname === "/api/update" && method === "POST") {
+        return new Response(JSON.stringify({ ok: true, data: {} }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } });
+    }),
+  );
+  const { view } = renderAt("/");
+  render(view);
+  expect(await screen.findByRole("button", { name: "Обновить" })).toBeInTheDocument();
+  expect(screen.getByText("0.2.0")).toBeInTheDocument();
+  expect(screen.queryByRole("checkbox", { name: "Включить модерацию" })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Обновить" }));
+  await waitFor(() => {
+    expect(calls).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ path: "/api/update", method: "POST", credentials: "include" }),
+      ]),
+    );
+  });
+  expect(calls.some((call) => call.path === "/api/update/check")).toBe(false);
+  expect(calls.every((call) => new URL(call.href).hostname === "localhost")).toBe(true);
+});
+
+test("register_omits_the_update", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL) => {
+      const pathname = pathnameOf(input);
+      if (pathname === "/forms/form.json") {
+        return new Response(JSON.stringify(foldForm()), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      if (pathname === "/api/update") {
+        return new Response(JSON.stringify({ ok: true, data: { version: "0.1.0", newer: "0.2.0" } }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } });
+    }),
+  );
+  const { view } = renderAt("/register");
+  render(view);
+  expect(await screen.findByRole("button", { name: "Начать" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Обновить" })).not.toBeInTheDocument();
 });

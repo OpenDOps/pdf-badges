@@ -80,7 +80,8 @@
     "qr": "Registration QR",
     "waiting": "Not synced",
     "synced": "Synced",
-    "address": "Address"
+    "address": "Address",
+    "update": "Update"
   },
   "network": {
     "localUp": "Local server is reachable",

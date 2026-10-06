@@ -44,6 +44,11 @@ impl PrintQueue {
         (Self { tx }, PrintWorker { rx, gate })
     }
 
+    /// A job is sitting in the channel. A job the worker has already received is the gate's print flag.
+    pub(crate) fn has_queued(&self) -> bool {
+        self.tx.capacity() < self.tx.max_capacity()
+    }
+
     pub fn enqueue(&self, job: PrintJob) -> Result<(), EnqueueError> {
         if job.id.is_empty() {
             return Err(EnqueueError::EmptyId);

@@ -5,8 +5,8 @@ use image::RgbaImage;
 use ticket_render::{AreaKind, Layout, PreparedFace};
 
 use crate::struct_to_pdf::{
-    index_template, load_page, prepare_visitor, render as render_raster,
-    render_pixels, render_visitor, FaceSet, Page, Raster, TemplateIndex,
+    index_template, load_page, prepare_visitor, render as render_raster, render_pixels,
+    render_visitor, FaceSet, Page, Raster, TemplateIndex,
 };
 
 #[derive(Debug)]
@@ -95,8 +95,8 @@ pub fn page_zpl(
     let path = page_path(category_dir)?;
     let page = load_page(&path).map_err(page_error)?;
     let page = prepare_visitor(&page, values, photos, category_dir).map_err(page_error)?;
-    let image = render_pixels(&page, dpi, category_dir, &FaceSet::from_page(&page))
-        .map_err(page_error)?;
+    let image =
+        render_pixels(&page, dpi, category_dir, &FaceSet::from_page(&page)).map_err(page_error)?;
     let width = image.width();
     let payload = ticket_render::rgba_graphic(&image);
     let printer_px = (printer_width_in * dpi).round() as i64;
@@ -1225,13 +1225,15 @@ contents:
         #[ignore]
         fn measure_preload() {
             let (dir, _current) = open();
-            let cfg = std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join(
-                "modules/ticket-render/fixtures/event/badge.cfg",
-            ))
+            let cfg = std::fs::read(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("modules/ticket-render/fixtures/event/badge.cfg"),
+            )
             .unwrap();
-            let bg = std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join(
-                "modules/ticket-render/fixtures/event/bg.png",
-            ))
+            let bg = std::fs::read(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("modules/ticket-render/fixtures/event/bg.png"),
+            )
             .unwrap();
             let category = dir.join("AAA").join("badge").join("7");
             std::fs::create_dir_all(&category).unwrap();
@@ -1246,8 +1248,13 @@ contents:
             .unwrap();
             let fonts = category.join("fonts");
             std::fs::create_dir_all(&fonts).unwrap();
-            let acrom = std::path::PathBuf::from(std::env::var("HOME").unwrap()).join("Library/Fonts");
-            std::fs::copy(acrom.join("Acrom Regular.ttf"), fonts.join("Acrom Regular.ttf")).unwrap();
+            let acrom =
+                std::path::PathBuf::from(std::env::var("HOME").unwrap()).join("Library/Fonts");
+            std::fs::copy(
+                acrom.join("Acrom Regular.ttf"),
+                fonts.join("Acrom Regular.ttf"),
+            )
+            .unwrap();
             std::fs::copy(acrom.join("Acrom Bold.ttf"), fonts.join("Acrom Bold.ttf")).unwrap();
             let values = HashMap::from([
                 ("name".to_string(), "Екатерина".to_string()),
@@ -1255,7 +1262,10 @@ contents:
                 ("company".to_string(), "COLLAGENE 3D MEDICAL".to_string()),
                 ("cups_name".to_string(), "ЕКАТЕРИНА".to_string()),
                 ("cups_surname".to_string(), "МАЙОРОВА".to_string()),
-                ("cups_company".to_string(), "COLLAGENE 3D MEDICAL".to_string()),
+                (
+                    "cups_company".to_string(),
+                    "COLLAGENE 3D MEDICAL".to_string(),
+                ),
                 ("position".to_string(), "менеджер".to_string()),
                 ("booth-id".to_string(), "26".to_string()),
             ]);
@@ -1277,54 +1287,88 @@ contents:
                 "layout {px_w:.0}x{px_h:.0} px at {dpi} dpi, dpp {}",
                 layout.dots_per_point
             );
-            println!("tadviser {page_w:.0}x{page_h:.0} px at {dpi} dpi, 90x130 mm plus 3 mm bleeds");
+            println!(
+                "tadviser {page_w:.0}x{page_h:.0} px at {dpi} dpi, 90x130 mm plus 3 mm bleeds"
+            );
             let settings = ZebraSettings::default();
-            report("ticket-render", "PNG", &|| {
-                let layout = ticket_render::decode_cfg(&cfg).unwrap();
-                ticket_render::render_png(&layout, &values, dpi, &bg, None).unwrap()
-            }, &|| prepared_layout.png(&values, dpi, None).unwrap());
-            report("ticket-render", "graphic", &|| {
-                let layout = ticket_render::decode_cfg(&cfg).unwrap();
-                ticket_render::render_graphic(&layout, &values, dpi, &bg).unwrap()
-            }, &|| prepared_layout.graphic(&values, dpi).unwrap());
-            report("yaml page", "PDF", &|| {
-                let page = load_page(&category.join("page.yaml")).unwrap();
-                render_visitor(&page, &values, &photos, &category).unwrap()
-            }, &|| prepared_page.pdf(&values, &photos).unwrap());
-            report("yaml page", "PNG", &|| {
-                let page = load_page(&category.join("page.yaml")).unwrap();
-                let page = prepare_visitor(&page, &values, &photos, &category).unwrap();
-                render_raster(&page, dpi as f64, &category).unwrap().png
-            }, &|| {
-                prepared_page
-                    .png_bytes(&values, &photos, dpi as f64)
-                    .unwrap()
-            });
-            report("yaml page", "BMP", &|| {
-                let page = load_page(&category.join("page.yaml")).unwrap();
-                let page = prepare_visitor(&page, &values, &photos, &category).unwrap();
-                render_raster(&page, dpi as f64, &category).unwrap().bmp
-            }, &|| {
-                prepared_page
-                    .bmp_bytes(&values, &photos, dpi as f64)
-                    .unwrap()
-            });
-            report("yaml page", "ZPL", &|| {
-                page_zpl(&category, &values, &photos, dpi as f64, 4.1, &settings).unwrap()
-            }, &|| {
-                let (payload, width) = prepared_page
-                    .graphic(&values, &photos, dpi as f64)
-                    .unwrap();
-                wrap_zpl(
-                    &payload,
-                    width,
-                    (4.1 * dpi as f64).round() as i64,
-                    &settings,
-                )
-            });
+            report(
+                "ticket-render",
+                "PNG",
+                &|| {
+                    let layout = ticket_render::decode_cfg(&cfg).unwrap();
+                    ticket_render::render_png(&layout, &values, dpi, &bg, None).unwrap()
+                },
+                &|| prepared_layout.png(&values, dpi, None).unwrap(),
+            );
+            report(
+                "ticket-render",
+                "graphic",
+                &|| {
+                    let layout = ticket_render::decode_cfg(&cfg).unwrap();
+                    ticket_render::render_graphic(&layout, &values, dpi, &bg).unwrap()
+                },
+                &|| prepared_layout.graphic(&values, dpi).unwrap(),
+            );
+            report(
+                "yaml page",
+                "PDF",
+                &|| {
+                    let page = load_page(&category.join("page.yaml")).unwrap();
+                    render_visitor(&page, &values, &photos, &category).unwrap()
+                },
+                &|| prepared_page.pdf(&values, &photos).unwrap(),
+            );
+            report(
+                "yaml page",
+                "PNG",
+                &|| {
+                    let page = load_page(&category.join("page.yaml")).unwrap();
+                    let page = prepare_visitor(&page, &values, &photos, &category).unwrap();
+                    render_raster(&page, dpi as f64, &category).unwrap().png
+                },
+                &|| {
+                    prepared_page
+                        .png_bytes(&values, &photos, dpi as f64)
+                        .unwrap()
+                },
+            );
+            report(
+                "yaml page",
+                "BMP",
+                &|| {
+                    let page = load_page(&category.join("page.yaml")).unwrap();
+                    let page = prepare_visitor(&page, &values, &photos, &category).unwrap();
+                    render_raster(&page, dpi as f64, &category).unwrap().bmp
+                },
+                &|| {
+                    prepared_page
+                        .bmp_bytes(&values, &photos, dpi as f64)
+                        .unwrap()
+                },
+            );
+            report(
+                "yaml page",
+                "ZPL",
+                &|| page_zpl(&category, &values, &photos, dpi as f64, 4.1, &settings).unwrap(),
+                &|| {
+                    let (payload, width) =
+                        prepared_page.graphic(&values, &photos, dpi as f64).unwrap();
+                    wrap_zpl(
+                        &payload,
+                        width,
+                        (4.1 * dpi as f64).round() as i64,
+                        &settings,
+                    )
+                },
+            );
         }
 
-        fn report(renderer: &str, output: &str, full: &dyn Fn() -> Vec<u8>, prebuilt: &dyn Fn() -> Vec<u8>) {
+        fn report(
+            renderer: &str,
+            output: &str,
+            full: &dyn Fn() -> Vec<u8>,
+            prebuilt: &dyn Fn() -> Vec<u8>,
+        ) {
             let full_ms = samples(full);
             let pre_ms = samples(prebuilt);
             let full_again = samples(full);

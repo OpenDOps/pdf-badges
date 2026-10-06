@@ -15,10 +15,12 @@ The remote API stays. The Scala session scraper, the properties-file side effect
 | [5. Switch](#step-5--switch-load-or-init) | Open, init, or load the selected event | done |
 | [6. Tokens](#step-6--working-with-tokens) | Send the stored token and drop a dead binding | done |
 | [7. Sync](#step-7--sync) | The download and upload queue | done |
-| [8. Printing](#step-8--printing) | Draw a badge and submit it to CUPS | not started |
+| [8. Printing](#step-8--printing) | Draw a badge and submit it to CUPS | in progress |
 | [9. Local HTTP API](#step-9--local-http-api) | The `/api` routes the floor and the desk call | in progress |
 | [10. Registration UI](#step-10--registration-ui) | The form, then the operator screens around it | in progress |
 | [11. Release and update](#step-11--release-and-update) | GitHub release packages, then a checked swap with rollback | not started |
+
+Step 8's layout, both renderers, and the in-memory badge are done. Queues, routing, and the print worker are not started.
 
 Step 10's form plan is done. Its operator-screen plan is done through the form path (step 5). Visitors, print, import, settings, and printers are not started.
 
@@ -211,7 +213,7 @@ Uploads follow the Scala order. A batch that the server accepts is marked synced
 
 ## Step 8 — Printing
 
-Status: not started.
+Status: in progress. The layout, both renderers, and preparing them when the event opens are done. Queues through the worker are not started.
 
 The design is [printing.md](printing.md). The build sequence is [printing-implementation-plan.md](printing-implementation-plan.md).
 
@@ -255,13 +257,15 @@ The form reads one document, `GET /forms/form.json`. Vite builds that response f
 
 Status: not started.
 
+The build sequence is [release-implementation-plan.md](release-implementation-plan.md). It does not wait on a printer. `print_busy` is a job already on the print channel.
+
 A tag `vX.Y.Z` builds three packages and publishes them on one GitHub release. The running install looks for a newer release. It asks the operator, and it restarts only after the file's SHA-256 matches the release. A start that never opens the listen socket is rolled back to the previous tree. After a start that does open it, that previous tree is a dated backup, and a backup older than seven days is removed.
 
 The event directory and the credential file stay outside the versioned tree. A swap and a rollback leave both where they are.
 
 ### Publish
 
-`.github/workflows/release.yml` runs on a tag `vX.Y.Z` whose numbers are the `Cargo.toml` version. Each runner builds the release binary and the static apps `registration-admin/` and `registration-form/`. One job then uploads the three assets and `SHA256SUMS`.
+`.github/workflows/release.yml` runs on a tag `release-X.Y.Z`, or from a manual run that types `X.Y.Z` and checks Linux, macOS, and Windows. The workflow writes `X.Y.Z` into `Cargo.toml` and pushes that commit when the version changed. The checked runners build that commit in parallel. Each builds the release binary and the static apps `registration-admin/` and `registration-form/`, and bakes `vX.Y.Z` into that binary. One later job creates or updates the GitHub release `release-X.Y.Z` and uploads the built assets and `SHA256SUMS`. A version with `-alpha`, `-beta`, or `-rc` is marked pre-release. A version without that suffix is not. A manual run that leaves a system unchecked does not rebuild that asset, and the previous file of that name stays on the release.
 
 | Runner | Asset | How it is packed |
 |---|---|---|
@@ -282,6 +286,7 @@ Which tree is live is one file, `updates/live`, holding a version. The superviso
     rust-reg                            rust-reg.exe on Windows
     admin/                              registration-admin dist
     form/                               registration-form dist
+    RELEASE                             one line, the tag compiled into rust-reg
   backup/<version>-<YYYYMMDD>/          moved here after a start that opened the socket
   updates/
     live                                one line, the version to exec
@@ -293,9 +298,9 @@ Which tree is live is one file, `updates/live`, holding a version. The superviso
 
 ### Look, then ask
 
-The sync thread checks once the listen socket is open, and again every six hours. The request is `GET https://api.github.com/repos/<owner>/<repo>/releases/latest`. The project token is not sent. A draft or a prerelease is skipped. `tag_name` is kept when it is `v` plus a semver greater than `CARGO_PKG_VERSION`. `REGISTRATION_UPDATE_REPO` overrides the compiled `owner/repo`.
+A newer release is read from GitHub, `GET https://api.github.com/repos/<owner>/<repo>/releases/latest`. The remote registration server has no update path, and this check does not call it. The sync thread only schedules that request, once the listen socket is open and again every six hours. It is not a sync download. The project token is not sent. A draft or a prerelease is skipped. `tag_name` is kept when it is `v` plus a version greater than the release tag compiled into the binary. A version is `MAJOR.MINOR.PATCH`, or those numbers plus `-alpha.N`, `-beta.N`, or `-rc.N`. `REGISTRATION_UPDATE_REPO` overrides the compiled `owner/repo`.
 
-`GET /api/update` requires the desk cookie. The data is the running version and, when the check found one, the newer version. The desk menu shows "Обновить" with that version. Confirming posts `POST /api/update`. Until that post, nothing is downloaded and the process does not exit. `/register` does not show the control. The menu test `menu_omits_update_and_moderation` gains the control for a waiting update in the same change; the moderation checkbox stays absent.
+`GET /api/update` requires the desk cookie. The data is the running version and, when the check found one, the newer version. It does not call GitHub. `POST /api/update/check` requires the same cookie and runs that GitHub lookup immediately, then returns the same data. A failure leaves the previous offer and returns `update_check_failed`. The desk menu shows "Обновить" with that version. Confirming posts `POST /api/update`. Until that post, nothing is downloaded and the process does not exit. `/register` does not show the control. The menu test `menu_omits_update_and_moderation` gains the control for a waiting update in the same change; the moderation checkbox stays absent. The menu does not post `POST /api/update/check`.
 
 The Scala paths `GET /updatecheck`, `GET /version`, `GET /update`, and `GET /need_update` stay unserved.
 

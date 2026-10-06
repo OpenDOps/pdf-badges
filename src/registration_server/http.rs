@@ -61,6 +61,8 @@ pub fn router(app: App) -> Router {
         )
         .route("/api/printers/{name}", patch(printer_patch))
         .route("/api/sync", get(sync_status).post(sync_wake_request))
+        .route("/api/update", get(update_status).post(update_install))
+        .route("/api/update/check", post(update_check))
         .route("/registrations/{id}", get(lookup))
         .route("/print", post(enqueue_print))
         .route("/ws", get(ws))
@@ -102,9 +104,15 @@ pub async fn serve(
 async fn track_inflight(State(gate): State<Arc<Gate>>, request: Request, next: Next) -> Response {
     let method = request.method().clone();
     let path = request.uri().path().to_string();
-    let _guard = gate.enter_request();
+    // `POST /api/update` holds its own guard so it can drop that guard while the download waits.
+    let guard = if method == axum::http::Method::POST && path == "/api/update" {
+        None
+    } else {
+        Some(gate.enter_request())
+    };
     let response = next.run(request).await;
     log::debug!("{method} {path} {}", response.status());
+    drop(guard);
     response
 }
 
@@ -1166,6 +1174,62 @@ async fn printer_patch(
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "unknown_error");
     }
     api_ok(serde_json::json!({}))
+}
+
+pub(crate) fn require_desk(app: &App, headers: &HeaderMap) -> Result<(), Response> {
+    let Some(key) = desk_cookie(headers) else {
+        return Err(api_error(StatusCode::UNAUTHORIZED, "unauthorized"));
+    };
+    match key_is_admin(app, &key) {
+        Some(_) => Ok(()),
+        None => Err(api_error(StatusCode::UNAUTHORIZED, "unauthorized")),
+    }
+}
+
+async fn update_status(State(app): State<App>, headers: HeaderMap) -> Response {
+    if let Err(response) = require_desk(&app, &headers) {
+        return response;
+    }
+    api_ok(crate::registration_server::update::update_document(&app))
+}
+
+async fn update_install(State(app): State<App>, request: Request) -> Response {
+    let held = app.gate.enter_request();
+    if let Err(response) = require_desk(&app, request.headers()) {
+        return response;
+    }
+    if crate::registration_server::update::print_busy(&app) {
+        return api_error(StatusCode::CONFLICT, "print_busy");
+    }
+    let outcome = crate::registration_server::update::install(&app, Some(held)).await;
+    let _held = outcome.held;
+    match outcome.result {
+        Ok(version) => {
+            crate::registration_server::update::request_exit(&app);
+            api_ok(serde_json::json!({ "version": version }))
+        }
+        Err(crate::registration_server::update::StageFailure::Checksum) => {
+            api_error(StatusCode::CONFLICT, "checksum_mismatch")
+        }
+        Err(crate::registration_server::update::StageFailure::Failed) => {
+            api_error(StatusCode::CONFLICT, "download_failed")
+        }
+    }
+}
+
+async fn update_check(State(app): State<App>, headers: HeaderMap) -> Response {
+    if let Err(response) = require_desk(&app, &headers) {
+        return response;
+    }
+    match crate::registration_server::update::check_now(&app).await {
+        Ok(data) => api_ok(data),
+        Err(crate::registration_server::update::CheckError::Failed) => {
+            api_error(StatusCode::BAD_GATEWAY, "update_check_failed")
+        }
+        Err(crate::registration_server::update::CheckError::InProgress) => {
+            api_error(StatusCode::TOO_MANY_REQUESTS, "check_in_progress")
+        }
+    }
 }
 
 fn require_admin(app: &App, headers: &HeaderMap) -> Result<(), Response> {

@@ -15,12 +15,14 @@ mod gate;
 mod grpc;
 mod http;
 mod net;
+mod pack_overlay;
 mod print;
 mod print_queue;
 mod remote;
 mod remote_server;
 mod store;
 mod sync;
+mod update;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -42,6 +44,7 @@ pub use event_db::{
 };
 pub use gate::Gate;
 pub use net::{Link, Quality, Snapshot};
+pub use pack_overlay::take_pack_command;
 pub use print_queue::{PrintJob, PrintQueue};
 pub use remote::{
     remote_base_from_env, remote_base_url, Event, OperatorSession, Remote, RemoteError,
@@ -49,6 +52,12 @@ pub use remote::{
 };
 pub use store::{Registration, Store};
 pub use sync::{sync_loop, sync_once, SYNC_IN_FLIGHT};
+pub use update::{release_file_contents, release_tag, release_version};
+
+/// Parent process. Reads `state.yml` and starts the version in `updates/live`.
+pub fn run_supervisor(prefix: &std::path::Path) -> std::io::Result<()> {
+    update::run_supervisor(prefix)
+}
 
 #[derive(Clone)]
 pub struct App {
@@ -67,6 +76,12 @@ pub struct App {
     sync_notify: Arc<Notify>,
     /// Finished wakes, including one that stopped before a socket.
     sync_passes: Arc<AtomicU64>,
+    /// GitHub release offer. The sync thread refreshes it. It is not a sync download.
+    pub(crate) updates: Arc<update::ReleaseCheck>,
+    /// Install root. Tests pass a temp directory. Production is the OS prefix.
+    pub(crate) prefix: PathBuf,
+    /// Set when `POST /api/update` has staged a tree. The test reads this. The process exits after the response.
+    pub(crate) exit_requested: Arc<AtomicBool>,
 }
 
 impl App {
@@ -109,6 +124,9 @@ impl App {
                 sync_running: Arc::new(AtomicBool::new(false)),
                 sync_notify: Arc::new(Notify::new()),
                 sync_passes: Arc::new(AtomicU64::new(0)),
+                updates: Arc::new(update::ReleaseCheck::new()),
+                prefix: update::default_prefix(),
+                exit_requested: Arc::new(AtomicBool::new(false)),
             },
             worker,
         )
@@ -236,6 +254,7 @@ pub fn run(config: Config) -> Result<(), Box<dyn std::error::Error + Send + Sync
     let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<Result<(), String>>(1);
 
     let http_listen = config.http_listen;
+    let credentials_path = config.credentials_path.clone();
     let server_app = app.clone();
     let server_shutdown = shutdown_rx.clone();
     let server = std::thread::Builder::new()
@@ -246,7 +265,8 @@ pub fn run(config: Config) -> Result<(), Box<dyn std::error::Error + Send + Sync
                 .max_blocking_threads(1)
                 .build()?;
             rt.block_on(async move {
-                let http = match TcpListener::bind(http_listen).await {
+                let prefix = update::install_prefix(&credentials_path);
+                let http = match update::open_listen(http_listen, prefix.as_deref()).await {
                     Ok(listener) => listener,
                     Err(err) => {
                         let _ = ready_tx.send(Err(err.to_string()));
@@ -299,6 +319,7 @@ pub fn run(config: Config) -> Result<(), Box<dyn std::error::Error + Send + Sync
                 .enable_all()
                 .build()?;
             let link = Arc::clone(&app.link);
+            let updates = app.clone();
             rt.block_on(async move {
                 tokio::join!(
                     sync_loop(
@@ -309,7 +330,8 @@ pub fn run(config: Config) -> Result<(), Box<dyn std::error::Error + Send + Sync
                         remote_server,
                         shutdown_rx.clone(),
                     ),
-                    link.probe(remote_base, debug_ping, shutdown_rx),
+                    link.probe(remote_base, debug_ping, shutdown_rx.clone()),
+                    update::update_loop(updates, shutdown_rx),
                 );
             });
             Ok(())

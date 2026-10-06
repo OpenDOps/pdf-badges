@@ -1,7 +1,8 @@
 import type { MouseEvent, PointerEvent, ReactNode } from "react";
 import { useTranslation } from "react-i18next";
-import { useMatches } from "react-router";
+import { useLoaderData, useMatches } from "react-router";
 
+import { FormClient } from "../form/client";
 import { ScreenFrame, ScreenLink } from "../shell/header";
 
 function fieldOf(matches: { data: unknown }[], name: string): unknown {
@@ -65,13 +66,23 @@ function MenuTile({ to, disabled, children }: { to: string; disabled?: boolean; 
   );
 }
 
+export async function loader({ request }: { request: Request }) {
+  try {
+    return await FormClient.fromRequest(request).update();
+  } catch {
+    return { version: null, newer: null };
+  }
+}
+
 export default function Menu() {
   const { t } = useTranslation();
+  const { newer } = useLoaderData<typeof loader>();
   const matches = useMatches();
   const waiting = numberOf(matches, "waiting");
   const admin = flagOf(matches, "admin");
   const addresses = addressesOf(matches);
   const origin = fieldOf(matches, "origin");
+  const offer = typeof newer === "string" && newer !== "" ? newer : null;
   return (
     <ScreenFrame
       screen="menu"
@@ -90,6 +101,20 @@ export default function Menu() {
         </div>
       </div>
       <div>
+        {offer ? (
+          <p>
+            <button
+              type="button"
+              className="rounded-lg border border-slate-300 bg-white px-6 py-3 text-xl font-semibold text-gray-900"
+              onClick={() => {
+                void new FormClient().confirmUpdate().catch(() => undefined);
+              }}
+            >
+              {t("menu.update")}
+            </button>{" "}
+            <span>{offer}</span>
+          </p>
+        ) : null}
         <p>
           {t("menu.waiting")} <span data-count="waiting">{waiting}</span>
         </p>

@@ -159,9 +159,7 @@ fn paint_areas(
 ) -> Result<(), PageError> {
     for area in replace_areas(&layout.areas, values) {
         match &area.kind {
-            AreaKind::Text { .. } => {
-                draw_text(image, &area, dpi, layout.dots_per_point, faces)?
-            }
+            AreaKind::Text { .. } => draw_text(image, &area, dpi, layout.dots_per_point, faces)?,
             AreaKind::Barcode { barcode_type } => {
                 draw_barcode(image, &area, barcode_type)?;
             }

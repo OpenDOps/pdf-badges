@@ -200,6 +200,20 @@ export class FormClient {
     return this.getJson("/api/sync");
   }
 
+  async update(): Promise<{ version: string | null; newer: string | null }> {
+    const data = await this.getJson<unknown>("/api/update");
+    if (!data || typeof data !== "object" || Array.isArray(data)) return { version: null, newer: null };
+    const record = data as { version?: unknown; newer?: unknown };
+    return {
+      version: typeof record.version === "string" ? record.version : null,
+      newer: typeof record.newer === "string" && record.newer !== "" ? record.newer : null,
+    };
+  }
+
+  confirmUpdate(): Promise<unknown> {
+    return this.send("/api/update", "{}", { "Content-Type": "application/json" });
+  }
+
   network(): Promise<{
     samples: number;
     offline: boolean;

@@ -70,6 +70,7 @@ Today the Rust code still lives at the repository root (`src/`, `tests/`, the ro
 | [registration-server/network-quality.md](registration-server/network-quality.md) | Remote probe every five seconds: green, yellow, and red corner signal, and the timeouts that follow |
 | [registration-server/login-and-token.md](registration-server/login-and-token.md) | Remote login, the project token, and the calls that send it |
 | [registration-server/porting.md](registration-server/porting.md) | Log in once, store the token, switch to the selected event, sync, print, serve the local HTTP API, the registration UI, then the GitHub release and the checked update |
+| [registration-server/release-implementation-plan.md](registration-server/release-implementation-plan.md) | Build sequence for that release: compare a tag, ask the desk, check the file, swap, and roll back |
 | [registration-server/db-design.md](registration-server/db-design.md) | Event SQLite file plus the in-memory full-text index and list pages, so search stays off the flash |
 | [registration-server/db-implementation-plan.md](registration-server/db-implementation-plan.md) | Build sequence for that database: init, search, write, the list page, the JSON row |
 | [registration-server/switch-implementation-plan.md](registration-server/switch-implementation-plan.md) | Build sequence for opening the selected event: init, background copy, switch, select, clear |

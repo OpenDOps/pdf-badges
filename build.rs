@@ -1,4 +1,8 @@
+#[path = "src/registration_server/release_tag.rs"]
+mod release_tag;
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    compile_release_tag();
     compile_sync_in_flight();
     // rust-analyzer is launched with a short PATH, so a Homebrew protoc is invisible.
     ensure_protoc();
@@ -17,6 +21,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &["proto"],
         )?;
     Ok(())
+}
+
+/// `REGISTRATION_RELEASE_TAG=v0.1.0 cargo build` bakes that tag. Unset bakes `v` plus the Cargo version.
+fn compile_release_tag() {
+    println!("cargo:rerun-if-env-changed=REGISTRATION_RELEASE_TAG");
+    let cargo_version = std::env::var("CARGO_PKG_VERSION").expect("CARGO_PKG_VERSION");
+    let raw = std::env::var("REGISTRATION_RELEASE_TAG").ok();
+    let tag = release_tag::bake_release_tag(raw.as_deref(), &cargo_version)
+        .unwrap_or_else(|err| panic!("{err}"));
+    println!("cargo:rustc-env=REGISTRATION_RELEASE_TAG={tag}");
 }
 
 /// `SYNC_IN_FLIGHT=2 cargo build` bakes that count into the binary. Unset stays 100.
