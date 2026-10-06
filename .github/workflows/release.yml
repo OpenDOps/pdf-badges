@@ -139,6 +139,9 @@ jobs:
         with:
           ref: ${{ needs.select.outputs.sha }}
       - uses: dtolnay/rust-toolchain@stable
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ github.token }}
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
