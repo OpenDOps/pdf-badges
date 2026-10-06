@@ -54,7 +54,7 @@ Submit posts `POST /api/desk/auth`. A wrong key stays on this screen and the fie
 
 The page also shows how many local rows are still waiting to sync (`GET /api/sync`) and the registration QR (`GET /api/qr`). The original page printed local addresses from the mustache context. This screen does not add a route for them.
 
-"Обновить" on the original menu is the binary self-update. That stays out, with the HTTP plan.
+"Обновить" on the original menu is the binary update. [porting.md](porting.md) step 11 shows it when a newer release is waiting.
 
 ## Category and printer
 
@@ -163,4 +163,4 @@ Under the switches, one row per category from `GET /api/barcodes`: the category 
 | `10.html` | A checkbox widget demo, not a desk page. |
 | `test_form.mustache` | Duplicate search, merge, and a memory backup. Left out of the HTTP port. |
 | `uploadbarcodes.html`, `uploadvisitcodes.html` | A hand upload of barcode files. Sync already downloads them. |
-| Self-update on the operator menu | The device image owns that. |
+| Self-update on the operator menu | [porting.md](porting.md) step 11, when a newer release is waiting. |

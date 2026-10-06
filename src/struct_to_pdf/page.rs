@@ -77,6 +77,8 @@ pub struct Page {
 pub enum ContentEntry {
     Text(TextBox),
     Image(ImagePlacement),
+    Barcode(Barcode),
+    Photo(Photo),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -122,6 +124,7 @@ pub struct TextBody {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TextBox {
     pub id: String,
+    pub if_st: String,
     pub pos_x: f64,
     pub pos_y: f64,
     pub width: f64,
@@ -141,11 +144,40 @@ pub struct TextBox {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ImagePlacement {
     pub id: String,
+    pub if_st: String,
     pub pos_x: f64,
     pub pos_y: f64,
     pub width: f64,
     pub height: f64,
     pub resource_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Barcode {
+    pub id: String,
+    pub if_st: String,
+    pub pos_x: f64,
+    pub pos_y: f64,
+    pub width: f64,
+    pub height: f64,
+    pub barcode_type: String,
+    pub template: bool,
+    pub delimiter_open: String,
+    pub delimiter_close: String,
+    pub preentered: Option<String>,
+    pub content: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Photo {
+    pub id: String,
+    pub if_st: String,
+    pub pos_x: f64,
+    pub pos_y: f64,
+    pub width: f64,
+    pub height: f64,
+    pub field: String,
+    pub bytes: Option<Vec<u8>>,
 }
 
 pub fn load_page(path: &Path) -> Result<Page, RenderError> {
@@ -390,24 +422,22 @@ fn parse_content(index: usize, value: &Value) -> Result<ContentEntry, RenderErro
         context: format!("contents[{index}]"),
         message: "content entry must be an object".to_string(),
     })?;
-    let has_text = obj.get("text").map(|v| !v.is_null()).unwrap_or(false);
-    let has_image = obj.get("image").map(|v| !v.is_null()).unwrap_or(false);
     let id = optional_string(obj, "id").unwrap_or_default();
-
-    if has_text && has_image {
+    let present = ["text", "image", "barcode", "photo"]
+        .into_iter()
+        .filter(|key| obj.get(*key).is_some_and(|value| !value.is_null()))
+        .count();
+    if present > 1 {
         return Err(RenderError {
             context: id_context(index, &id),
-            message: "content entry has both text and image".to_string(),
+            message: "content entry has more than one of text, image, barcode, and photo"
+                .to_string(),
         });
     }
-    if !has_text && !has_image {
+    if present == 0 {
         return Err(RenderError {
-            context: if id.is_empty() {
-                format!("contents[{index}]")
-            } else {
-                id
-            },
-            message: "content entry has neither text nor image".to_string(),
+            context: id_context(index, &id),
+            message: "content entry has neither text, image, barcode, nor photo".to_string(),
         });
     }
     if id.is_empty() {
@@ -421,13 +451,15 @@ fn parse_content(index: usize, value: &Value) -> Result<ContentEntry, RenderErro
     let pos_y = required_finite(obj, "posY", &format!("id={id} posY"), true)?;
     let width = required_finite(obj, "width", &format!("id={id}"), false)?;
     let height = required_finite(obj, "height", &format!("id={id}"), false)?;
+    let if_st = parse_if_st(obj, &id)?;
 
-    if has_text {
+    if obj.get("text").is_some_and(|value| !value.is_null()) {
         let text_obj = object(obj.get("text"), &format!("id={id} text"))?;
         let template = parse_template(obj, &id)?;
         let (delimiter_open, delimiter_close) = parse_delimiters(obj, &id, template)?;
         Ok(ContentEntry::Text(TextBox {
             id: id.clone(),
+            if_st,
             pos_x,
             pos_y,
             width,
@@ -442,19 +474,43 @@ fn parse_content(index: usize, value: &Value) -> Result<ContentEntry, RenderErro
             rotation: parse_rotation(obj, &id)?,
             text: parse_text(text_obj, &text_obj_id_from(obj))?,
         }))
+    } else if obj.get("barcode").is_some_and(|value| !value.is_null()) {
+        let barcode = object(obj.get("barcode"), &format!("id={id} barcode"))?;
+        let template = parse_template(obj, &id)?;
+        let (delimiter_open, delimiter_close) = parse_delimiters(obj, &id, template)?;
+        Ok(ContentEntry::Barcode(Barcode {
+            id: id.clone(),
+            if_st,
+            pos_x,
+            pos_y,
+            width,
+            height,
+            barcode_type: parse_barcode_type(barcode, &id)?,
+            template,
+            delimiter_open,
+            delimiter_close,
+            preentered: optional_string(barcode, "preentered"),
+            content: optional_content(barcode),
+        }))
+    } else if obj.get("photo").is_some_and(|value| !value.is_null()) {
+        reject_template_keys(obj, &id)?;
+        let photo = object(obj.get("photo"), &format!("id={id} photo"))?;
+        let field = optional_string(photo, "field").ok_or_else(|| RenderError {
+            context: id.clone(),
+            message: "field is missing".to_string(),
+        })?;
+        Ok(ContentEntry::Photo(Photo {
+            id,
+            if_st,
+            pos_x,
+            pos_y,
+            width,
+            height,
+            field,
+            bytes: None,
+        }))
     } else {
-        if obj.contains_key("template") {
-            return Err(RenderError {
-                context: id,
-                message: "template is only valid on a text box".to_string(),
-            });
-        }
-        if obj.contains_key("delimiters") {
-            return Err(RenderError {
-                context: id,
-                message: "delimiters is only valid on a text box".to_string(),
-            });
-        }
+        reject_template_keys(obj, &id)?;
         let image_obj = object(obj.get("image"), &format!("id={id} image"))?;
         let resource_name =
             optional_string(image_obj, "resource_name").ok_or_else(|| RenderError {
@@ -463,12 +519,63 @@ fn parse_content(index: usize, value: &Value) -> Result<ContentEntry, RenderErro
             })?;
         Ok(ContentEntry::Image(ImagePlacement {
             id,
+            if_st,
             pos_x,
             pos_y,
             width,
             height,
             resource_name,
         }))
+    }
+}
+
+fn parse_if_st(obj: &Map<String, Value>, id: &str) -> Result<String, RenderError> {
+    match obj.get("ifSt") {
+        None | Some(Value::Null) => Ok(String::new()),
+        Some(Value::String(text)) => Ok(text.clone()),
+        Some(_) => Err(RenderError {
+            context: id.to_string(),
+            message: "ifSt must be a string".to_string(),
+        }),
+    }
+}
+
+fn parse_barcode_type(obj: &Map<String, Value>, id: &str) -> Result<String, RenderError> {
+    let Some(kind) = optional_string(obj, "type") else {
+        return Err(RenderError {
+            context: id.to_string(),
+            message: "barcode type is missing".to_string(),
+        });
+    };
+    match kind.as_str() {
+        "ean13" | "code128" | "qr" => Ok(kind),
+        _ => Err(RenderError {
+            context: id.to_string(),
+            message: format!("unknown barcode type {kind}"),
+        }),
+    }
+}
+
+fn reject_template_keys(obj: &Map<String, Value>, id: &str) -> Result<(), RenderError> {
+    if obj.contains_key("delimiters") {
+        return Err(RenderError {
+            context: id.to_string(),
+            message: "delimiters are only valid on a text box or a barcode".to_string(),
+        });
+    }
+    if obj.contains_key("template") {
+        return Err(RenderError {
+            context: id.to_string(),
+            message: "template is only valid on a text box or a barcode".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn optional_content(obj: &Map<String, Value>) -> Option<String> {
+    match obj.get("content") {
+        Some(Value::String(text)) => Some(text.clone()),
+        _ => None,
     }
 }
 
@@ -529,7 +636,9 @@ fn delimiter_side(map: &Map<String, Value>, side: &str, id: &str) -> Result<Stri
 fn parse_rotation(obj: &Map<String, Value>, id: &str) -> Result<i32, RenderError> {
     match obj.get("rotation") {
         None => Ok(0),
-        Some(Value::Number(number)) if number.as_i64() == Some(0) || number.as_i64() == Some(90) => {
+        Some(Value::Number(number))
+            if number.as_i64() == Some(0) || number.as_i64() == Some(90) =>
+        {
             Ok(number.as_i64().unwrap_or(0) as i32)
         }
         Some(_) => Err(RenderError {

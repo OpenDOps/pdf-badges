@@ -56,7 +56,7 @@ contents:
 fn text_box(page: &rust_reg::struct_to_pdf::Page) -> &rust_reg::struct_to_pdf::TextBox {
     match &page.contents[0] {
         ContentEntry::Text(text) => text,
-        ContentEntry::Image(_) => panic!("expected a text box"),
+        _ => panic!("expected a text box"),
     }
 }
 
@@ -387,7 +387,7 @@ fn card_fields() {
     let mut page = load_page(&path).expect("card yaml");
     match &mut page.contents[0] {
         ContentEntry::Text(text) => text.template = true,
-        ContentEntry::Image(_) => panic!("expected a text box"),
+        _ => panic!("expected a text box"),
     }
     let index = index_template(&page).unwrap();
     assert_eq!(field_names(&index), ["name", "surname", "company name"]);

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::struct_to_pdf::{ContentEntry, Page, RenderError, TextBox};
+use crate::struct_to_pdf::{Barcode, ContentEntry, Page, RenderError, TextBox};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Hole {
@@ -84,29 +84,46 @@ pub fn index_template(page: &Page) -> Result<TemplateIndex, RenderError> {
     let mut boxes = Vec::new();
     let mut fields = Vec::new();
     for entry in &page.contents {
-        let ContentEntry::Text(text) = entry else {
-            continue;
+        let (id, open, close, source) = match entry {
+            ContentEntry::Text(text) if text.template => (
+                text.id.as_str(),
+                text.delimiter_open.as_str(),
+                text.delimiter_close.as_str(),
+                template_source(text)?,
+            ),
+            ContentEntry::Barcode(code) if code.template => (
+                code.id.as_str(),
+                code.delimiter_open.as_str(),
+                code.delimiter_close.as_str(),
+                barcode_source(code)?,
+            ),
+            _ => continue,
         };
-        if !text.template {
-            continue;
-        }
-        let source = template_source(text)?;
-        let holes = scan(
-            &source,
-            &text.delimiter_open,
-            &text.delimiter_close,
-            &text.id,
-        )?;
+        let holes = scan(&source, open, close, id)?;
         for hole in &holes {
-            record_field(&mut fields, &hole.name, &text.id);
+            record_field(&mut fields, &hole.name, id);
         }
         boxes.push(IndexedBox {
-            box_id: text.id.clone(),
+            box_id: id.to_string(),
             source,
             holes,
         });
     }
     Ok(TemplateIndex { boxes, fields })
+}
+
+pub fn fill_raw(indexed: &IndexedBox, values: &HashMap<String, String>) -> String {
+    let mut out = String::new();
+    let mut cursor = 0;
+    for hole in &indexed.holes {
+        out.push_str(&indexed.source[cursor..hole.from]);
+        if let Some(value) = values.get(&hole.name) {
+            out.push_str(value);
+        }
+        cursor = hole.to;
+    }
+    out.push_str(&indexed.source[cursor..]);
+    out
 }
 
 pub fn fill(indexed: &IndexedBox, values: &HashMap<String, String>) -> String {
@@ -151,6 +168,19 @@ fn push_escaped(out: &mut String, value: &str) {
             _ => out.push(ch),
         }
     }
+}
+
+fn barcode_source(code: &Barcode) -> Result<String, RenderError> {
+    if let Some(content) = &code.content {
+        return Ok(content.clone());
+    }
+    if let Some(preentered) = &code.preentered {
+        return Ok(preentered.clone());
+    }
+    Err(RenderError {
+        context: code.id.clone(),
+        message: "preentered and content are both missing".to_string(),
+    })
 }
 
 fn template_source(text: &TextBox) -> Result<String, RenderError> {

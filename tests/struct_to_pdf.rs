@@ -81,7 +81,7 @@ fn loads_card_yaml() {
             assert_eq!(text.horizontal, HorizontalAlign::Center);
             assert_eq!(text.vertical, VerticalAlign::Middle);
         }
-        ContentEntry::Image(_) => panic!("card entry is a text box"),
+        _ => panic!("card entry is a text box"),
     }
 }
 
@@ -817,7 +817,7 @@ fn document_point(page: &rust_reg::struct_to_pdf::Page, pdf_x: f32, pdf_y: f32) 
 fn text_box(page: &rust_reg::struct_to_pdf::Page) -> &rust_reg::struct_to_pdf::TextBox {
     match &page.contents[0] {
         ContentEntry::Text(text) => text,
-        ContentEntry::Image(_) => panic!("expected a text box"),
+        _ => panic!("expected a text box"),
     }
 }
 

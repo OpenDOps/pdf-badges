@@ -120,7 +120,7 @@ These require the operator cookie. The old `protect(AdminKey)` routes also requi
 
 | Old route | Why it stays out |
 |---|---|
-| `GET /updatecheck`, `GET /version`, `GET /update`, `GET /need_update` | Self-update of the binary. The device image owns that. |
+| `GET /updatecheck`, `GET /version`, `GET /update`, `GET /need_update` | [porting.md](porting.md) step 11. These four paths stay unserved. The desk uses `GET /api/update` and `POST /api/update`. |
 | `GET /was_scanned` | Holds the request until the desktop keyboard wedge fires. Phones post `POST /api/scans`. |
 | `GET /cameraCap`, `POST /uploadphototest` | The local camera test page. A photo the floor already took is `POST /api/registrations/{id}/photo`. |
 | `GET /uploadbarcodes`, `POST /uploadbarcodes`, `GET /uploadvisitcodes`, `POST /uploadvisitcodes` | A hand upload of barcode files. Sync already downloads `boxapi/barcodes`. |

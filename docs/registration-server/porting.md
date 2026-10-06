@@ -1,6 +1,6 @@
 # Porting login, the event file, sync, printing, the local HTTP API, and the registration UI
 
-The device logs in once, stores the project token, opens the database for the selected event, keeps that event in sync, prints badges on the server thread, and answers the local HTTP API the floor and the operator use. The registration screens are a separate React Router app. The wire contract is [login-and-token.md](login-and-token.md). Local HTTP stays ahead of remote work as in [design.md](design.md). Inside the sync thread a download is taken before an upload. Drawing and CUPS are [printing.md](printing.md). The local routes are [http-implementation-plan.md](http-implementation-plan.md). The form is [form-design.md](form-design.md).
+The device logs in once, stores the project token, opens the database for the selected event, keeps that event in sync, prints badges on the server thread, and answers the local HTTP API the floor and the operator use. The registration screens are a separate React Router app. A version tag publishes the Linux, macOS, and Windows packages, and the install asks before it switches to a newer build. The wire contract is [login-and-token.md](login-and-token.md). Local HTTP stays ahead of remote work as in [design.md](design.md). Inside the sync thread a download is taken before an upload. Drawing and CUPS are [printing.md](printing.md). The local routes are [http-implementation-plan.md](http-implementation-plan.md). The form is [form-design.md](form-design.md).
 
 The remote API stays. The Scala session scraper, the properties-file side effects, and the sync loop tangled into "save the token" do not.
 
@@ -18,6 +18,7 @@ The remote API stays. The Scala session scraper, the properties-file side effect
 | [8. Printing](#step-8--printing) | Draw a badge and submit it to CUPS | not started |
 | [9. Local HTTP API](#step-9--local-http-api) | The `/api` routes the floor and the desk call | in progress |
 | [10. Registration UI](#step-10--registration-ui) | The form, then the operator screens around it | in progress |
+| [11. Release and update](#step-11--release-and-update) | GitHub release packages, then a checked swap with rollback | not started |
 
 Step 10's form plan is done. Its operator-screen plan is done through the form path (step 5). Visitors, print, import, settings, and printers are not started.
 
@@ -35,11 +36,11 @@ The stored id is `event_id`. The remote paths stay `boxapi/expos`, `eid`, and `p
 - Printing a badge on the server thread: find a CUPS queue, draw it with the ticket-render crate, send one IPP job. The sync queue does not print.
 - The local HTTP API: registrations, search, scans, forms, printers, and keys. The mustache pages are not served.
 - The registration UI: the kiosk at `/register` and the desk at `/desk`. Both run the form from [form-design.md](form-design.md). That app is its own project and can be built before printing and before the local HTTP API.
+- The three release packages and the updater that installs a newer GitHub release after the operator agrees and the checksum matches.
 
 ## What this plan leaves
 
-- Self-update of the device binary (`/update`, `/updatecheck`, `/need_update`).
-- `tracked/UsersPay`, `user/log/actions`, and `UpdateChecker.check`. The Scala tree does not send them. `getScansData` returns without a request.
+- `tracked/UsersPay` and `user/log/actions`. The Scala tree does not send them. `getScansData` returns without a request. `UpdateChecker.check` is empty in that tree; step 11 talks to GitHub instead.
 
 ## Step 1 — Credential file
 
@@ -249,3 +250,74 @@ The form reads one document, `GET /forms/form.json`. Vite builds that response f
 - `build` walks the config into questions and the first step. `setValue` writes the visitor. Next checks the step, then follows `next`.
 - Country, region, city, and the phones on one address are that address object. The mask comes from the selected country row.
 - `/register` serves the kiosk layout, or the phone layout when `Sec-CH-UA-Mobile` is `?1`. Inside the kiosk layout, `ipad` and `web` follow the viewport. `/form` uses the operator frame and the same step component. Save posts the visitor. Idle reset runs only on `/register`.
+
+## Step 11 — Release and update
+
+Status: not started.
+
+A tag `vX.Y.Z` builds three packages and publishes them on one GitHub release. The running install looks for a newer release. It asks the operator, and it restarts only after the file's SHA-256 matches the release. A start that never opens the listen socket is rolled back to the previous tree. After a start that does open it, that previous tree is a dated backup, and a backup older than seven days is removed.
+
+The event directory and the credential file stay outside the versioned tree. A swap and a rollback leave both where they are.
+
+### Publish
+
+`.github/workflows/release.yml` runs on a tag `vX.Y.Z` whose numbers are the `Cargo.toml` version. Each runner builds the release binary and the static apps `registration-admin/` and `registration-form/`. One job then uploads the three assets and `SHA256SUMS`.
+
+| Runner | Asset | How it is packed |
+|---|---|---|
+| `ubuntu-latest` | `rust-reg_<version>_amd64.deb` | `dpkg-deb` |
+| `macos-latest` | `rust-reg-<version>.pkg` | `pkgbuild` |
+| `windows-latest` | `rust-reg-<version>.exe` | the installer that writes the same tree |
+
+`SHA256SUMS` is one line per asset: the hex digest, two spaces, the file name.
+
+The first install uses the package. A later update extracts the new tree from that same asset and does not run maintainer scripts, `installer`, or the exe's start-the-service path. The Linux unit, the launchd plist, and the Windows service stay the ones the first install registered. Each of them starts the supervisor `bin/rust-reg-run`. That supervisor is the parent of the server and lives outside `versions/`, so a new tree does not replace it.
+
+Which tree is live is one file, `updates/live`, holding a version. The supervisor writes it by renaming a temporary file over it. Version directories are not renamed onto each other. The previous directory stays in place until a start has opened the socket.
+
+```text
+<prefix>/
+  bin/rust-reg-run                      supervisor
+  versions/<version>/
+    rust-reg                            rust-reg.exe on Windows
+    admin/                              registration-admin dist
+    form/                               registration-form dist
+  backup/<version>-<YYYYMMDD>/          moved here after a start that opened the socket
+  updates/
+    live                                one line, the version to exec
+    state.yml                           staged, trying, current, or rolled_back
+    started                             written by the child after it is listening
+```
+
+`<prefix>` is `/opt/rust-reg` on Linux, `/Library/rust-reg` on macOS, and `C:\Program Files\rust-reg` on Windows. `dpkg-deb -x` unpacks the deb into a partial directory that is then renamed to `versions/<version>/`. The pkg payload is expanded the same way, without `installer`. The exe is run with a staging directory and without starting the service, and that directory is renamed to `versions/<version>/` the same way.
+
+### Look, then ask
+
+The sync thread checks once the listen socket is open, and again every six hours. The request is `GET https://api.github.com/repos/<owner>/<repo>/releases/latest`. The project token is not sent. A draft or a prerelease is skipped. `tag_name` is kept when it is `v` plus a semver greater than `CARGO_PKG_VERSION`. `REGISTRATION_UPDATE_REPO` overrides the compiled `owner/repo`.
+
+`GET /api/update` requires the desk cookie. The data is the running version and, when the check found one, the newer version. The desk menu shows "Обновить" with that version. Confirming posts `POST /api/update`. Until that post, nothing is downloaded and the process does not exit. `/register` does not show the control. The menu test `menu_omits_update_and_moderation` gains the control for a waiting update in the same change; the moderation checkbox stays absent.
+
+The Scala paths `GET /updatecheck`, `GET /version`, `GET /update`, and `GET /need_update` stay unserved.
+
+### Install
+
+`POST /api/update` requires the desk cookie. A print job still in the channel returns `print_busy` and leaves the process running.
+
+1. Download this machine's asset next to `versions/` under a temporary name. The download waits out the same gate as sync: local HTTP and a print job go first.
+2. Download `SHA256SUMS` from that release and compare the digest of the asset. A mismatch deletes the file and returns `checksum_mismatch`. `updates/live` stays the running version.
+3. Unpack into `versions/<new>.partial`, then rename that directory to `versions/<new>/`. The rename is the moment the tree is complete.
+4. Write `state.yml` with phase `staged`, `from` the running version, and `to` the new version. Delete `updates/started` if it remains. Fsync the state file. `updates/live` still names `from`.
+5. Exit. The supervisor points `live` at the new tree.
+
+On its next start the supervisor reads `state.yml`:
+
+- Phase `staged`: write `updates/live` as `to`, fsync that file, set the phase to `trying`, fsync `state.yml`, then exec `versions/<to>`. The phase is durable before the exec, so a child that dies is the rollback case below.
+- Phase `trying` with no `started` file: the last exec never opened the socket. Write `updates/live` back to `from`, delete `versions/<to>/`, set the phase to `rolled_back`, and exec `versions/<from>`. `versions/<from>/` was never moved. A later check can offer a newer release. This failed version is not tried again.
+- Phase `trying` with a `started` file: the socket opened, and the child exited before it finished the backup move. Finish that move, set the phase to `current`, exec `versions/<to>`.
+- Phase `current` or `rolled_back`: exec the version in `updates/live`.
+
+### After the socket is open
+
+The new process writes `updates/started` and fsyncs it once the listen socket is open. While the phase is `trying`, it then moves `versions/<from>/` to `backup/<from>-<YYYYMMDD>/`, sets the phase to `current`, and fsyncs `state.yml`. It removes each backup directory whose date is more than seven days before today.
+
+A crash after `started` is on disk is a normal restart of the version in `updates/live`. The supervisor leaves that version in place. The backup from that start is what remains of the old build until the seven days pass.

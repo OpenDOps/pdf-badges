@@ -372,7 +372,7 @@ barcode:
 | `template`, `delimiters`, `preentered`, `content` | Same as a text box. The string that is drawn is `content` when it is a string, otherwise `preentered`. A template string is filled from the row before the symbol is drawn. |
 | Rectangle | The symbol is scaled into `posX`, `posY`, `width`, `height`. EAN-13 keeps its quiet zones inside that rectangle. |
 
-`ean13` and `code128` draw those symbols from the filled string. `qr` draws a QR code of that string. The entry has no font. A barcode is drawn when the registration page is integrated. Until that work, a `barcode` key is not part of the v0 writer.
+`ean13` and `code128` draw those symbols from the filled string. `qr` draws a QR code of that string. The entry has no font. The v0 writer draws the symbol into the rectangle.
 
 ### Photo
 
@@ -391,7 +391,7 @@ photo:
 
 `field` is a key in the row. In a string row the value is a path relative to the page file. The registration print may pass the bytes for that key directly. The file, or those bytes, is jpeg, bmp, or png. A missing key, an empty value, or a missing file leaves the rectangle undrawn. A file that is present and not one of those formats is an error that names the entry `id`. The rectangle is scaled to `width` and `height` the same way an image placement is.
 
-A photo is drawn when the registration page is integrated. Until that work, a `photo` key is not part of the v0 writer.
+The v0 writer draws the photo into the rectangle. A missing photo leaves that rectangle empty.
 
 ### Resources (target)
 

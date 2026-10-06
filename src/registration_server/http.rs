@@ -252,7 +252,10 @@ fn read_category_list(event: Option<&std::path::Path>) -> serde_json::Value {
             _ => None,
         })
         .unwrap_or_default();
-    let mut items: Vec<serde_json::Value> = stored.into_iter().filter(|item| !is_exhibitor(item)).collect();
+    let mut items: Vec<serde_json::Value> = stored
+        .into_iter()
+        .filter(|item| !is_exhibitor(item))
+        .collect();
     items.insert(0, exhibitor_category());
     serde_json::Value::Array(items)
 }
@@ -271,7 +274,11 @@ fn read_printer_list(base: &std::path::Path, event: Option<&std::path::Path>) ->
     )
 }
 
-fn collect_stems(dir: &std::path::Path, prefix: &str, names: &mut std::collections::BTreeSet<String>) {
+fn collect_stems(
+    dir: &std::path::Path,
+    prefix: &str,
+    names: &mut std::collections::BTreeSet<String>,
+) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -301,7 +308,11 @@ fn catalog_rev(body: &str) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     body.hash(&mut hasher);
     let rev = hasher.finish();
-    if rev == 0 { 1 } else { rev }
+    if rev == 0 {
+        1
+    } else {
+        rev
+    }
 }
 
 async fn form_event_settings(State(app): State<App>) -> Response {
@@ -1614,12 +1625,8 @@ mod tests {
         #[tokio::test]
         async fn print_enqueues_the_visitor() {
             let mut venue = open_event("EVT");
-            let (status, body) = post(
-                &venue.app,
-                "/api/print",
-                br#"{"ids":["5"],"printer":"HP"}"#,
-            )
-            .await;
+            let (status, body) =
+                post(&venue.app, "/api/print", br#"{"ids":["5"],"printer":"HP"}"#).await;
             assert_eq!(status, StatusCode::OK);
             assert_eq!(json_body(&body)["ok"], true);
             let job = venue.worker.try_recv().expect("queued");
@@ -2100,10 +2107,7 @@ mod tests {
         #[tokio::test]
         async fn catalog_returns_the_stored_lists() {
             let venue = open_event("EVT");
-            write_categories(
-                &venue,
-                r#"[{"cat_id":3,"name":{"ru":"Гость"}}]"#,
-            );
+            write_categories(&venue, r#"[{"cat_id":3,"name":{"ru":"Гость"}}]"#);
             std::fs::create_dir_all(venue.dir.0.join("printer_conf")).unwrap();
             std::fs::write(venue.dir.0.join("printer_conf").join("Zebra.json"), b"{}").unwrap();
             std::fs::write(venue.dir.0.join("EVT").join("pr_HP.json"), b"{}").unwrap();
@@ -2132,7 +2136,10 @@ mod tests {
             );
             let (status, body) = call(&venue.app, "/api/desk/catalog").await;
             assert_eq!(status, StatusCode::OK);
-            let categories = json_body(&body)["data"]["categories"].as_array().unwrap().clone();
+            let categories = json_body(&body)["data"]["categories"]
+                .as_array()
+                .unwrap()
+                .clone();
             assert_eq!(categories.len(), 2);
             assert_eq!(categories[0]["cat_id"], -2);
             assert_eq!(categories[0]["name"]["ru"], "Экспонент");
@@ -2147,10 +2154,16 @@ mod tests {
             assert_eq!(status, StatusCode::OK);
             let rev = json_body(&body)["data"]["rev"].as_u64().unwrap();
             let app = venue.app.clone();
-            let path = venue.dir.0.join("EVT").join("forms").join("categories.json");
-            let pending = tokio::spawn(async move {
-                call(&app, &format!("/api/desk/catalog?rev={rev}")).await
-            });
+            let path = venue
+                .dir
+                .0
+                .join("EVT")
+                .join("forms")
+                .join("categories.json");
+            let pending =
+                tokio::spawn(
+                    async move { call(&app, &format!("/api/desk/catalog?rev={rev}")).await },
+                );
             tokio::time::sleep(std::time::Duration::from_millis(40)).await;
             std::fs::write(
                 path,

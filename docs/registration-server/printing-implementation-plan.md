@@ -19,9 +19,9 @@ Step 8 is done when steps 1 through 18 are done.
 | [5. Codes](#step-5-codes) | EAN-13, Code 128, QR, and a photo | done |
 | [6. Graphic](#step-6-graphic) | The 1-bit payload, with no ZPL wrapper | done |
 | [7. Look](#step-7-look) | A PNG on disk, opened by hand, before any queue exists | done |
-| [8. Page file](#step-8-page-file) | A YAML page becomes PDF bytes | not started |
-| [9. Raster file](#step-9-raster-file) | That page becomes PNG and BMP | not started |
-| [10. ZPL file](#step-10-zpl-file) | That page becomes ZPL | not started |
+| [8. Page file](#step-8-page-file) | A YAML page becomes PDF bytes | done |
+| [9. Raster file](#step-9-raster-file) | That page becomes PNG and BMP | done |
+| [10. ZPL file](#step-10-zpl-file) | That page becomes ZPL | done |
 | [11. Prepare](#step-11-prepare) | Both badges are decoded on a switch and when sync stores one category | not started |
 | [12. Queues](#step-12-queues) | `CUPS-Get-Printers` becomes one `Printer` per queue | not started |
 | [13. Devices](#step-13-devices) | A live device marks the queue connected. A new device is installed once | not started |

@@ -32,7 +32,7 @@ Shared rules:
 - Chrome strings live in `app/locales/{ru,en}.json`. A missing chrome key fails the test run. Tests render through `react-i18next` and assert the Russian labels from the design.
 - Each operator screen keeps `data-screen` on its root: `key`, `menu`, `form`, `visitors`, `print`, `import`, `settings`, `printers`, `registration`.
 - A test that renders uses Testing Library and jsdom. The command is `npm test` in `registration-form/`. The filter is the name in **Done when**.
-- Pages the design leaves out stay out: login, the event list, key editing, self-update, the device clock, system restart, duplicate merge, and a hand upload of barcode files.
+- Pages the design leaves out stay out: login, the event list, key editing, the device clock, system restart, duplicate merge, and a hand upload of barcode files. The binary update is [porting.md](porting.md) step 11.
 
 ## Step 1. Shell
 

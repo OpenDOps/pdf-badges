@@ -4,9 +4,10 @@ use std::path::Path;
 use lopdf::content::{Content, Operation};
 use lopdf::{dictionary, Object, Stream};
 
+use crate::struct_to_pdf::barcode::{self, Symbol};
 use crate::struct_to_pdf::geometry::{media_size, pdf_point, to_points};
 use crate::struct_to_pdf::text::{self, PendingFont};
-use crate::struct_to_pdf::{ContentEntry, Page, RenderError};
+use crate::struct_to_pdf::{Barcode, ContentEntry, Page, Photo, RenderError};
 
 pub struct PaintedPage {
     pub content: Vec<u8>,
@@ -23,7 +24,7 @@ pub fn paint_contents(page: &Page, base_dir: &Path) -> Result<PaintedPage, Rende
     if page
         .contents
         .iter()
-        .any(|entry| matches!(entry, ContentEntry::Image(_)))
+        .any(|entry| !matches!(entry, ContentEntry::Text(_)))
     {
         let (media_width, media_height) = media_size(page);
         operations.push(Operation::new("q", vec![]));
@@ -46,6 +47,12 @@ pub fn paint_contents(page: &Page, base_dir: &Path) -> Result<PaintedPage, Rende
                 let drawn = text::draw_text(page, text, base_dir, &mut font_index)?;
                 operations.extend(drawn.operations);
                 fonts.extend(drawn.fonts);
+            }
+            ContentEntry::Barcode(code) => {
+                draw_barcode(page, code, &mut operations, &mut xobjects)?;
+            }
+            ContentEntry::Photo(photo) => {
+                draw_photo(page, photo, &mut operations, &mut xobjects)?;
             }
             ContentEntry::Image(placement) => {
                 let resource =
@@ -164,7 +171,7 @@ pub fn paint_contents(page: &Page, base_dir: &Path) -> Result<PaintedPage, Rende
     if page
         .contents
         .iter()
-        .any(|entry| matches!(entry, ContentEntry::Image(_)))
+        .any(|entry| !matches!(entry, ContentEntry::Text(_)))
     {
         operations.push(Operation::new("Q", vec![]));
     }
@@ -178,6 +185,176 @@ pub fn paint_contents(page: &Page, base_dir: &Path) -> Result<PaintedPage, Rende
         xobjects,
         fonts,
     })
+}
+
+fn draw_barcode(
+    page: &Page,
+    code: &Barcode,
+    operations: &mut Vec<Operation>,
+    xobjects: &mut Vec<(String, Stream)>,
+) -> Result<(), RenderError> {
+    let payload = code
+        .content
+        .clone()
+        .or_else(|| code.preentered.clone())
+        .unwrap_or_default();
+    let (width, height, samples) = match barcode::symbol(&code.barcode_type, &payload, &code.id)? {
+        Symbol::Bars(modules) => {
+            let width = modules.len() as u32;
+            let samples = modules
+                .into_iter()
+                .map(|on| if on { 0 } else { 255 })
+                .collect();
+            (width, 1, samples)
+        }
+        Symbol::Qr { width, modules } => {
+            let module = 4u32;
+            let span = width as u32 * module;
+            let mut samples = vec![255u8; (span * span) as usize];
+            for y in 0..width {
+                for x in 0..width {
+                    if !modules[y * width + x] {
+                        continue;
+                    }
+                    for py in 0..module {
+                        for px in 0..module {
+                            let row = y as u32 * module + py;
+                            let col = x as u32 * module + px;
+                            samples[(row * span + col) as usize] = 0;
+                        }
+                    }
+                }
+            }
+            (span, span, samples)
+        }
+    };
+    place_raster(
+        page,
+        operations,
+        xobjects,
+        code.pos_x,
+        code.pos_y,
+        code.width,
+        code.height,
+        width,
+        height,
+        "DeviceGray",
+        samples,
+    );
+    Ok(())
+}
+
+fn draw_photo(
+    page: &Page,
+    photo: &Photo,
+    operations: &mut Vec<Operation>,
+    xobjects: &mut Vec<(String, Stream)>,
+) -> Result<(), RenderError> {
+    let Some(bytes) = photo.bytes.as_deref() else {
+        return Ok(());
+    };
+    if bytes.is_empty() {
+        return Ok(());
+    }
+    let (width, height, samples) = raster_image(bytes, &photo.id)?;
+    place_raster(
+        page,
+        operations,
+        xobjects,
+        photo.pos_x,
+        photo.pos_y,
+        photo.width,
+        photo.height,
+        width,
+        height,
+        "DeviceRGB",
+        samples,
+    );
+    Ok(())
+}
+
+fn raster_image(bytes: &[u8], id: &str) -> Result<(u32, u32, Vec<u8>), RenderError> {
+    if bytes.starts_with(b"BM") {
+        return match decode_bmp(bytes, id)? {
+            BmpSamples::Rgb {
+                width,
+                height,
+                samples,
+            } => Ok((width, height, samples)),
+            BmpSamples::Gray {
+                width,
+                height,
+                samples,
+            } => {
+                let rgb = samples
+                    .into_iter()
+                    .flat_map(|sample| [sample, sample, sample]);
+                Ok((width, height, rgb.collect()))
+            }
+        };
+    }
+    if bytes.starts_with(b"\x89PNG") || bytes.starts_with(&[0xFF, 0xD8]) {
+        let image = image::load_from_memory(bytes).map_err(|err| RenderError {
+            context: id.to_string(),
+            message: err.to_string(),
+        })?;
+        let rgb = image.to_rgb8();
+        return Ok((rgb.width(), rgb.height(), rgb.into_raw()));
+    }
+    Err(RenderError {
+        context: id.to_string(),
+        message: "photo must be jpeg, bmp, or png".to_string(),
+    })
+}
+
+fn place_raster(
+    page: &Page,
+    operations: &mut Vec<Operation>,
+    xobjects: &mut Vec<(String, Stream)>,
+    pos_x: f64,
+    pos_y: f64,
+    box_width: f64,
+    box_height: f64,
+    pixels_wide: u32,
+    pixels_high: u32,
+    color_space: &str,
+    samples: Vec<u8>,
+) {
+    let name = format!("Im{}", xobjects.len() + 1);
+    let stream = Stream::new(
+        dictionary! {
+            "Type" => "XObject",
+            "Subtype" => "Image",
+            "Width" => pixels_wide as i64,
+            "Height" => pixels_high as i64,
+            "ColorSpace" => color_space,
+            "BitsPerComponent" => 8,
+        },
+        samples,
+    )
+    .with_compression(false);
+    let units = page.page_size.units;
+    let width = to_points(box_width, units);
+    let height = to_points(box_height, units);
+    let (pdf_x, pdf_y) = pdf_point(page, pos_x, pos_y + box_height);
+    operations.push(Operation::new("q", vec![]));
+    operations.push(Operation::new(
+        "cm",
+        vec![
+            Object::Real(width),
+            Object::Real(0.0),
+            Object::Real(0.0),
+            Object::Real(height),
+            Object::Real(pdf_x),
+            Object::Real(pdf_y),
+        ],
+    ));
+    operations.push(Operation::new(
+        "Do",
+        vec![Object::Name(name.as_bytes().to_vec())],
+    ));
+    operations.push(Operation::new("Q", vec![]));
+    xobjects.push((name, stream));
 }
 
 enum BmpSamples {

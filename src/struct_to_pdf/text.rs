@@ -596,7 +596,10 @@ fn paint_lines(
                     Object::Real(to_points(segment.font_size, units)),
                 ],
             ));
-            operations.push(Operation::new("Tm", text_matrix(text.rotation, pdf_x, pdf_y)));
+            operations.push(Operation::new(
+                "Tm",
+                text_matrix(text.rotation, pdf_x, pdf_y),
+            ));
             operations.push(Operation::new(
                 "Tj",
                 vec![Object::String(encoded, StringFormat::Hexadecimal)],
@@ -608,8 +611,14 @@ fn paint_lines(
                 let (x0, y0) = place(page, text, cursor, underline_y);
                 let (x1, y1) = place(page, text, cursor + width_page, underline_y);
                 operations.push(Operation::new("w", vec![Object::Real(0.5)]));
-                operations.push(Operation::new("m", vec![Object::Real(x0), Object::Real(y0)]));
-                operations.push(Operation::new("l", vec![Object::Real(x1), Object::Real(y1)]));
+                operations.push(Operation::new(
+                    "m",
+                    vec![Object::Real(x0), Object::Real(y0)],
+                ));
+                operations.push(Operation::new(
+                    "l",
+                    vec![Object::Real(x1), Object::Real(y1)],
+                ));
                 operations.push(Operation::new("S", vec![]));
             }
             cursor += width_page;

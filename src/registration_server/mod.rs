@@ -15,6 +15,7 @@ mod gate;
 mod grpc;
 mod http;
 mod net;
+mod print;
 mod print_queue;
 mod remote;
 mod remote_server;

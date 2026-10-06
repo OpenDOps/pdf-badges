@@ -1597,7 +1597,10 @@ fn company_name(document: &serde_json::Value) -> String {
             return text;
         }
     }
-    if let Some(text) = document.pointer("/personalData/company").and_then(json_text) {
+    if let Some(text) = document
+        .pointer("/personalData/company")
+        .and_then(json_text)
+    {
         if !text.trim().is_empty() {
             return text;
         }
@@ -1647,7 +1650,8 @@ fn collect_emails(document: &serde_json::Value) -> Vec<String> {
         .and_then(|value| value.as_array())
     {
         for company in companies {
-            let Some(addresses) = company.get("addresses").and_then(|value| value.as_array()) else {
+            let Some(addresses) = company.get("addresses").and_then(|value| value.as_array())
+            else {
                 continue;
             };
             for address in addresses {
@@ -1690,7 +1694,8 @@ fn collect_phones(document: &serde_json::Value) -> (bool, Vec<String>) {
         .and_then(|value| value.as_array())
     {
         for company in companies {
-            let Some(addresses) = company.get("addresses").and_then(|value| value.as_array()) else {
+            let Some(addresses) = company.get("addresses").and_then(|value| value.as_array())
+            else {
                 continue;
             };
             for address in addresses {
@@ -2835,12 +2840,16 @@ mod tests {
             assert_eq!(page.rows[0].name, "Kat");
             let email: String = db
                 .file()
-                .query_row("SELECT email FROM emails WHERE uid = 9", [], |row| row.get(0))
+                .query_row("SELECT email FROM emails WHERE uid = 9", [], |row| {
+                    row.get(0)
+                })
                 .unwrap();
             assert_eq!(email, "long.email@gmail.com");
             let phone: String = db
                 .file()
-                .query_row("SELECT phone FROM phones WHERE uid = 9", [], |row| row.get(0))
+                .query_row("SELECT phone FROM phones WHERE uid = 9", [], |row| {
+                    row.get(0)
+                })
                 .unwrap();
             assert_eq!(phone, "+74951234567");
             let barcode: String = db
@@ -2877,7 +2886,9 @@ mod tests {
             assert_eq!(count, 1);
             let phone: String = db
                 .file()
-                .query_row("SELECT phone FROM phones WHERE uid = 9", [], |row| row.get(0))
+                .query_row("SELECT phone FROM phones WHERE uid = 9", [], |row| {
+                    row.get(0)
+                })
                 .unwrap();
             assert_eq!(phone, "+70000000000");
 

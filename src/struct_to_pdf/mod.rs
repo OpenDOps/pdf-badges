@@ -1,9 +1,11 @@
+mod barcode;
 pub mod ffi;
 mod fonts;
 mod geometry;
 mod images;
 mod markup;
 mod page;
+mod raster;
 mod template;
 mod text;
 
@@ -14,11 +16,14 @@ use lopdf::{dictionary, Document, Object, ObjectId, Stream};
 
 pub use geometry::{media_box, media_size, pdf_point, to_points, trim_box};
 pub use page::{
-    load_page, parse_page, Bleeds, ContentEntry, FontResource, FontStyle, HorizontalAlign,
-    ImagePlacement, ImageResource, Padding, Page, PageSize, RenderError, SourceFormat, TextBody,
-    TextBox, Units, VerticalAlign,
+    load_page, parse_page, Barcode, Bleeds, ContentEntry, FontResource, FontStyle, HorizontalAlign,
+    ImagePlacement, ImageResource, Padding, Page, PageSize, Photo, RenderError, SourceFormat,
+    TextBody, TextBox, Units, VerticalAlign,
 };
-pub use template::{fill, index_template, scan, Hole, IndexedBox, TemplateField, TemplateIndex};
+pub use raster::{render, Raster};
+pub use template::{
+    fill, fill_raw, index_template, scan, Hole, IndexedBox, TemplateField, TemplateIndex,
+};
 pub use text::authored_text_bounds;
 
 pub fn render_rows(
@@ -69,6 +74,90 @@ fn text_box_mut<'a>(page: &'a mut Page, id: &str) -> Option<&'a mut TextBox> {
         }
     }
     None
+}
+
+pub fn prepare_visitor(
+    page: &Page,
+    values: &HashMap<String, String>,
+    photos: &HashMap<String, Vec<u8>>,
+    base_dir: &Path,
+) -> Result<Page, RenderError> {
+    let mut page = page.clone();
+    page.contents
+        .retain(|entry| entry_shown(if_st(entry), values));
+    let index = index_template(&page)?;
+    for indexed in &index.boxes {
+        if let Some(text) = text_box_mut(&mut page, &indexed.box_id) {
+            text.text.content = Some(fill(indexed, values));
+        } else if let Some(code) = barcode_mut(&mut page, &indexed.box_id) {
+            code.content = Some(fill_raw(indexed, values));
+        }
+    }
+    for entry in &mut page.contents {
+        if let ContentEntry::Photo(photo) = entry {
+            resolve_photo(photo, values, photos, base_dir)?;
+        }
+    }
+    Ok(page)
+}
+
+pub fn render_visitor(
+    page: &Page,
+    values: &HashMap<String, String>,
+    photos: &HashMap<String, Vec<u8>>,
+    base_dir: &Path,
+) -> Result<Vec<u8>, RenderError> {
+    let page = prepare_visitor(page, values, photos, base_dir)?;
+    render_page(&page, base_dir)
+}
+
+fn if_st(entry: &ContentEntry) -> &str {
+    match entry {
+        ContentEntry::Text(text) => &text.if_st,
+        ContentEntry::Image(image) => &image.if_st,
+        ContentEntry::Barcode(code) => &code.if_st,
+        ContentEntry::Photo(photo) => &photo.if_st,
+    }
+}
+
+fn entry_shown(if_st: &str, values: &HashMap<String, String>) -> bool {
+    if if_st.is_empty() {
+        return true;
+    }
+    match values.get(if_st).map(String::as_str) {
+        Some(value) if !value.is_empty() && value != "false" && value != "0" => true,
+        _ => false,
+    }
+}
+
+fn barcode_mut<'a>(page: &'a mut Page, id: &str) -> Option<&'a mut Barcode> {
+    for entry in &mut page.contents {
+        if let ContentEntry::Barcode(code) = entry {
+            if code.id == id {
+                return Some(code);
+            }
+        }
+    }
+    None
+}
+
+fn resolve_photo(
+    photo: &mut Photo,
+    values: &HashMap<String, String>,
+    photos: &HashMap<String, Vec<u8>>,
+    base_dir: &Path,
+) -> Result<(), RenderError> {
+    if let Some(bytes) = photos.get(&photo.field) {
+        photo.bytes = (!bytes.is_empty()).then(|| bytes.clone());
+        return Ok(());
+    }
+    let Some(path) = values.get(&photo.field).filter(|path| !path.is_empty()) else {
+        photo.bytes = None;
+        return Ok(());
+    };
+    let file = base_dir.join(path);
+    photo.bytes = std::fs::read(&file).ok();
+    Ok(())
 }
 
 pub fn render_page(page: &Page, base_dir: &Path) -> Result<Vec<u8>, RenderError> {

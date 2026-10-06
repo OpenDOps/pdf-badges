@@ -13,7 +13,11 @@ pub fn render_graphic(
     bg: &[u8],
 ) -> Result<Vec<u8>, PageError> {
     let png = render_png(layout, values, dpi, bg, None)?;
-    let image = image::load_from_memory(&png)
+    png_graphic(&png)
+}
+
+pub fn png_graphic(png: &[u8]) -> Result<Vec<u8>, PageError> {
+    let image = image::load_from_memory(png)
         .map_err(|error| err(error.to_string()))?
         .into_rgba8();
     let width = image.width();
