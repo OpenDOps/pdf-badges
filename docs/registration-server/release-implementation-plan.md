@@ -266,7 +266,7 @@ Track: auto-updater. The machine downloads its own asset. The download waits unt
 
 ### Work
 
-1. The asset name for the offer `X.Y.Z` is `rust-reg_X.Y.Z_amd64.deb` on Linux, `rust-reg-X.Y.Z.pkg` on macOS, and `rust-reg-X.Y.Z.exe` on Windows. The same names are the ones step 12 packs and step 13 uploads.
+1. The upgrade archive for the offer `X.Y.Z` is `rust-reg-X.Y.Z-linux.zip`, `rust-reg-X.Y.Z-macos.zip` on Apple silicon, `rust-reg-X.Y.Z-macos-intel.zip` on Intel, or `rust-reg-X.Y.Z-windows.zip`. macOS reads `hw.optional.arm64`, so an Intel build running under Rosetta on Apple silicon still takes the Apple silicon archive. The pkg, the deb, and the exe stay the first-install packages. The same names are the ones step 12 packs and step 13 uploads.
 2. The file is written next to `versions/` under a temporary name. `SHA256SUMS` is downloaded from the same release and checked with step 6. A mismatch deletes the temporary file and returns `checksum_mismatch`.
 3. Before the first byte, the download waits until the gate has no print in progress and no local request other than this one. The update request drops its own guard for that wait and takes it again when the download returns. Between chunks the task yields, so the accept loop can take a request that arrived during the download.
 4. The stand-in records the paths. This step does not rename a directory under `versions/` and does not exit.
@@ -283,7 +283,7 @@ Track: auto-updater. The machine downloads its own asset. The download waits unt
 
 `cargo test --lib registration_server::update::tests::download` passes, `cargo test --lib registration_server::gate` stays green, and steps 1 through 6 stay green.
 
-Done. The asset name is `rust-reg_X.Y.Z_amd64.deb` on Linux, `rust-reg-X.Y.Z.pkg` on macOS, and `rust-reg-X.Y.Z.exe` on Windows. It is written next to `versions/` as `<name>.partial`. `SHA256SUMS` from the same release is checked with step 6. A mismatch deletes that file and returns `checksum_mismatch`. The download waits until the gate is idle, dropping the caller's request guard for the wait and taking it again when the call returns. `versions/` gains no directory. The process does not exit.
+Done. The upgrade archive is `rust-reg-X.Y.Z-linux.zip` on Linux, `rust-reg-X.Y.Z-macos.zip` on Apple silicon, `rust-reg-X.Y.Z-macos-intel.zip` on Intel, and `rust-reg-X.Y.Z-windows.zip` on Windows. It is written next to `versions/` as `<name>.partial`. `SHA256SUMS` from the same release is checked with step 6. A mismatch deletes that file and returns `checksum_mismatch`. The download waits until the gate is idle, dropping the caller's request guard for the wait and taking it again when the call returns. `versions/` gains no directory. The process does not exit.
 
 ## Step 8. Unpack
 
@@ -294,7 +294,7 @@ Track: auto-updater. The checked asset becomes a complete version directory at t
 ### Work
 
 1. The version payload inside the asset is `rust-reg` (`rust-reg.exe` on Windows), `admin/`, `form/`, and `RELEASE`. Extract that payload into `versions/<new>.partial`. Fsync the files. Rename the directory to `versions/<new>/`. The rename is the moment the tree is complete.
-2. Linux extraction is `dpkg-deb -x` into a temporary directory, then the version subtree is what moves to `.partial`. macOS extraction expands the pkg without `installer`. Windows runs the exe with a staging directory and without the service path. Step 12 builds those assets. This step's automated test feeds a payload directory that already has those entries, which is the directory those tools produce.
+2. The upgrade archive is a zip of `rust-reg` (`rust-reg.exe` on Windows), `admin/`, `form/`, and `RELEASE`. Unzip it and copy that directory to `.partial`. A ustar of those same entries is accepted too. The pkg, the deb, and the exe are first-install packages. Expanding one of them still finds the same version directory inside, which is how an older server installs. Step 12 builds the zip beside those packages. This step's automated test feeds the zip.
 3. A `.partial` directory left behind is not a version the supervisor will start. Unpack does not replace `bin/rust-reg-run`. That copy is step 15, after the new version is current. `data/credentials.yml` and `data/<event_id>/` are not moved.
 4. This step does not write `state.yml` and does not exit.
 
@@ -423,11 +423,11 @@ Track: build. One script builds the asset for the OS it is run on and passes the
 
 ### Work
 
-1. `scripts/release/pack.sh` reads `REGISTRATION_RELEASE_TAG`. When it is unset, the script sets it to `v` plus the `Cargo.toml` version. `cargo build --release --bin rust-reg --bin rust-reg-run` runs with that variable set, so both binaries bake the tag. The script also runs `npm run build` in `registration-admin/` and `registration-form/`. The version payload is `rust-reg` (`rust-reg.exe` on Windows), `rust-reg-run` (`rust-reg-run.exe` on Windows), `admin/` from `registration-admin/dist`, `form/` from `registration-form/build`, and `RELEASE` containing the tag.
-2. On Linux the asset is a deb built with `dpkg-deb`. The version subtree lives under `opt/rust-reg/versions/<version>/`. `opt/rust-reg/bin/rust-reg-run` and the systemd unit are in the archive. `DEBIAN/postinst` enables the unit. The unit starts `<prefix>/bin/rust-reg-run` and restarts it when the process exits. An operator stop of the unit does not start it again.
-3. On macOS the asset is a pkg built with `pkgbuild`. The payload is the same tree under `/Library/rust-reg`. A launchd plist starts the supervisor with `KeepAlive`. The update path expands the pkg with `pkgutil` and does not run `installer`.
-4. On Windows the asset is `rust-reg-<version>.exe`. Run with a staging directory and without the service flag, it writes the payload and does not register a service. The first-install run registers the service that starts `bin/rust-reg-run` and restarts it when the process exits.
-5. The script prints a `SHA256SUMS` line for the asset it wrote: lowercase hex, two spaces, the file name from step 7.
+1. `scripts/release/pack.sh` reads `REGISTRATION_RELEASE_TAG`. When it is unset, the script sets it to `v` plus the `Cargo.toml` version. `cargo build --release --bin rust-reg --bin rust-reg-run` runs with that variable set, so both binaries bake the tag. The script also runs `npm run build` in `registration-admin/` and `registration-form/`. The version directory is `rust-reg` (`rust-reg.exe` on Windows), `admin/` from `registration-admin/dist`, `form/` from `registration-form/build/client`, and `RELEASE` containing the tag. `bin/` holds `rust-reg-run`.
+2. On Linux the installer is a deb built with `dpkg-deb`. The version directory lives once under `opt/rust-reg/versions/<version>/`. `opt/rust-reg/bin/rust-reg-run` and the systemd unit are in the archive. `DEBIAN/postinst` enables the unit. The unit starts `<prefix>/bin/rust-reg-run` and restarts it when the process exits. An operator stop of the unit does not start it again.
+3. On macOS the installer is a pkg built with `pkgbuild`. Apple silicon is `macos-latest` and writes `rust-reg-<version>.pkg`. Intel is `macos-15-intel` and writes `rust-reg-<version>-intel.pkg`. Each payload is one copy of the version directory under `/Library/rust-reg/versions/<version>/`, plus `bin/rust-reg-run` and the launchd plist.
+4. On Windows the installer is `rust-reg-<version>.exe`: the server binary with a ustar of `tree/` appended. `tree/` is `bin/` and one `versions/<version>/`. A double-click extracts `tree/` into `C:\Program Files\rust-reg` and registers the service. An upgrade does not run this exe.
+5. Each system also writes an upgrade zip of the version directory alone, deflated: `rust-reg-<version>-linux.zip`, `rust-reg-<version>-macos.zip`, `rust-reg-<version>-macos-intel.zip`, or `rust-reg-<version>-windows.zip`. The script prints a `SHA256SUMS` line for the installer and a line for the zip: lowercase hex, two spaces, the file name. The updater downloads the zip for the processor it detects.
 6. The first install copies `versions/<version>/rust-reg-run` to `bin/rust-reg-run`. An update does not rewrite the service definition. Step 15 is what replaces the bytes of the running wrapper, and only after the new version is current.
 
 ### Check
@@ -455,7 +455,7 @@ Track: build. A tag `release-X.Y.Z`, or a manual run of that same `X.Y.Z`, packs
 ### Work
 
 1. `.github/workflows/release.yml` runs on a push of a tag `release-*`, and on a manual run. The manual inputs are checkboxes for Linux, macOS, and Windows, each checked by default, and a version. A version is `x.x.x`, `x.x.x-alpha.N`, `x.x.x-beta.N`, or `x.x.x-rc.N`. A tag push builds all three. The first job fails unless the version has that form and at least one system is selected. It sets the `[package]` version in `Cargo.toml`, and the `rust-reg` version in `Cargo.lock`, to that version. When either file changed, it commits and pushes: a manual run pushes to the branch it was started from, and a tag pushes to the default branch. The later jobs build that commit.
-2. One Ubuntu job runs `npm ci` and `npm run build` in `registration-admin/` and `registration-form/` and uploads `dist/` and `build/client/`. The selected systems then run as a matrix: `ubuntu-latest`, `macos-latest`, and `windows-latest`. Each downloads that upload, sets `REGISTRATION_RELEASE_TAG` to `v` plus that version and `REGISTRATION_SKIP_FRONT=1`, and runs `bash scripts/release/pack.sh`. Each job uploads its asset.
+2. One Ubuntu job runs `npm ci` and `npm run build` in `registration-admin/` and `registration-form/` and uploads `dist/` and `build/client/`. The selected systems then run as a matrix: `ubuntu-latest`, `macos-latest`, and `windows-latest`. Each downloads that upload, sets `REGISTRATION_RELEASE_TAG` to `v` plus that version and `REGISTRATION_SKIP_FRONT=1`, and runs `bash scripts/release/pack.sh`. Each job uploads its installer and its upgrade zip.
 3. One later job writes `SHA256SUMS` from the lines those jobs printed and creates or updates the release `release-X.Y.Z`. The release carries the assets that were built and `SHA256SUMS`. Uploading again replaces a file of the same name and leaves assets from systems that were not selected. A draft is not used. A version with `-alpha`, `-beta`, or `-rc` is marked pre-release. A version without that suffix is not.
 4. The workflow does not deploy to a device. Installing remains the auto-updater, step 9, on the machine.
 
@@ -465,7 +465,7 @@ Push a tag `release-` plus the `Cargo.toml` version, or run the workflow by hand
 
 | Check | Result |
 |---|---|
-| The tag `release-` plus the `Cargo.toml` version | The Actions run is green. The release `release-X.Y.Z` has the three asset names from step 7 for that version, and `SHA256SUMS`. |
+| The tag `release-` plus the `Cargo.toml` version | The Actions run is green. The release `release-X.Y.Z` has the Linux and Windows installers, the Apple silicon and Intel pkgs, the four upgrade zips, and `SHA256SUMS`. |
 | A manual run with one system unchecked | That system is not built. The release gains or replaces only the assets that were built. |
 | `shasum -a 256 -c SHA256SUMS` | Every line matches the downloaded file it names. |
 | A version that is not `x.x.x`, `x.x.x-alpha.N`, `x.x.x-beta.N`, or `x.x.x-rc.N` | The workflow fails before packing. No release is published. |

@@ -1,5 +1,5 @@
-//! The Windows asset is `rust-reg-<version>.exe`: this binary with a ustar overlay.
-//! `--staging <dir> --no-service` writes the version payload and does not register a service.
+//! The Windows installer is `rust-reg-<version>.exe`: this binary with a ustar overlay.
+//! The overlay holds `tree/` once: `bin/` and `versions/<version>/`. An upgrade does not read it.
 //! A run with no arguments, on Windows, when the overlay is present, is the first install.
 
 use std::io::{self, Read};

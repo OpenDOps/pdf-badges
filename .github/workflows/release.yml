@@ -75,6 +75,7 @@ jobs:
           }
           selected "$INPUT_LINUX" linux ubuntu-latest
           selected "$INPUT_MAC" macos macos-latest
+          selected "$INPUT_MAC" macos-intel macos-15-intel
           selected "$INPUT_WINDOWS" windows windows-latest
           if [[ ${#include[@]} -eq 0 ]]; then
             echo "select at least one system" >&2
@@ -205,17 +206,16 @@ jobs:
           REGISTRATION_SKIP_FRONT: "1"
         run: |
           set -euo pipefail
-          mkdir -p target/release
-          bash scripts/release/pack.sh | tee "target/release/sha256-${{ matrix.platform }}.txt"
-          name=$(awk '{print $2}' "target/release/sha256-${{ matrix.platform }}.txt")
-          echo "name=${name}" >> "$GITHUB_OUTPUT"
+          mkdir -p target/release/packed
+          bash scripts/release/pack.sh | tee "target/release/packed/sha256-${{ matrix.platform }}.txt"
+          while read -r _ name; do
+            cp "target/release/$name" "target/release/packed/$name"
+          done < "target/release/packed/sha256-${{ matrix.platform }}.txt"
       - uses: actions/upload-artifact@v7
         with:
           name: release-${{ matrix.platform }}
           if-no-files-found: error
-          path: |
-            target/release/${{ steps.pack.outputs.name }}
-            target/release/sha256-${{ matrix.platform }}.txt
+          path: target/release/packed
 
   publish:
     needs: [select, build]
@@ -234,7 +234,7 @@ jobs:
         run: |
           set -euo pipefail
           : > dist/SHA256SUMS
-          for name in linux macos windows; do
+          for name in linux macos macos-intel windows; do
             line="dist/sha256-${name}.txt"
             if [[ -f "$line" ]]; then
               cat "$line" >> dist/SHA256SUMS

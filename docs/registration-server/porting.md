@@ -270,7 +270,8 @@ The event directory and the credential file stay outside the versioned tree. A s
 | Runner | Asset | How it is packed |
 |---|---|---|
 | `ubuntu-latest` | `rust-reg_<version>_amd64.deb` | `dpkg-deb` |
-| `macos-latest` | `rust-reg-<version>.pkg` | `pkgbuild` |
+| `macos-latest` | `rust-reg-<version>.pkg` | `pkgbuild` for Apple silicon |
+| `macos-15-intel` | `rust-reg-<version>-intel.pkg` | `pkgbuild` for Intel |
 | `windows-latest` | `rust-reg-<version>.exe` | the installer that writes the same tree |
 
 `SHA256SUMS` is one line per asset: the hex digest, two spaces, the file name.
@@ -308,7 +309,7 @@ The Scala paths `GET /updatecheck`, `GET /version`, `GET /update`, and `GET /nee
 
 `POST /api/update` requires the desk cookie. A print job still in the channel returns `print_busy` and leaves the process running.
 
-1. Download this machine's asset next to `versions/` under a temporary name. The download waits out the same gate as sync: local HTTP and a print job go first.
+1. Download this machine's upgrade zip next to `versions/` under a temporary name. The file is `rust-reg-<version>-linux.zip`, `rust-reg-<version>-macos.zip` on Apple silicon, `rust-reg-<version>-macos-intel.zip` on Intel, or `rust-reg-<version>-windows.zip`. macOS chooses from `hw.optional.arm64`. The download waits out the same gate as sync: local HTTP and a print job go first.
 2. Download `SHA256SUMS` from that release and compare the digest of the asset. A mismatch deletes the file and returns `checksum_mismatch`. `updates/live` stays the running version.
 3. Unpack into `versions/<new>.partial`, then rename that directory to `versions/<new>/`. The rename is the moment the tree is complete.
 4. Write `state.yml` with phase `staged`, `from` the running version, and `to` the new version. Delete `updates/started` if it remains. Fsync the state file. `updates/live` still names `from`.

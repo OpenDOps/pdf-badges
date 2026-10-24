@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Build this machine's release asset and print its SHA256SUMS line.
+# Build this machine's installer and its upgrade zip, and print their SHA256SUMS lines.
 # REGISTRATION_RELEASE_TAG, when unset, becomes v plus the Cargo.toml version.
-# The desk tray is packed with the platform asset. REGISTRATION_SKIP_DESK=1
+# The desk tray is packed with the platform installer. REGISTRATION_SKIP_DESK=1
 # leaves that wrapper out and ships the standalone server.
+# The upgrade zip is the version directory: rust-reg, admin/, form/, and RELEASE.
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
@@ -34,6 +35,7 @@ version="${REGISTRATION_RELEASE_TAG#v}"
 tag="$REGISTRATION_RELEASE_TAG"
 
 uname_s=$(uname -s)
+mac_cpu=""
 case "$uname_s" in
   Darwin) os=macos ;;
   Linux) os=linux ;;
@@ -44,15 +46,21 @@ case "$uname_s" in
     ;;
 esac
 
-echo "pack: cargo build --release $tag" >&2
-cargo build --release --bin rust-reg --bin rust-reg-run >&2
+toolchain=$(bash "$root/scripts/rust-host.sh")
+case "$toolchain" in
+  stable-aarch64-apple-darwin) mac_cpu=arm64 ;;
+  stable-x86_64-apple-darwin) mac_cpu=intel ;;
+esac
+
+echo "pack: cargo +${toolchain} build --release $tag" >&2
+cargo "+${toolchain}" build --release --bin rust-reg --bin rust-reg-run >&2
 with_desk=1
 if [[ "${REGISTRATION_SKIP_DESK:-}" == "1" ]]; then
   with_desk=0
   echo "pack: standalone release, skipping the desk wrapper" >&2
 else
-  echo "pack: cargo build desk wrapper" >&2
-  cargo build --release --manifest-path "$root/desk/Cargo.toml" --target-dir "$root/target" >&2
+  echo "pack: cargo +${toolchain} build desk wrapper" >&2
+  cargo "+${toolchain}" build --release --manifest-path "$root/desk/Cargo.toml" --target-dir "$root/target" >&2
 fi
 
 release_dir="$root/target/release"
@@ -168,7 +176,11 @@ EOF
 </dict>
 </plist>
 EOF
-    asset="$release_dir/rust-reg-${version}.pkg"
+    if [[ "$mac_cpu" == intel ]]; then
+      asset="$release_dir/rust-reg-${version}-intel.pkg"
+    else
+      asset="$release_dir/rust-reg-${version}.pkg"
+    fi
     pkgbuild \
       --root "$work/root" \
       --identifier com.opendops.rust-reg \
@@ -256,16 +268,15 @@ EOF
     dpkg-deb --root-owner-group --build "$deb" "$asset" >&2
     ;;
   windows)
-    stage="$work/stage"
     tree_version="$work/tree/versions/$version"
-    mkdir -p "$stage" "$work/tree/bin" "$tree_version"
-    assemble_version "$stage"
+    version_dir="$tree_version"
+    mkdir -p "$work/tree/bin" "$tree_version"
     assemble_version "$tree_version"
     cp "$release_dir/$run_name" "$work/tree/bin/$run_name"
     if [[ "$with_desk" == 1 ]]; then
       cp "$release_dir/$desk_name" "$work/tree/bin/$desk_name"
     fi
-    tar -C "$work" -cf "$work/payload.tar" stage tree
+    tar -C "$work" -cf "$work/payload.tar" tree
     asset="$release_dir/rust-reg-${version}.exe"
     cp "$release_dir/$bin_name" "$asset"
     py=python3
@@ -277,26 +288,52 @@ import pathlib, sys
 exe, tar = sys.argv[1:]
 blob = pathlib.Path(tar).read_bytes()
 with pathlib.Path(exe).open("ab") as out:
-    out.write(blob)
-    out.write(len(blob).to_bytes(8, "little"))
-    out.write(b"RUSTREG1")
+  out.write(blob)
+  out.write(len(blob).to_bytes(8, "little"))
+  out.write(b"RUSTREG1")
 PY
     ;;
 esac
 
-if command -v shasum >/dev/null 2>&1; then
-  hash=$(shasum -a 256 "$asset" | awk '{print $1}')
-elif command -v sha256sum >/dev/null 2>&1; then
-  hash=$(sha256sum "$asset" | awk '{print $1}')
+if [[ "$os" == macos && "$mac_cpu" == intel ]]; then
+  upgrade_zip="$release_dir/rust-reg-${version}-macos-intel.zip"
 else
-  py=python3
-  if ! command -v python3 >/dev/null 2>&1; then
-    py=python
-  fi
-  hash=$("$py" - "$asset" <<'PY'
+  upgrade_zip="$release_dir/rust-reg-${version}-${os}.zip"
+fi
+py=python3
+if ! command -v python3 >/dev/null 2>&1; then
+  py=python
+fi
+"$py" - "$version_dir" "$upgrade_zip" <<'PY'
+import pathlib, sys, zipfile
+root, dest = sys.argv[1:]
+root = pathlib.Path(root)
+with zipfile.ZipFile(dest, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+    for path in sorted(root.rglob("*")):
+        if path.is_file():
+            archive.write(path, path.relative_to(root).as_posix())
+PY
+
+print_sum() {
+  local file=$1
+  local hash
+  if command -v shasum >/dev/null 2>&1; then
+    hash=$(shasum -a 256 "$file" | awk '{print $1}')
+  elif command -v sha256sum >/dev/null 2>&1; then
+    hash=$(sha256sum "$file" | awk '{print $1}')
+  else
+    local py=python3
+    if ! command -v python3 >/dev/null 2>&1; then
+      py=python
+    fi
+    hash=$("$py" - "$file" <<'PY'
 import hashlib, pathlib, sys
 print(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest())
 PY
 )
-fi
-printf '%s  %s\n' "$hash" "$(basename "$asset")"
+  fi
+  printf '%s  %s\n' "$hash" "$(basename "$file")"
+}
+
+print_sum "$asset"
+print_sum "$upgrade_zip"

@@ -595,25 +595,54 @@ fn sha256_hex(bytes: &[u8]) -> String {
     hex
 }
 
-/// Asset file step 12 packs for this operating system. `version` is `MAJOR.MINOR.PATCH`.
+/// Upgrade archive step 12 packs for this operating system. `version` is `MAJOR.MINOR.PATCH`.
+/// On macOS the name follows the processor: Apple silicon uses `macos`, Intel uses `macos-intel`.
+/// The pkg, the deb, and the exe stay the first-install packages.
 #[allow(dead_code)]
 pub(crate) fn asset_name(version: &str) -> String {
     #[cfg(target_os = "linux")]
     {
-        format!("rust-reg_{version}_amd64.deb")
+        format!("rust-reg-{version}-linux.zip")
     }
     #[cfg(target_os = "macos")]
     {
-        format!("rust-reg-{version}.pkg")
+        macos_upgrade_archive(version, host_is_apple_silicon())
     }
     #[cfg(target_os = "windows")]
     {
-        format!("rust-reg-{version}.exe")
+        format!("rust-reg-{version}-windows.zip")
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     {
-        format!("rust-reg-{version}.pkg")
+        format!("rust-reg-{version}.zip")
     }
+}
+
+/// `rust-reg-<version>-macos.zip` on Apple silicon, `rust-reg-<version>-macos-intel.zip` on Intel.
+pub(crate) fn macos_upgrade_archive(version: &str, apple_silicon: bool) -> String {
+    if apple_silicon {
+        format!("rust-reg-{version}-macos.zip")
+    } else {
+        format!("rust-reg-{version}-macos-intel.zip")
+    }
+}
+
+/// The machine's processor. An Intel binary running under Rosetta on Apple silicon reports Apple silicon.
+#[cfg(target_os = "macos")]
+fn host_is_apple_silicon() -> bool {
+    let mut value: i32 = 0;
+    let mut len = std::mem::size_of_val(&value);
+    let name = std::ffi::CString::new("hw.optional.arm64").expect("sysctl name");
+    let rc = unsafe {
+        libc::sysctlbyname(
+            name.as_ptr(),
+            &mut value as *mut i32 as *mut libc::c_void,
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    rc == 0 && value != 0
 }
 
 /// `rust-reg` inside a version tree, or `rust-reg.exe` on Windows.
@@ -1440,6 +1469,15 @@ fn extract_payload(
     dest: &Path,
     progress: Option<&ReleaseCheck>,
 ) -> io::Result<PathBuf> {
+    if is_zip(asset) {
+        if dest.exists() {
+            std::fs::remove_dir_all(dest)?;
+        }
+        std::fs::create_dir_all(dest)?;
+        unzip(asset, dest, progress)?;
+        return find_payload(dest)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "payload"));
+    }
     if is_ustar(asset) {
         if dest.exists() {
             std::fs::remove_dir_all(dest)?;
@@ -1450,6 +1488,51 @@ fn extract_payload(
     }
     platform_expand(asset, dest, progress)?;
     find_payload(dest).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "payload"))
+}
+
+fn is_zip(path: &Path) -> bool {
+    let mut file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(_) => return false,
+    };
+    let mut magic = [0u8; 4];
+    file.read_exact(&mut magic).is_ok() && magic == [0x50, 0x4b, 0x03, 0x04]
+}
+
+fn unzip(asset: &Path, dest: &Path, progress: Option<&ReleaseCheck>) -> io::Result<()> {
+    let file = std::fs::File::open(asset)?;
+    let mut archive = zip::ZipArchive::new(file)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+    let total = archive.len().max(1);
+    for index in 0..archive.len() {
+        let mut entry = archive
+            .by_index(index)
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+        let Some(rel) = entry.enclosed_name().map(|path| path.to_path_buf()) else {
+            continue;
+        };
+        let path = dest.join(rel);
+        if entry.is_dir() {
+            std::fs::create_dir_all(path)?;
+        } else {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let mut out = std::fs::File::create(&path)?;
+            std::io::copy(&mut entry, &mut out)?;
+            out.sync_all()?;
+        }
+        if let Some(progress) = progress {
+            note_stage(
+                progress,
+                (index as u64) + 1,
+                total as u64,
+                0,
+                EXTRACT_UNITS,
+            );
+        }
+    }
+    Ok(())
 }
 
 fn is_ustar(path: &Path) -> bool {
@@ -1659,6 +1742,22 @@ fn is_payload(dir: &Path) -> bool {
         && dir.join("admin").is_dir()
         && dir.join("form").is_dir()
         && dir.join("RELEASE").is_file()
+}
+
+#[cfg(test)]
+pub(crate) fn payload_zip(files: &[(&str, &[u8])]) -> Vec<u8> {
+    use std::io::Write;
+    let mut cursor = std::io::Cursor::new(Vec::new());
+    {
+        let mut writer = zip::ZipWriter::new(&mut cursor);
+        let options = zip::write::SimpleFileOptions::default();
+        for (name, bytes) in files {
+            writer.start_file(*name, options).expect("zip name");
+            writer.write_all(bytes).expect("zip bytes");
+        }
+        writer.finish().expect("zip");
+    }
+    cursor.into_inner()
 }
 
 #[cfg(test)]
@@ -2441,6 +2540,18 @@ mod tests {
             assert_eq!(
                 release_file_url("http://127.0.0.1:9/", "owner/repo", "0.2.0", "SHA256SUMS"),
                 "http://127.0.0.1:9/repos/owner/repo/releases/download/release-0.2.0/SHA256SUMS"
+            );
+        }
+
+        #[test]
+        fn the_mac_upgrade_follows_the_processor() {
+            assert_eq!(
+                super::super::macos_upgrade_archive("2.0.0-alpha.2", true),
+                "rust-reg-2.0.0-alpha.2-macos.zip"
+            );
+            assert_eq!(
+                super::super::macos_upgrade_archive("2.0.0-alpha.2", false),
+                "rust-reg-2.0.0-alpha.2-macos-intel.zip"
             );
         }
     }
@@ -3588,9 +3699,7 @@ mod tests {
         use crate::registration_server::print_queue::PrintJob;
         use crate::registration_server::App;
 
-        use super::super::{
-            asset_name, payload_archive, release_version, sha256_hex, version_binary_name,
-        };
+        use super::super::{asset_name, release_version, sha256_hex, version_binary_name};
 
         struct TempDir(PathBuf);
 
@@ -3673,7 +3782,7 @@ mod tests {
         }
 
         fn archive() -> Vec<u8> {
-            payload_archive(&[
+            super::super::payload_zip(&[
                 (version_binary_name(), b"new-server"),
                 ("admin/index.html", b"admin"),
                 ("form/index.html", b"form"),
