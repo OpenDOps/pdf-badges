@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use tokio::net::TcpListener;
 use tokio::sync::watch;
@@ -44,22 +44,28 @@ pub fn release_file_contents() -> String {
 /// GitHub repository the release check reads. `REGISTRATION_UPDATE_REPO` replaces it.
 pub const UPDATE_REPO: &str = "OpenDOps/pdf-badges";
 pub const UPDATE_REPO_ENV: &str = "REGISTRATION_UPDATE_REPO";
+/// Set to `1` to offer pre-releases. Unset keeps `releases/latest`, which omits them.
+pub const UPDATE_PRERELEASE_ENV: &str = "REGISTRATION_UPDATE_PRERELEASE";
 pub const GITHUB_API: &str = "https://api.github.com";
 
 /// How long the sync thread waits after a release check before the next one.
 pub const UPDATE_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
 
-/// `tag` is `v` plus a version. `running` is that version without `v`.
+/// `tag` is `v` or `release-` plus a version. `running` is that version without the prefix.
 /// A version is `MAJOR.MINOR.PATCH` or the same numbers plus `-alpha.N`, `-beta.N`, or `-rc.N`.
-/// The result is the tag version without `v` when it is newer in semver order.
+/// The result is the version without the prefix when it is newer in semver order.
 pub fn newer(tag: &str, running: &str) -> Option<String> {
-    let tag_version = parse_version(tag.strip_prefix('v')?)?;
+    let tag_version = parse_version(version_in_tag(tag)?)?;
     let running_version = parse_version(running)?;
     if tag_version > running_version {
         Some(tag_version.to_string())
     } else {
         None
     }
+}
+
+fn version_in_tag(tag: &str) -> Option<&str> {
+    tag.strip_prefix("release-").or_else(|| tag.strip_prefix('v'))
 }
 
 /// Empty or whitespace keeps [`UPDATE_REPO`].
@@ -72,6 +78,18 @@ pub fn update_repo(raw: Option<&str>) -> String {
 
 pub fn update_repo_from_env() -> String {
     update_repo(std::env::var(UPDATE_REPO_ENV).ok().as_deref())
+}
+
+/// `1`, `true`, or `yes` lists GitHub releases and keeps pre-releases. Anything else does not.
+pub fn update_prerelease(raw: Option<&str>) -> bool {
+    matches!(
+        raw.map(str::trim).map(|value| value.to_ascii_lowercase()).as_deref(),
+        Some("1") | Some("true") | Some("yes")
+    )
+}
+
+pub fn update_prerelease_from_env() -> bool {
+    update_prerelease(std::env::var(UPDATE_PRERELEASE_ENV).ok().as_deref())
 }
 
 /// No previous attempt is due. An attempt is due again `UPDATE_EVERY` later.
@@ -232,6 +250,10 @@ struct OfferState {
     last_attempt: Option<SystemTime>,
     api_base: String,
     in_flight: bool,
+    include_prerelease: bool,
+    phase: String,
+    received: u64,
+    total: u64,
 }
 
 /// The GitHub call failed, or another check already holds it.
@@ -250,14 +272,88 @@ impl Drop for InFlight<'_> {
 
 impl ReleaseCheck {
     pub fn new() -> Self {
+        Self::with_prerelease(update_prerelease_from_env())
+    }
+
+    fn with_prerelease(include_prerelease: bool) -> Self {
         Self {
             inner: Mutex::new(OfferState {
                 offer: None,
                 last_attempt: None,
                 api_base: GITHUB_API.to_string(),
                 in_flight: false,
+                include_prerelease,
+                phase: "idle".to_string(),
+                received: 0,
+                total: 0,
             }),
         }
+    }
+
+    /// `true` when this call is the one that moved the install into `downloading`.
+    pub(crate) fn begin_download(&self) -> bool {
+        let mut state = self.inner.lock().expect("release offer");
+        if state.phase != "idle" {
+            return false;
+        }
+        state.phase = "downloading".to_string();
+        state.received = 0;
+        state.total = 0;
+        true
+    }
+
+    pub(crate) fn note_download(&self, received: u64, total: u64) {
+        let mut state = self.inner.lock().expect("release offer");
+        if state.phase != "downloading" {
+            return;
+        }
+        state.received = received;
+        if total > 0 {
+            state.total = total;
+        }
+    }
+
+    /// Moves `downloading` to `extracting` and resets the bar to 0 of 1000.
+    pub(crate) fn begin_extract(&self) {
+        let mut state = self.inner.lock().expect("release offer");
+        if state.phase != "downloading" {
+            return;
+        }
+        state.phase = "extracting".to_string();
+        state.received = 0;
+        state.total = EXTRACT_UNITS + UNPACK_UNITS;
+    }
+
+    pub(crate) fn note_extract(&self, received: u64, total: u64) {
+        let mut state = self.inner.lock().expect("release offer");
+        if state.phase != "extracting" {
+            return;
+        }
+        state.received = received;
+        if total > 0 {
+            state.total = total;
+        }
+    }
+
+    pub(crate) fn begin_apply(&self) {
+        let mut state = self.inner.lock().expect("release offer");
+        if state.phase == "downloading" || state.phase == "extracting" {
+            state.phase = "applying".to_string();
+            state.received = 0;
+            state.total = 0;
+        }
+    }
+
+    pub(crate) fn finish_install(&self) {
+        let mut state = self.inner.lock().expect("release offer");
+        state.phase = "idle".to_string();
+        state.received = 0;
+        state.total = 0;
+    }
+
+    pub(crate) fn progress(&self) -> (String, u64, u64) {
+        let state = self.inner.lock().expect("release offer");
+        (state.phase.clone(), state.received, state.total)
     }
 
     /// Stored offer. `GET /api/update` returns it.
@@ -343,20 +439,29 @@ impl ReleaseCheck {
         now: SystemTime,
         from_request: bool,
     ) -> Result<Option<String>, CheckError> {
-        {
+        let include_prerelease = {
             let mut state = self.inner.lock().expect("release offer");
             if state.in_flight {
                 return Err(CheckError::InProgress);
             }
             state.in_flight = true;
-        }
+            state.include_prerelease
+        };
         let _flight = InFlight(self);
         if from_request {
             gate.wait_until_others_idle().await;
         } else {
             gate.wait_until_idle().await;
         }
-        let fetched = fetch_latest(client, api_base, repo, running, rejected).await;
+        let fetched = fetch_offer(
+            client,
+            api_base,
+            repo,
+            running,
+            rejected,
+            include_prerelease,
+        )
+        .await;
         let mut state = self.inner.lock().expect("release offer");
         state.last_attempt = Some(now);
         match fetched {
@@ -369,12 +474,30 @@ impl ReleaseCheck {
     }
 }
 
-/// `{ "version", "newer" }` for `GET /api/update`. Does not open a connection.
+/// `{ "version", "newer", "phase", "received", "total" }` for `GET /api/update`. Does not open a connection.
 pub(crate) fn update_document(app: &crate::registration_server::App) -> serde_json::Value {
+    let (phase, received, total) = app.updates.progress();
+    let allowed = update_allowed(app);
+    let failed = failed_upgrade(&app.prefix);
     serde_json::json!({
         "version": release_version(),
         "newer": app.updates.offer(),
+        "supervised": allowed,
+        "phase": phase,
+        "received": received,
+        "total": if total == 0 { serde_json::Value::Null } else { serde_json::json!(total) },
+        "failed": failed,
     })
+}
+
+/// The version named by phase `rolled_back` in `<prefix>/updates/state.yml`.
+fn failed_upgrade(prefix: &Path) -> Option<String> {
+    let state = read_state(prefix)?;
+    if state.phase == "rolled_back" && !state.to.is_empty() {
+        Some(state.to)
+    } else {
+        None
+    }
 }
 
 /// The step 3 check, run now. `Err` leaves the stored offer as [`ReleaseCheck::force`] left it.
@@ -503,6 +626,128 @@ pub(crate) fn version_binary_name() -> &'static str {
     }
 }
 
+/// The direct parent executable is `rust-reg-run`. A renamed copy, a shell, and a missing parent are not.
+pub(crate) fn parent_is_supervisor() -> bool {
+    parent_executable().is_some_and(|path| is_supervisor_path(&path))
+}
+
+fn is_supervisor_path(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    name == "rust-reg-run" || name == "rust-reg-run.exe"
+}
+
+/// `true` when this process may stage an update. Tests opt in. Production asks the live parent.
+pub(crate) fn update_allowed(app: &crate::registration_server::App) -> bool {
+    #[cfg(test)]
+    if app.supervised {
+        return true;
+    }
+    #[cfg(not(test))]
+    let _ = app;
+    parent_is_supervisor()
+}
+
+#[cfg(target_os = "linux")]
+fn parent_executable() -> Option<PathBuf> {
+    let pid = unsafe { libc::getppid() };
+    std::fs::read_link(format!("/proc/{pid}/exe")).ok()
+}
+
+#[cfg(target_os = "macos")]
+fn parent_executable() -> Option<PathBuf> {
+    extern "C" {
+        fn proc_pidpath(pid: i32, buffer: *mut libc::c_void, buffersize: u32) -> i32;
+    }
+    let mut buf = vec![0u8; 4096];
+    let written = unsafe {
+        proc_pidpath(
+            libc::getppid(),
+            buf.as_mut_ptr() as *mut libc::c_void,
+            buf.len() as u32,
+        )
+    };
+    if written <= 0 {
+        return None;
+    }
+    let end = written as usize;
+    let bytes = &buf[..end.min(buf.len())];
+    let end = bytes.iter().position(|byte| *byte == 0).unwrap_or(bytes.len());
+    let text = std::str::from_utf8(&bytes[..end]).ok()?;
+    if text.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(text))
+    }
+}
+
+#[cfg(windows)]
+fn parent_executable() -> Option<PathBuf> {
+    #[repr(C)]
+    struct ProcessBasicInformation {
+        reserved1: *mut std::ffi::c_void,
+        peb: *mut std::ffi::c_void,
+        reserved2: [*mut std::ffi::c_void; 2],
+        pid: usize,
+        parent_pid: usize,
+    }
+    #[link(name = "ntdll")]
+    extern "system" {
+        fn NtQueryInformationProcess(
+            process: isize,
+            class: u32,
+            info: *mut ProcessBasicInformation,
+            len: u32,
+            returned: *mut u32,
+        ) -> i32;
+    }
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetCurrentProcess() -> isize;
+        fn OpenProcess(access: u32, inherit: i32, pid: u32) -> isize;
+        fn CloseHandle(handle: isize) -> i32;
+        fn QueryFullProcessImageNameW(
+            process: isize,
+            flags: u32,
+            name: *mut u16,
+            size: *mut u32,
+        ) -> i32;
+    }
+    unsafe {
+        let mut info = std::mem::zeroed::<ProcessBasicInformation>();
+        let status = NtQueryInformationProcess(
+            GetCurrentProcess(),
+            0,
+            &mut info,
+            std::mem::size_of::<ProcessBasicInformation>() as u32,
+            std::ptr::null_mut(),
+        );
+        if status != 0 || info.parent_pid == 0 {
+            return None;
+        }
+        let handle = OpenProcess(0x1000, 0, info.parent_pid as u32);
+        if handle == 0 {
+            return None;
+        }
+        let mut wide = vec![0u16; 32768];
+        let mut len = wide.len() as u32;
+        let ok = QueryFullProcessImageNameW(handle, 0, wide.as_mut_ptr(), &mut len);
+        CloseHandle(handle);
+        if ok == 0 {
+            return None;
+        }
+        wide.truncate(len as usize);
+        use std::os::windows::ffi::OsStringExt;
+        Some(PathBuf::from(std::ffi::OsString::from_wide(&wide)))
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn parent_executable() -> Option<PathBuf> {
+    None
+}
+
 /// Temporary asset, next to `versions/`, not inside it.
 #[allow(dead_code)]
 pub(crate) fn asset_temp_path(prefix: &Path, version: &str) -> PathBuf {
@@ -554,11 +799,12 @@ pub(crate) async fn download_release(
     base: &str,
     repo: &str,
     version: &str,
+    progress: Option<&ReleaseCheck>,
 ) -> Result<Downloaded, DownloadFailed> {
     let resume = held.is_some();
     drop(held);
     gate.wait_until_idle().await;
-    let fetched = fetch_asset(prefix, client, base, repo, version).await;
+    let fetched = fetch_asset(prefix, client, base, repo, version, progress).await;
     let held = resume.then(|| gate.enter_request());
     match fetched {
         Ok(path) => Ok(Downloaded { path, held }),
@@ -573,6 +819,7 @@ async fn fetch_asset(
     base: &str,
     repo: &str,
     version: &str,
+    progress: Option<&ReleaseCheck>,
 ) -> Result<PathBuf, DownloadKind> {
     let name = asset_name(version);
     let path = asset_temp_path(prefix, version);
@@ -580,7 +827,7 @@ async fn fetch_asset(
         std::fs::create_dir_all(parent).map_err(|_| DownloadKind::Failed)?;
     }
     let asset_url = release_file_url(base, repo, version, &name);
-    if write_download(client, &asset_url, &path).await.is_err() {
+    if write_download(client, &asset_url, &path, progress).await.is_err() {
         let _ = std::fs::remove_file(&path);
         return Err(DownloadKind::Failed);
     }
@@ -600,21 +847,45 @@ async fn fetch_asset(
 
 #[allow(dead_code)]
 fn release_file_url(base: &str, repo: &str, version: &str, name: &str) -> String {
-    format!(
-        "{}/repos/{repo}/releases/download/v{version}/{name}",
-        base.trim_end_matches('/')
-    )
+    let root = base.trim_end_matches('/');
+    // `api.github.com/repos/.../releases/download/...` is not a file. The asset is on github.com.
+    if api_host_is_github(root) {
+        format!("https://github.com/{repo}/releases/download/release-{version}/{name}")
+    } else {
+        format!("{root}/repos/{repo}/releases/download/release-{version}/{name}")
+    }
+}
+
+fn api_host_is_github(base: &str) -> bool {
+    reqwest::Url::parse(base)
+        .ok()
+        .and_then(|url| url.host_str().map(|host| host == "api.github.com"))
+        .unwrap_or(false)
 }
 
 #[allow(dead_code)]
-async fn write_download(client: &reqwest::Client, url: &str, dest: &Path) -> Result<(), ()> {
+async fn write_download(
+    client: &reqwest::Client,
+    url: &str,
+    dest: &Path,
+    progress: Option<&ReleaseCheck>,
+) -> Result<(), ()> {
     let mut response = client.get(url).send().await.map_err(|_| ())?;
     if !response.status().is_success() {
         return Err(());
     }
+    let total = response.content_length().unwrap_or(0);
+    let mut received = 0u64;
+    if let Some(progress) = progress {
+        progress.note_download(0, total);
+    }
     let mut file = std::fs::File::create(dest).map_err(|_| ())?;
     while let Some(chunk) = response.chunk().await.map_err(|_| ())? {
         file.write_all(&chunk).map_err(|_| ())?;
+        received += chunk.len() as u64;
+        if let Some(progress) = progress {
+            progress.note_download(received, total);
+        }
         tokio::task::yield_now().await;
     }
     file.sync_all().map_err(|_| ())
@@ -634,11 +905,20 @@ async fn read_download(client: &reqwest::Client, url: &str) -> Result<String, ()
     String::from_utf8(body).map_err(|_| ())
 }
 
-/// Copies a prepared payload into `versions/<version>.partial`, fsyncs, then renames.
+/// Copies a prepared payload into `versions/<version>.partial`, flushes that directory once, then renames.
 /// The payload is the directory `dpkg-deb`, `pkgutil`, or the Windows staging run produces.
 /// A failure removes `.partial`. `data/` and `bin/rust-reg-run` are not touched.
 #[allow(dead_code)]
 pub(crate) fn unpack(prefix: &Path, version: &str, payload: &Path) -> Result<(), UnpackError> {
+    unpack_with(prefix, version, payload, &mut |_| {})
+}
+
+fn unpack_with(
+    prefix: &Path,
+    version: &str,
+    payload: &Path,
+    note: &mut dyn FnMut(u64),
+) -> Result<(), UnpackError> {
     let versions = prefix.join("versions");
     let partial = versions.join(format!("{version}.partial"));
     let published = versions.join(version);
@@ -646,7 +926,7 @@ pub(crate) fn unpack(prefix: &Path, version: &str, payload: &Path) -> Result<(),
         let _ = std::fs::remove_dir_all(&partial);
         return Err(UnpackError::from(err));
     }
-    let copied = copy_payload(payload, &partial);
+    let copied = copy_payload(payload, &partial, note);
     if let Err(err) = copied {
         let _ = std::fs::remove_dir_all(&partial);
         return Err(err);
@@ -655,7 +935,6 @@ pub(crate) fn unpack(prefix: &Path, version: &str, payload: &Path) -> Result<(),
         let _ = std::fs::remove_dir_all(&partial);
         return Err(UnpackError::from(err));
     }
-    let _ = sync_dir(&versions);
     Ok(())
 }
 
@@ -671,17 +950,27 @@ impl UnpackError {
 }
 
 #[allow(dead_code)]
-fn copy_payload(payload: &Path, partial: &Path) -> Result<(), UnpackError> {
+fn copy_payload(
+    payload: &Path,
+    partial: &Path,
+    note: &mut dyn FnMut(u64),
+) -> Result<(), UnpackError> {
+    let mut copied = 0u64;
     let binary = version_binary_name();
-    copy_file(&payload.join(binary), &partial.join(binary))?;
-    copy_tree(&payload.join("admin"), &partial.join("admin"))?;
-    copy_tree(&payload.join("form"), &partial.join("form"))?;
-    copy_file(&payload.join("RELEASE"), &partial.join("RELEASE"))?;
+    copy_file(&payload.join(binary), &partial.join(binary), &mut copied, note)?;
+    copy_tree(&payload.join("admin"), &partial.join("admin"), &mut copied, note)?;
+    copy_tree(&payload.join("form"), &partial.join("form"), &mut copied, note)?;
+    copy_file(&payload.join("RELEASE"), &partial.join("RELEASE"), &mut copied, note)?;
     Ok(())
 }
 
 #[allow(dead_code)]
-fn copy_tree(from: &Path, to: &Path) -> Result<(), UnpackError> {
+fn copy_tree(
+    from: &Path,
+    to: &Path,
+    copied: &mut u64,
+    note: &mut dyn FnMut(u64),
+) -> Result<(), UnpackError> {
     std::fs::create_dir_all(to).map_err(UnpackError::from)?;
     let entries = std::fs::read_dir(from).map_err(UnpackError::from)?;
     for entry in entries {
@@ -689,20 +978,26 @@ fn copy_tree(from: &Path, to: &Path) -> Result<(), UnpackError> {
         let dest = to.join(entry.file_name());
         let kind = entry.file_type().map_err(UnpackError::from)?;
         if kind.is_dir() {
-            copy_tree(&entry.path(), &dest)?;
+            copy_tree(&entry.path(), &dest, copied, note)?;
         } else {
-            copy_file(&entry.path(), &dest)?;
+            copy_file(&entry.path(), &dest, copied, note)?;
         }
     }
-    sync_dir(to).map_err(UnpackError::from)
+    Ok(())
 }
 
 #[allow(dead_code)]
-fn copy_file(from: &Path, to: &Path) -> Result<(), UnpackError> {
+fn copy_file(
+    from: &Path,
+    to: &Path,
+    copied: &mut u64,
+    note: &mut dyn FnMut(u64),
+) -> Result<(), UnpackError> {
     let bytes = std::fs::read(from).map_err(UnpackError::from)?;
     let mut file = std::fs::File::create(to).map_err(UnpackError::from)?;
     file.write_all(&bytes).map_err(UnpackError::from)?;
-    file.sync_all().map_err(UnpackError::from)?;
+    *copied = copied.saturating_add(bytes.len() as u64);
+    note(*copied);
     Ok(())
 }
 
@@ -782,9 +1077,17 @@ pub(crate) async fn install(
             result: Err(StageFailure::Failed),
         };
     };
+    if !app.updates.begin_download() {
+        return InstallOutcome {
+            held,
+            result: Err(StageFailure::Failed),
+        };
+    }
     let client = github_client(Duration::from_secs(30));
     let base = app.updates.api_base();
     let repo = update_repo_from_env();
+    eprintln!("registration-server update: download {version}");
+    let download_started = Instant::now();
     let downloaded = match download_release(
         &app.prefix,
         &app.gate,
@@ -793,11 +1096,18 @@ pub(crate) async fn install(
         &base,
         &repo,
         &version,
+        Some(&app.updates),
     )
     .await
     {
         Ok(downloaded) => downloaded,
         Err(err) => {
+            eprintln!(
+                "registration-server update: download failed {} {}ms",
+                err.code(),
+                download_started.elapsed().as_millis()
+            );
+            app.updates.finish_install();
             let failure = if err.code() == "checksum_mismatch" {
                 StageFailure::Checksum
             } else {
@@ -809,35 +1119,87 @@ pub(crate) async fn install(
             };
         }
     };
+    let bytes = std::fs::metadata(&downloaded.path).map(|meta| meta.len()).unwrap_or(0);
+    eprintln!(
+        "registration-server update: downloaded {bytes} bytes {}ms",
+        download_started.elapsed().as_millis()
+    );
+    app.updates.begin_extract();
     let held = downloaded.held;
     let scratch = app.prefix.join("updates").join("payload");
-    let payload = match extract_payload(&downloaded.path, &scratch) {
+    eprintln!("registration-server update: extract");
+    let extract_started = Instant::now();
+    let payload = match extract_payload(&downloaded.path, &scratch, Some(&app.updates)) {
         Ok(path) => path,
-        Err(_) => {
+        Err(err) => {
+            eprintln!(
+                "registration-server update: extract failed {err} {}ms",
+                extract_started.elapsed().as_millis()
+            );
             let _ = std::fs::remove_dir_all(&scratch);
             let _ = std::fs::remove_file(&downloaded.path);
+            app.updates.finish_install();
             return InstallOutcome {
                 held,
                 result: Err(StageFailure::Failed),
             };
         }
     };
-    if unpack(&app.prefix, &version, &payload).is_err() {
+    eprintln!(
+        "registration-server update: extracted {}ms",
+        extract_started.elapsed().as_millis()
+    );
+    eprintln!("registration-server update: unpack {version}");
+    let unpack_started = Instant::now();
+    let payload_len = tree_bytes(&payload).max(1);
+    if let Err(err) = unpack_with(&app.prefix, &version, &payload, &mut |copied| {
+        note_stage(
+            &app.updates,
+            copied,
+            payload_len,
+            EXTRACT_UNITS,
+            UNPACK_UNITS,
+        );
+    }) {
+        eprintln!(
+            "registration-server update: unpack failed {err:?} {}ms",
+            unpack_started.elapsed().as_millis()
+        );
         let _ = std::fs::remove_dir_all(&scratch);
         let _ = std::fs::remove_file(&downloaded.path);
+        app.updates.finish_install();
         return InstallOutcome {
             held,
             result: Err(StageFailure::Failed),
         };
     }
+    eprintln!(
+        "registration-server update: unpacked {}ms",
+        unpack_started.elapsed().as_millis()
+    );
+    app.updates
+        .note_extract(EXTRACT_UNITS + UNPACK_UNITS, EXTRACT_UNITS + UNPACK_UNITS);
+    app.updates.begin_apply();
     let _ = std::fs::remove_dir_all(&scratch);
     let _ = std::fs::remove_file(&downloaded.path);
-    if write_staged(&app.prefix, release_version(), &version).is_err() {
+    eprintln!("registration-server update: stage");
+    let stage_started = Instant::now();
+    if let Err(err) = write_staged(&app.prefix, release_version(), &version) {
+        eprintln!(
+            "registration-server update: stage failed {err} {}ms",
+            stage_started.elapsed().as_millis()
+        );
+        app.updates.finish_install();
         return InstallOutcome {
             held,
             result: Err(StageFailure::Failed),
         };
     }
+    eprintln!(
+        "registration-server update: staged from {} to {version} {}ms",
+        release_version(),
+        stage_started.elapsed().as_millis()
+    );
     InstallOutcome {
         held,
         result: Ok(version),
@@ -846,6 +1208,7 @@ pub(crate) async fn install(
 
 /// Records the exit. After the response is sent, a non-test process leaves.
 pub(crate) fn request_exit(app: &crate::registration_server::App) {
+    eprintln!("registration-server update: exit; rust-reg-run starts the staged version");
     app.exit_requested.store(true, Ordering::Release);
     #[cfg(not(test))]
     {
@@ -865,6 +1228,9 @@ struct InstallState {
     to: String,
     #[serde(default)]
     rejected: Vec<String>,
+    /// Executable that was running when the upgrade was staged. Empty when unknown.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    running: String,
 }
 
 #[derive(Clone, Copy)]
@@ -880,11 +1246,21 @@ fn write_staged(prefix: &Path, from: &str, to: &str) -> io::Result<()> {
         from: String::new(),
         to: String::new(),
         rejected: Vec::new(),
+        running: String::new(),
     });
     state.phase = "staged".into();
     state.from = from.into();
     state.to = to.into();
+    let running = current_version_executable();
+    if !running.is_empty() {
+        state.running = running;
+    }
     write_state(prefix, &state)?;
+    clear_started(prefix)?;
+    Ok(())
+}
+
+fn clear_started(prefix: &Path) -> io::Result<()> {
     let started = started_path(prefix);
     if started.exists() {
         std::fs::remove_file(&started)?;
@@ -976,16 +1352,57 @@ fn write_marker_if_absent(path: &Path, bytes: &[u8]) -> io::Result<()> {
     replace_durable(path, bytes)
 }
 
-fn extract_payload(asset: &Path, dest: &Path) -> io::Result<PathBuf> {
+/// First 800 units of the extract bar are the package expand. The last 200 are the copy into the version directory.
+const EXTRACT_UNITS: u64 = 800;
+const UNPACK_UNITS: u64 = 200;
+
+fn note_stage(progress: &ReleaseCheck, done: u64, total: u64, start: u64, span: u64) {
+    let portion = if total == 0 {
+        span
+    } else {
+        done.saturating_mul(span) / total
+    };
+    progress.note_extract(
+        start.saturating_add(portion.min(span)),
+        EXTRACT_UNITS + UNPACK_UNITS,
+    );
+}
+
+fn tree_bytes(root: &Path) -> u64 {
+    let mut total = 0u64;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if kind.is_dir() {
+                stack.push(entry.path());
+            } else if kind.is_file() {
+                total = total.saturating_add(entry.metadata().map(|meta| meta.len()).unwrap_or(0));
+            }
+        }
+    }
+    total
+}
+
+fn extract_payload(
+    asset: &Path,
+    dest: &Path,
+    progress: Option<&ReleaseCheck>,
+) -> io::Result<PathBuf> {
     if is_ustar(asset) {
         if dest.exists() {
             std::fs::remove_dir_all(dest)?;
         }
         std::fs::create_dir_all(dest)?;
-        untar(asset, dest)?;
+        untar(asset, dest, progress)?;
         return Ok(dest.to_path_buf());
     }
-    platform_expand(asset, dest)?;
+    platform_expand(asset, dest, progress)?;
     find_payload(dest).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "payload"))
 }
 
@@ -1001,12 +1418,17 @@ fn is_ustar(path: &Path) -> bool {
     file.read_exact(&mut magic).is_ok() && &magic == b"ustar\0"
 }
 
-fn untar(asset: &Path, dest: &Path) -> io::Result<()> {
+fn untar(asset: &Path, dest: &Path, progress: Option<&ReleaseCheck>) -> io::Result<()> {
     let bytes = std::fs::read(asset)?;
-    untar_bytes(&bytes, dest)
+    untar_reporting(&bytes, dest, progress)
 }
 
 pub(crate) fn untar_bytes(bytes: &[u8], dest: &Path) -> io::Result<()> {
+    untar_reporting(bytes, dest, None)
+}
+
+fn untar_reporting(bytes: &[u8], dest: &Path, progress: Option<&ReleaseCheck>) -> io::Result<()> {
+    let total = bytes.len() as u64;
     let mut offset = 0;
     while offset + 512 <= bytes.len() {
         let header = &bytes[offset..offset + 512];
@@ -1039,6 +1461,13 @@ pub(crate) fn untar_bytes(bytes: &[u8], dest: &Path) -> io::Result<()> {
             file.write_all(data)?;
             file.sync_all()?;
         }
+        if let Some(progress) = progress {
+            let shown = (offset as u64).min(total.saturating_sub(1));
+            note_stage(progress, shown, total.max(1), 0, EXTRACT_UNITS);
+        }
+    }
+    if let Some(progress) = progress {
+        note_stage(progress, total.max(1), total.max(1), 0, EXTRACT_UNITS);
     }
     Ok(())
 }
@@ -1101,15 +1530,34 @@ fn safe_tar_name(name: &str) -> Option<PathBuf> {
     Some(path.to_path_buf())
 }
 
-fn platform_expand(asset: &Path, dest: &Path) -> io::Result<()> {
+fn platform_expand(asset: &Path, dest: &Path, progress: Option<&ReleaseCheck>) -> io::Result<()> {
     if dest.exists() {
         std::fs::remove_dir_all(dest)?;
     }
-    let status = platform_command(asset, dest)?.status()?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(io::Error::new(io::ErrorKind::Other, "extract failed"))
+    let total = std::fs::metadata(asset).map(|meta| meta.len()).unwrap_or(0);
+    let mut child = platform_command(asset, dest)?.spawn()?;
+    loop {
+        if let Some(progress) = progress {
+            let written = tree_bytes(dest);
+            let shown = if total == 0 {
+                0
+            } else {
+                written.min(total.saturating_sub(1))
+            };
+            note_stage(progress, shown, total.max(1), 0, EXTRACT_UNITS);
+        }
+        match child.try_wait()? {
+            Some(status) if status.success() => {
+                if let Some(progress) = progress {
+                    note_stage(progress, total.max(1), total.max(1), 0, EXTRACT_UNITS);
+                }
+                return Ok(());
+            }
+            Some(_) => {
+                return Err(io::Error::new(io::ErrorKind::Other, "extract failed"));
+            }
+            None => std::thread::sleep(Duration::from_millis(200)),
+        }
     }
 }
 
@@ -1229,7 +1677,15 @@ pub(crate) fn supervise(
             return Ok(());
         }
         let path = decide(prefix)?;
-        let mut child = spawn(&path)?;
+        let mut child = match spawn(&path) {
+            Ok(child) => child,
+            Err(err) => {
+                if roll_back_failed_try(prefix)? {
+                    continue;
+                }
+                return Err(err);
+            }
+        };
         loop {
             if stop.load(Ordering::Acquire) {
                 let _ = child.kill();
@@ -1245,7 +1701,21 @@ pub(crate) fn supervise(
                 }
             }
         }
+        roll_back_failed_try(prefix)?;
     }
+}
+
+/// The phase is still `trying` and this attempt never bound a port.
+/// Record `rolled_back` and point `updates/live` back at the previous version.
+fn roll_back_failed_try(prefix: &Path) -> io::Result<bool> {
+    let Some(state) = read_state(prefix) else {
+        return Ok(false);
+    };
+    if state.phase != "trying" || started_path(prefix).exists() {
+        return Ok(false);
+    }
+    roll_back(prefix, &state)?;
+    Ok(true)
 }
 
 pub(crate) fn run_supervisor(prefix: &Path) -> io::Result<()> {
@@ -1261,6 +1731,8 @@ fn spawn_registration(prefix: &Path, version_dir: &Path) -> io::Result<Child> {
         .arg(prefix.join("data").join("credentials.yml"))
         .arg("--dist")
         .arg(version_dir.join("admin"))
+        .arg("--form")
+        .arg(version_dir.join("form"))
         .spawn()
 }
 
@@ -1298,12 +1770,15 @@ fn decide(prefix: &Path) -> io::Result<PathBuf> {
         Some("staged") => stage_child(prefix, state.expect("staged")),
         Some("trying") => {
             let state = state.expect("trying");
+            if state.to.is_empty() {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "to"));
+            }
             if started_path(prefix).exists() {
                 let to = state.to.clone();
                 settle(prefix, local_today())?;
                 Ok(version_dir(prefix, &to))
             } else {
-                roll_back(prefix, &state)
+                Ok(version_dir(prefix, &state.to))
             }
         }
         _ => {
@@ -1318,6 +1793,11 @@ fn stage_child(prefix: &Path, mut state: InstallState) -> io::Result<PathBuf> {
     if state.to.is_empty() {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "to"));
     }
+    if let Some(current) = tree_to_retire(prefix, &state) {
+        state.from = current;
+    }
+    backup_running_executable(prefix, &state, local_today())?;
+    clear_started(prefix)?;
     replace_durable(
         &prefix.join("updates").join("live"),
         format!("{}\n", state.to).as_bytes(),
@@ -1335,6 +1815,7 @@ fn roll_back(prefix: &Path, state: &InstallState) -> io::Result<PathBuf> {
         &prefix.join("updates").join("live"),
         format!("{}\n", state.from).as_bytes(),
     )?;
+    restore_backed_up_version(prefix, &state.from)?;
     let to_dir = version_dir(prefix, &state.to);
     if to_dir.exists() {
         std::fs::remove_dir_all(to_dir)?;
@@ -1350,12 +1831,139 @@ fn roll_back(prefix: &Path, state: &InstallState) -> io::Result<PathBuf> {
             from: state.from.clone(),
             to: state.to.clone(),
             rejected,
+            running: state.running.clone(),
         },
     )?;
     Ok(version_dir(prefix, &state.from))
 }
 
-/// While the phase is `trying`, move `versions/<from>/` to a dated backup and set `current`.
+fn current_version_executable() -> String {
+    let Ok(path) = std::env::current_exe() else {
+        return String::new();
+    };
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return String::new();
+    };
+    if name == version_binary_name() {
+        path.to_string_lossy().into_owned()
+    } else {
+        String::new()
+    }
+}
+
+/// Copy the staged process into `backup/<from>-<date>/` when it is not already
+/// `versions/<from>/`. The source stays in place.
+fn backup_running_executable(prefix: &Path, state: &InstallState, today: Day) -> io::Result<()> {
+    if state.running.is_empty() || state.from.is_empty() {
+        return Ok(());
+    }
+    let source = PathBuf::from(&state.running);
+    if !source.is_file() {
+        return Ok(());
+    }
+    let installed = version_dir(prefix, &state.from).join(version_binary_name());
+    if source == installed {
+        return Ok(());
+    }
+    let dest_root = prefix
+        .join("backup")
+        .join(backup_dir_name(&state.from, today));
+    let dest_bin = dest_root.join(version_binary_name());
+    if dest_bin.is_file() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(&dest_root)?;
+    std::fs::copy(&source, &dest_bin)?;
+    if let Some(parent) = source.parent() {
+        for name in ["admin", "form"] {
+            let sibling = parent.join(name);
+            if sibling.is_dir() {
+                copy_version_tree(&sibling, &dest_root.join(name))?;
+            }
+        }
+    }
+    sync_dir(&dest_root)?;
+    if let Some(backup) = dest_root.parent() {
+        sync_dir(backup)?;
+    }
+    Ok(())
+}
+
+/// Put the newest `backup/<version>-*` tree back at `versions/<version>/` when that binary is missing.
+fn restore_backed_up_version(prefix: &Path, version: &str) -> io::Result<()> {
+    let dest = version_dir(prefix, version);
+    if dest.join(version_binary_name()).is_file() {
+        return Ok(());
+    }
+    let Some(backup) = latest_backup(prefix, version) else {
+        return Ok(());
+    };
+    copy_version_tree(&backup, &dest)?;
+    if let Some(versions) = dest.parent() {
+        sync_dir(versions)?;
+    }
+    Ok(())
+}
+
+fn latest_backup(prefix: &Path, version: &str) -> Option<PathBuf> {
+    let prefix_name = format!("{version}-");
+    let mut best: Option<(i64, PathBuf)> = None;
+    for entry in std::fs::read_dir(prefix.join("backup")).ok()? {
+        let entry = entry.ok()?;
+        if !entry.file_type().ok()?.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().into_string().ok()?;
+        if !name.starts_with(&prefix_name) {
+            continue;
+        }
+        let day = backup_day(&name)?;
+        let ordinal = ymd_to_days(day);
+        if best.as_ref().map(|(have, _)| ordinal >= *have).unwrap_or(true) {
+            best = Some((ordinal, entry.path()));
+        }
+    }
+    best.map(|(_, path)| path)
+}
+
+fn copy_version_tree(from: &Path, to: &Path) -> io::Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let dest = to.join(entry.file_name());
+        let kind = entry.file_type()?;
+        if kind.is_dir() {
+            copy_version_tree(&entry.path(), &dest)?;
+        } else if kind.is_file() {
+            std::fs::copy(entry.path(), dest)?;
+        }
+    }
+    Ok(())
+}
+
+/// A version directory that holds a tree. A missing directory and an empty one do not.
+fn version_occupied(dir: &Path) -> bool {
+    std::fs::read_dir(dir)
+        .ok()
+        .and_then(|mut entries| entries.next())
+        .is_some()
+}
+
+/// The tree to move aside. `versions/<from>/` when it has files. Otherwise the
+/// version named in `updates/live`, when that directory has files and is not `to`.
+fn tree_to_retire(prefix: &Path, state: &InstallState) -> Option<String> {
+    if version_occupied(&version_dir(prefix, &state.from)) {
+        return Some(state.from.clone());
+    }
+    let live = read_version_line(&prefix.join("updates").join("live"))?;
+    if live.is_empty() || live == state.to || live == state.from {
+        return None;
+    }
+    version_occupied(&version_dir(prefix, &live)).then_some(live)
+}
+
+/// While the phase is `trying`, move the previous tree to a dated backup and set `current`.
+/// A missing or empty previous tree, with no current tree either, leaves `backup/` unchanged.
 pub(crate) fn settle(prefix: &Path, today: Day) -> io::Result<()> {
     let Some(mut state) = read_state(prefix) else {
         return Ok(());
@@ -1366,18 +1974,19 @@ pub(crate) fn settle(prefix: &Path, today: Day) -> io::Result<()> {
     if state.from.is_empty() {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "from"));
     }
-    let from_dir = version_dir(prefix, &state.from);
+    let retire = tree_to_retire(prefix, &state);
+    let from_name = retire.clone().unwrap_or_else(|| state.from.clone());
+    let from_dir = version_dir(prefix, &from_name);
     let backup_root = prefix.join("backup");
-    let backup = backup_root.join(backup_dir_name(&state.from, today));
-    if from_dir.exists() {
+    let backup = backup_root.join(backup_dir_name(&from_name, today));
+    if version_occupied(&from_dir) {
+        state.from = from_name;
         std::fs::create_dir_all(&backup_root)?;
         std::fs::rename(&from_dir, &backup)?;
         sync_dir(&backup_root)?;
         if let Some(versions) = from_dir.parent() {
             sync_dir(versions)?;
         }
-    } else if !backup.exists() {
-        return Err(io::Error::new(io::ErrorKind::NotFound, "versions from"));
     }
     prune_backups(prefix, today)?;
     state.phase = "current".into();
@@ -1505,6 +2114,22 @@ fn civil_from_epoch_days(days: i64) -> Day {
 }
 
 /// `Ok(None)` clears the offer. `Err` leaves the previous offer in place.
+async fn fetch_offer(
+    client: &reqwest::Client,
+    api_base: &str,
+    repo: &str,
+    running: &str,
+    rejected: &[String],
+    include_prerelease: bool,
+) -> Result<Option<String>, ()> {
+    if include_prerelease {
+        fetch_release_list(client, api_base, repo, running, rejected).await
+    } else {
+        fetch_latest(client, api_base, repo, running, rejected).await
+    }
+}
+
+/// `Ok(None)` clears the offer. `Err` leaves the previous offer in place.
 async fn fetch_latest(
     client: &reqwest::Client,
     api_base: &str,
@@ -1531,6 +2156,48 @@ async fn fetch_latest(
         Some(version) if !rejected.iter().any(|item| item == &version) => Ok(Some(version)),
         _ => Ok(None),
     }
+}
+
+async fn fetch_release_list(
+    client: &reqwest::Client,
+    api_base: &str,
+    repo: &str,
+    running: &str,
+    rejected: &[String],
+) -> Result<Option<String>, ()> {
+    let url = format!(
+        "{}/repos/{repo}/releases?per_page=100",
+        api_base.trim_end_matches('/')
+    );
+    let response = client.get(&url).send().await.map_err(|_| ())?;
+    if !response.status().is_success() {
+        return Err(());
+    }
+    let bodies: Vec<LatestRelease> = response.json().await.map_err(|_| ())?;
+    Ok(newest_offer(&bodies, running, rejected))
+}
+
+fn newest_offer(bodies: &[LatestRelease], running: &str, rejected: &[String]) -> Option<String> {
+    let mut best: Option<String> = None;
+    for body in bodies {
+        if body.draft.unwrap_or(false) {
+            continue;
+        }
+        let Some(tag_name) = body.tag_name.as_deref() else {
+            continue;
+        };
+        let Some(version) = newer(tag_name, running) else {
+            continue;
+        };
+        if rejected.iter().any(|item| item == &version) {
+            continue;
+        }
+        best = Some(match best {
+            Some(current) if newer(&format!("v{version}"), &current).is_none() => current,
+            _ => version,
+        });
+    }
+    best
 }
 
 #[derive(serde::Deserialize)]
@@ -1597,6 +2264,66 @@ pub(crate) async fn update_loop(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn extract_progress_follows_the_download() {
+        let check = super::ReleaseCheck::with_prerelease(false);
+        assert!(check.begin_download());
+        check.note_download(4, 4);
+        check.begin_extract();
+        let (phase, received, total) = check.progress();
+        assert_eq!(phase, "extracting");
+        assert_eq!(received, 0);
+        assert_eq!(total, super::EXTRACT_UNITS + super::UNPACK_UNITS);
+        check.note_extract(400, 1000);
+        let (phase, received, total) = check.progress();
+        assert_eq!(phase, "extracting");
+        assert_eq!(received, 400);
+        assert_eq!(total, 1000);
+        check.begin_apply();
+        assert_eq!(check.progress().0, "applying");
+    }
+
+    #[test]
+    fn the_wrapper_name_is_rust_reg_run() {
+        assert!(super::is_supervisor_path(std::path::Path::new(
+            "rust-reg-run"
+        )));
+        assert!(super::is_supervisor_path(std::path::Path::new(
+            "rust-reg-run.exe"
+        )));
+        assert!(super::is_supervisor_path(std::path::Path::new(
+            "/Library/rust-reg/bin/rust-reg-run"
+        )));
+        assert!(!super::is_supervisor_path(std::path::Path::new(
+            "/Library/rust-reg/versions/2.0.0-alpha.1/rust-reg"
+        )));
+        assert!(!super::is_supervisor_path(std::path::Path::new(
+            "rust-reg-run-extra"
+        )));
+    }
+
+    #[test]
+    fn this_process_is_not_under_the_wrapper() {
+        assert!(!super::parent_is_supervisor());
+    }
+
+    mod download_url {
+        use super::super::{asset_name, release_file_url, GITHUB_API, UPDATE_REPO};
+
+        #[test]
+        fn github_download_uses_the_release_host() {
+            let name = asset_name("2.0.0-alpha.1");
+            assert_eq!(
+                release_file_url(GITHUB_API, UPDATE_REPO, "2.0.0-alpha.1", &name),
+                format!("https://github.com/{UPDATE_REPO}/releases/download/release-2.0.0-alpha.1/{name}")
+            );
+            assert_eq!(
+                release_file_url("http://127.0.0.1:9/", "owner/repo", "0.2.0", "SHA256SUMS"),
+                "http://127.0.0.1:9/repos/owner/repo/releases/download/release-0.2.0/SHA256SUMS"
+            );
+        }
+    }
+
     mod stamp {
         use super::super::release_tag::{bake_release_tag, parse_release_tag};
         use super::super::{release_file_contents, release_tag, release_version};
@@ -1677,6 +2404,11 @@ mod tests {
             assert_eq!(newer("v1.2.3-alpha.1", "1.2.3"), None);
             assert_eq!(newer("v1.2.3-alpha.1", "1.2.3-beta.1"), None);
             assert_eq!(newer("v1.2.3-rc.1", "1.2.3-rc.1"), None);
+            assert_eq!(
+                newer("release-2.0.0-alpha.1", "0.1.0").as_deref(),
+                Some("2.0.0-alpha.1")
+            );
+            assert_eq!(newer("release-2.0.0-alpha.1", "2.0.0-beta.1"), None);
         }
     }
 
@@ -1854,6 +2586,64 @@ mod tests {
                 .force(&gate, &client, &base, UPDATE_REPO, "0.1.0", &rejected, now)
                 .await;
             assert_eq!(skipped.offer(), None);
+        }
+
+        #[tokio::test]
+        async fn development_keeps_the_newest_prerelease() {
+            use super::super::update_prerelease;
+
+            assert!(!update_prerelease(None));
+            assert!(!update_prerelease(Some("0")));
+            assert!(update_prerelease(Some("1")));
+            assert!(update_prerelease(Some("true")));
+
+            let hits = Arc::new(Mutex::new(Vec::new()));
+            let recorded = Arc::clone(&hits);
+            let app = Router::new().route(
+                "/repos/{owner}/{repo}/releases",
+                get(move |request: Request| {
+                    let recorded = Arc::clone(&recorded);
+                    async move {
+                        recorded
+                            .lock()
+                            .expect("hits")
+                            .push(request.uri().path().to_string());
+                        (
+                            StatusCode::OK,
+                            r#"[
+                                {"tag_name":"release-1.2.3","draft":false,"prerelease":false},
+                                {"tag_name":"release-2.0.0-alpha.1","draft":false,"prerelease":true},
+                                {"tag_name":"release-9.0.0","draft":true,"prerelease":false},
+                                {"tag_name":"release-2.0.0-beta.1","draft":false,"prerelease":true}
+                            ]"#,
+                        )
+                    }
+                }),
+            );
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            let look = ReleaseCheck::with_prerelease(true);
+            let gate = Gate::new();
+            let offer = look
+                .force(
+                    &gate,
+                    &client(),
+                    &format!("http://{addr}"),
+                    UPDATE_REPO,
+                    "0.1.0",
+                    &[],
+                    SystemTime::UNIX_EPOCH,
+                )
+                .await
+                .unwrap_or_else(|_| panic!("list"));
+            assert_eq!(offer.as_deref(), Some("2.0.0-beta.1"));
+            let seen = hits.lock().expect("hits");
+            assert_eq!(seen.len(), 1);
+            assert!(seen[0].ends_with("/releases"));
+            assert!(!seen[0].contains("/latest"));
         }
 
         #[tokio::test]
@@ -2106,7 +2896,7 @@ mod tests {
             let cookie = admin_cookie(&venue.app);
             let (base, hits) = stand_in(
                 StatusCode::OK,
-                r#"{"tag_name":"v0.2.0","draft":false,"prerelease":false}"#,
+                r#"{"tag_name":"v999.0.0","draft":false,"prerelease":false}"#,
             )
             .await;
             venue.app.updates.set_api_base(&base);
@@ -2129,7 +2919,7 @@ mod tests {
             assert_eq!(status, StatusCode::OK);
             assert_eq!(body["ok"], true);
             assert_eq!(body["data"]["version"], release_version());
-            assert_eq!(body["data"]["newer"], "0.2.0");
+            assert_eq!(body["data"]["newer"], "999.0.0");
             assert_eq!(hits.lock().expect("hits").len(), 1);
             updates_absent();
         }
@@ -2153,7 +2943,7 @@ mod tests {
             let venue = desk();
             let (base, hits) = stand_in(
                 StatusCode::OK,
-                r#"{"tag_name":"v0.2.0","draft":false,"prerelease":false}"#,
+                r#"{"tag_name":"v999.0.0","draft":false,"prerelease":false}"#,
             )
             .await;
             venue.app.updates.set_api_base(&base);
@@ -2179,7 +2969,7 @@ mod tests {
             let cookie = admin_cookie(&venue.app);
             let (base, hits) = stand_in(
                 StatusCode::OK,
-                r#"{"tag_name":"v0.2.0","draft":false,"prerelease":false}"#,
+                r#"{"tag_name":"v999.0.0","draft":false,"prerelease":false}"#,
             )
             .await;
             venue.app.updates.set_api_base(&base);
@@ -2192,7 +2982,7 @@ mod tests {
             let (status, body) = send(&venue.app, "POST", "/api/update/check", Some(&cookie)).await;
             assert_eq!(status, StatusCode::OK);
             assert_eq!(body["data"]["version"], release_version());
-            assert_eq!(body["data"]["newer"], "0.2.0");
+            assert_eq!(body["data"]["newer"], "999.0.0");
             let seen = hits.lock().expect("hits");
             assert_eq!(seen.len(), 1);
             assert!(seen[0]
@@ -2246,7 +3036,7 @@ mod tests {
                         release.notified().await;
                         (
                             StatusCode::OK,
-                            r#"{"tag_name":"v0.2.0","draft":false,"prerelease":false}"#,
+                            r#"{"tag_name":"v999.0.0","draft":false,"prerelease":false}"#,
                         )
                     }
                 }),
@@ -2281,7 +3071,7 @@ mod tests {
                 .unwrap()
                 .unwrap();
             assert_eq!(status, StatusCode::OK);
-            assert_eq!(body["data"]["newer"], "0.2.0");
+            assert_eq!(body["data"]["newer"], "999.0.0");
             assert_eq!(hits.lock().expect("hits").len(), 1);
         }
 
@@ -2470,6 +3260,7 @@ mod tests {
                 &base,
                 UPDATE_REPO,
                 VERSION,
+                None,
             )
             .await
             .unwrap_or_else(|err| panic!("{}", err.code()));
@@ -2502,6 +3293,7 @@ mod tests {
                         &base,
                         UPDATE_REPO,
                         VERSION,
+                        None,
                     )
                     .await
                 })
@@ -2536,6 +3328,7 @@ mod tests {
                 &base,
                 UPDATE_REPO,
                 VERSION,
+                None,
             )
             .await
             .err()
@@ -2579,9 +3372,10 @@ mod tests {
         fn write_payload(dir: &std::path::Path, release: bool) -> PathBuf {
             let payload = dir.join("payload");
             std::fs::create_dir_all(payload.join("admin")).unwrap();
-            std::fs::create_dir_all(payload.join("form")).unwrap();
+            std::fs::create_dir_all(payload.join("form").join("assets")).unwrap();
             std::fs::write(payload.join("admin").join("index.html"), b"admin").unwrap();
             std::fs::write(payload.join("form").join("index.html"), b"form").unwrap();
+            std::fs::write(payload.join("form").join("assets").join("app.js"), b"js").unwrap();
             std::fs::write(payload.join(version_binary_name()), b"binary").unwrap();
             if release {
                 std::fs::write(payload.join("RELEASE"), b"v0.2.0\n").unwrap();
@@ -2604,6 +3398,10 @@ mod tests {
             assert_eq!(
                 std::fs::read(tree.join("admin").join("index.html")).unwrap(),
                 b"admin"
+            );
+            assert_eq!(
+                std::fs::read(tree.join("form").join("assets").join("app.js")).unwrap(),
+                b"js"
             );
             assert_eq!(
                 std::fs::read_to_string(tree.join("RELEASE")).unwrap(),
@@ -2723,17 +3521,16 @@ mod tests {
             }
         }
 
-        fn admin_cookie(app: &App) -> String {
-            let key = CurrentEvent::lock(&app.current)
-                .with_db(|db| {
-                    db.file()
-                        .query_row("SELECT key FROM keys WHERE is_admin = 1", [], |row| {
-                            row.get::<_, String>(0)
-                        })
-                        .unwrap()
-                })
-                .unwrap();
-            format!("desk={key}")
+        fn operator_cookie(app: &App) -> String {
+            let session = crate::registration_server::OperatorSession::resume(
+                "http://127.0.0.1:9/",
+                "device-1",
+                "jsess",
+            )
+            .expect("session");
+            app.operator
+                .keep_session("admin-session".to_string(), session);
+            "operator=admin-session".to_string()
         }
 
         async fn send(app: &App, cookie: Option<&str>) -> (StatusCode, Value) {
@@ -2820,7 +3617,7 @@ mod tests {
                     pages: 1,
                 })
                 .unwrap();
-            let cookie = admin_cookie(&venue.app);
+            let cookie = operator_cookie(&venue.app);
             let (status, body) = send(&venue.app, Some(&cookie)).await;
             assert_eq!(status, StatusCode::CONFLICT);
             assert_eq!(body["error"]["code"], "print_busy");
@@ -2845,7 +3642,7 @@ mod tests {
             venue.app.updates.set_api_base(&base);
             venue.app.updates.store_offer(Some("0.2.0".into()));
             let printing = venue.app.gate.enter_print();
-            let cookie = admin_cookie(&venue.app);
+            let cookie = operator_cookie(&venue.app);
             let (status, body) = send(&venue.app, Some(&cookie)).await;
             drop(printing);
             assert_eq!(status, StatusCode::CONFLICT);
@@ -2855,6 +3652,25 @@ mod tests {
                 .app
                 .exit_requested
                 .load(std::sync::atomic::Ordering::Acquire));
+        }
+
+        #[tokio::test]
+        async fn an_unsupervised_server_refuses_the_install() {
+            let mut venue = desk();
+            venue.app.supervised = false;
+            venue.app.updates.store_offer(Some("0.2.0".into()));
+            let cookie = operator_cookie(&venue.app);
+            let (status, body) = send(&venue.app, Some(&cookie)).await;
+            assert_eq!(status, StatusCode::CONFLICT);
+            assert_eq!(body["error"]["code"], "no_supervisor");
+            assert!(!venue
+                .app
+                .exit_requested
+                .load(std::sync::atomic::Ordering::Acquire));
+            let doc = super::super::update_document(&venue.app);
+            assert_eq!(doc["newer"], "0.2.0");
+            assert_eq!(doc["supervised"], false);
+            assert_eq!(doc["version"], release_version());
         }
 
         #[tokio::test]
@@ -2869,18 +3685,17 @@ mod tests {
             plant(&prefix.0);
             venue.app.updates.set_api_base(&base);
             venue.app.updates.store_offer(Some("0.2.0".into()));
-            let cookie = admin_cookie(&venue.app);
+            let cookie = operator_cookie(&venue.app);
             let (status, body) = send(&venue.app, Some(&cookie)).await;
             assert_eq!(status, StatusCode::OK);
             assert_eq!(body["ok"], true);
             assert_eq!(body["data"]["version"], "0.2.0");
-            assert_eq!(release_version(), "0.1.0");
             let state: Value = serde_yaml::from_str(
                 &std::fs::read_to_string(prefix.0.join("updates").join("state.yml")).unwrap(),
             )
             .unwrap();
             assert_eq!(state["phase"], "staged");
-            assert_eq!(state["from"], "0.1.0");
+            assert_eq!(state["from"], release_version());
             assert_eq!(state["to"], "0.2.0");
             assert_eq!(
                 std::fs::read_to_string(prefix.0.join("updates").join("live")).unwrap(),
@@ -2978,6 +3793,7 @@ mod tests {
             write_phase(&dir.0, "staged", "0.1.0", "0.2.0", &[]);
             std::fs::write(dir.0.join("updates").join("live"), "0.1.0\n").unwrap();
             plant_tree(&dir.0, "0.2.0", b"new");
+            std::fs::write(dir.0.join("updates").join("started"), "stale\n").unwrap();
             let mut started = None;
             resume(&dir.0, |path| {
                 let state: serde_yaml::Value = serde_yaml::from_str(
@@ -2993,32 +3809,57 @@ mod tests {
                 std::fs::read_to_string(dir.0.join("updates").join("live")).unwrap(),
                 "0.2.0\n"
             );
+            assert!(!dir.0.join("updates").join("started").exists());
         }
 
         #[test]
-        fn trying_without_started_rolls_back() {
+        fn staged_uses_the_live_tree_when_the_previous_directory_is_empty() {
             let dir = TempDir::new();
-            write_phase(&dir.0, "trying", "0.1.0", "0.2.0", &["0.0.9"]);
-            std::fs::write(dir.0.join("updates").join("live"), "0.2.0\n").unwrap();
-            plant_tree(&dir.0, "0.1.0", b"from-tree");
-            plant_tree(&dir.0, "0.2.0", b"new-tree");
-            let mut started = None;
-            resume(&dir.0, |path| {
-                started = Some(path.to_path_buf());
-            })
+            write_phase(&dir.0, "staged", "0.1.0", "0.2.0", &[]);
+            std::fs::write(dir.0.join("updates").join("live"), "0.0.9\n").unwrap();
+            std::fs::create_dir_all(dir.0.join("versions").join("0.1.0")).unwrap();
+            plant_tree(&dir.0, "0.0.9", b"current-tree");
+            plant_tree(&dir.0, "0.2.0", b"new");
+            resume(&dir.0, |_| {}).unwrap();
+            let state: serde_yaml::Value = serde_yaml::from_str(
+                &std::fs::read_to_string(dir.0.join("updates").join("state.yml")).unwrap(),
+            )
             .unwrap();
-            assert_eq!(started.unwrap(), dir.0.join("versions").join("0.1.0"));
+            assert_eq!(state["phase"].as_str(), Some("trying"));
+            assert_eq!(state["from"].as_str(), Some("0.0.9"));
             assert_eq!(
                 std::fs::read_to_string(dir.0.join("updates").join("live")).unwrap(),
+                "0.2.0\n"
+            );
+            assert_eq!(
+                std::fs::read(dir.0.join("versions").join("0.0.9").join("marker")).unwrap(),
+                b"current-tree"
+            );
+        }
+
+        fn exiting_child() -> std::io::Result<std::process::Child> {
+            #[cfg(unix)]
+            {
+                Command::new("true").spawn()
+            }
+            #[cfg(windows)]
+            {
+                Command::new("cmd").args(["/c", "exit", "0"]).spawn()
+            }
+        }
+
+        fn assert_rolled_back(dir: &Path) {
+            assert_eq!(
+                std::fs::read_to_string(dir.join("updates").join("live")).unwrap(),
                 "0.1.0\n"
             );
-            assert!(!dir.0.join("versions").join("0.2.0").exists());
+            assert!(!dir.join("versions").join("0.2.0").exists());
             assert_eq!(
-                std::fs::read(dir.0.join("versions").join("0.1.0").join("marker")).unwrap(),
+                std::fs::read(dir.join("versions").join("0.1.0").join("marker")).unwrap(),
                 b"from-tree"
             );
             let state: serde_yaml::Value = serde_yaml::from_str(
-                &std::fs::read_to_string(dir.0.join("updates").join("state.yml")).unwrap(),
+                &std::fs::read_to_string(dir.join("updates").join("state.yml")).unwrap(),
             )
             .unwrap();
             assert_eq!(state["phase"].as_str(), Some("rolled_back"));
@@ -3030,6 +3871,512 @@ mod tests {
                 .collect::<Vec<_>>();
             assert!(rejected.iter().any(|version| version == "0.2.0"));
             assert!(rejected.iter().any(|version| version == "0.0.9"));
+            assert_eq!(
+                super::super::failed_upgrade(dir).as_deref(),
+                Some("0.2.0")
+            );
+        }
+
+        #[test]
+        fn trying_without_started_rolls_back() {
+            let dir = TempDir::new();
+            write_phase(&dir.0, "trying", "0.1.0", "0.2.0", &["0.0.9"]);
+            std::fs::write(dir.0.join("updates").join("live"), "0.2.0\n").unwrap();
+            plant_tree(&dir.0, "0.1.0", b"from-tree");
+            plant_tree(&dir.0, "0.2.0", b"new-tree");
+            let seen = Arc::new(Mutex::new(Vec::<PathBuf>::new()));
+            let stop = Arc::new(AtomicBool::new(false));
+            let prefix = dir.0.clone();
+            let seen_child = Arc::clone(&seen);
+            let stop_child = Arc::clone(&stop);
+            let handle = std::thread::spawn(move || {
+                supervise(
+                    &prefix,
+                    move |path| {
+                        seen_child.lock().expect("path").push(path.to_path_buf());
+                        if path.ends_with("0.2.0") {
+                            exiting_child()
+                        } else {
+                            idle_child()
+                        }
+                    },
+                    &stop_child,
+                )
+            });
+            let deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                let restored = seen
+                    .lock()
+                    .expect("path")
+                    .iter()
+                    .any(|path| path.ends_with("0.1.0"));
+                if restored {
+                    break;
+                }
+                assert!(Instant::now() < deadline, "previous version did not start");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            stop.store(true, Ordering::Release);
+            handle.join().unwrap().unwrap();
+            assert_rolled_back(&dir.0);
+        }
+
+        #[test]
+        fn a_failed_spawn_while_trying_rolls_back() {
+            let dir = TempDir::new();
+            write_phase(&dir.0, "trying", "0.1.0", "0.2.0", &["0.0.9"]);
+            std::fs::write(dir.0.join("updates").join("live"), "0.2.0\n").unwrap();
+            plant_tree(&dir.0, "0.1.0", b"from-tree");
+            plant_tree(&dir.0, "0.2.0", b"new-tree");
+            let seen = Arc::new(Mutex::new(Vec::<PathBuf>::new()));
+            let stop = Arc::new(AtomicBool::new(false));
+            let prefix = dir.0.clone();
+            let seen_child = Arc::clone(&seen);
+            let stop_child = Arc::clone(&stop);
+            let handle = std::thread::spawn(move || {
+                supervise(
+                    &prefix,
+                    move |path| {
+                        seen_child.lock().expect("path").push(path.to_path_buf());
+                        if path.ends_with("0.2.0") {
+                            Err(std::io::Error::new(
+                                std::io::ErrorKind::PermissionDenied,
+                                "not executable",
+                            ))
+                        } else {
+                            idle_child()
+                        }
+                    },
+                    &stop_child,
+                )
+            });
+            let deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                let restored = seen
+                    .lock()
+                    .expect("path")
+                    .iter()
+                    .any(|path| path.ends_with("0.1.0"));
+                if restored {
+                    break;
+                }
+                assert!(Instant::now() < deadline, "previous version did not start");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            stop.store(true, Ordering::Release);
+            handle.join().unwrap().unwrap();
+            assert_rolled_back(&dir.0);
+        }
+
+        #[test]
+        fn an_outside_binary_is_backed_up_before_the_new_version_starts() {
+            let dir = TempDir::new();
+            let running = dir.0.join("elsewhere").join("rust-reg");
+            std::fs::create_dir_all(running.parent().unwrap()).unwrap();
+            std::fs::write(&running, b"old-bin").unwrap();
+            std::fs::create_dir_all(dir.0.join("updates")).unwrap();
+            std::fs::write(
+                dir.0.join("updates").join("state.yml"),
+                format!(
+                    "phase: staged\nfrom: \"0.1.0\"\nto: \"0.2.0\"\nrejected: []\nrunning: \"{}\"\n",
+                    running.display()
+                ),
+            )
+            .unwrap();
+            std::fs::write(dir.0.join("updates").join("live"), "0.1.0\n").unwrap();
+            plant_tree(&dir.0, "0.2.0", b"new");
+            resume(&dir.0, |_| {}).unwrap();
+            let saved = std::fs::read_dir(dir.0.join("backup"))
+                .unwrap()
+                .filter_map(|entry| entry.ok())
+                .find(|entry| {
+                    entry
+                        .file_name()
+                        .to_str()
+                        .is_some_and(|name| name.starts_with("0.1.0-"))
+                })
+                .expect("backup directory");
+            assert_eq!(
+                std::fs::read(saved.path().join("rust-reg")).unwrap(),
+                b"old-bin"
+            );
+            assert_eq!(std::fs::read(&running).unwrap(), b"old-bin");
+            let state: serde_yaml::Value = serde_yaml::from_str(
+                &std::fs::read_to_string(dir.0.join("updates").join("state.yml")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(state["phase"].as_str(), Some("trying"));
+        }
+
+        #[test]
+        fn rollback_restores_the_backed_up_binary() {
+            let dir = TempDir::new();
+            write_phase(&dir.0, "trying", "0.1.0", "0.2.0", &["0.0.9"]);
+            std::fs::write(dir.0.join("updates").join("live"), "0.2.0\n").unwrap();
+            let saved = dir.0.join("backup").join("0.1.0-20261024");
+            std::fs::create_dir_all(&saved).unwrap();
+            std::fs::write(saved.join("rust-reg"), b"old-bin").unwrap();
+            plant_tree(&dir.0, "0.2.0", b"new-tree");
+            let seen = Arc::new(Mutex::new(Vec::<PathBuf>::new()));
+            let stop = Arc::new(AtomicBool::new(false));
+            let prefix = dir.0.clone();
+            let seen_child = Arc::clone(&seen);
+            let stop_child = Arc::clone(&stop);
+            let handle = std::thread::spawn(move || {
+                supervise(
+                    &prefix,
+                    move |path| {
+                        seen_child.lock().expect("path").push(path.to_path_buf());
+                        if path.ends_with("0.2.0") {
+                            Err(std::io::Error::new(
+                                std::io::ErrorKind::NotFound,
+                                "missing",
+                            ))
+                        } else {
+                            idle_child()
+                        }
+                    },
+                    &stop_child,
+                )
+            });
+            let deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                let restored = seen
+                    .lock()
+                    .expect("path")
+                    .iter()
+                    .any(|path| path.ends_with("0.1.0"));
+                if restored {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "backed up version did not start"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            stop.store(true, Ordering::Release);
+            handle.join().unwrap().unwrap();
+            assert_eq!(
+                std::fs::read(dir.0.join("versions").join("0.1.0").join("rust-reg")).unwrap(),
+                b"old-bin"
+            );
+            assert_eq!(std::fs::read(saved.join("rust-reg")).unwrap(), b"old-bin");
+            let state: serde_yaml::Value = serde_yaml::from_str(
+                &std::fs::read_to_string(dir.0.join("updates").join("state.yml")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(state["phase"].as_str(), Some("rolled_back"));
+            assert_eq!(
+                std::fs::read_to_string(dir.0.join("updates").join("live")).unwrap(),
+                "0.1.0\n"
+            );
+        }
+
+        fn version_binary() -> &'static str {
+            super::super::version_binary_name()
+        }
+
+        fn run_until(
+            dir: &Path,
+            stop_when: impl Fn(&[PathBuf]) -> bool + Send + 'static,
+            spawn_at: impl Fn(&Path) -> std::io::Result<std::process::Child> + Send + 'static,
+        ) -> std::io::Result<()> {
+            let seen = Arc::new(Mutex::new(Vec::<PathBuf>::new()));
+            let stop = Arc::new(AtomicBool::new(false));
+            let prefix = dir.to_path_buf();
+            let seen_child = Arc::clone(&seen);
+            let stop_child = Arc::clone(&stop);
+            let handle = std::thread::spawn(move || {
+                supervise(
+                    &prefix,
+                    move |path| {
+                        seen_child.lock().expect("path").push(path.to_path_buf());
+                        spawn_at(path)
+                    },
+                    &stop_child,
+                )
+            });
+            let deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                if stop_when(&seen.lock().expect("path")) {
+                    stop.store(true, Ordering::Release);
+                    return handle.join().unwrap();
+                }
+                if handle.is_finished() {
+                    return handle.join().unwrap();
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "supervisor did not reach the expected version"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+
+        #[test]
+        fn a_failed_upgrade_restores_the_outside_binary() {
+            let dir = TempDir::new();
+            let home = dir.0.join("elsewhere");
+            let binary = version_binary();
+            std::fs::create_dir_all(home.join("admin")).unwrap();
+            std::fs::create_dir_all(home.join("form")).unwrap();
+            std::fs::write(home.join(binary), b"old-bin").unwrap();
+            std::fs::write(home.join("admin").join("index.html"), b"admin").unwrap();
+            std::fs::write(home.join("form").join("index.html"), b"form").unwrap();
+            std::fs::write(home.join("other.bin"), b"not-a-version-file").unwrap();
+            std::fs::create_dir_all(dir.0.join("updates")).unwrap();
+            std::fs::write(
+                dir.0.join("updates").join("state.yml"),
+                format!(
+                    "phase: staged\nfrom: \"0.1.0\"\nto: \"0.2.0\"\nrejected: []\nrunning: \"{}\"\n",
+                    home.join(binary).display()
+                ),
+            )
+            .unwrap();
+            std::fs::write(dir.0.join("updates").join("live"), "0.1.0\n").unwrap();
+            plant_tree(&dir.0, "0.2.0", b"new");
+            run_until(
+                &dir.0,
+                |paths| paths.iter().any(|path| path.ends_with("0.1.0")),
+                |path| {
+                    if path.ends_with("0.2.0") {
+                        exiting_child()
+                    } else {
+                        idle_child()
+                    }
+                },
+            )
+            .unwrap();
+            let restored = dir.0.join("versions").join("0.1.0");
+            assert_eq!(std::fs::read(restored.join(binary)).unwrap(), b"old-bin");
+            assert_eq!(
+                std::fs::read(restored.join("admin").join("index.html")).unwrap(),
+                b"admin"
+            );
+            assert_eq!(
+                std::fs::read(restored.join("form").join("index.html")).unwrap(),
+                b"form"
+            );
+            assert!(!restored.join("other.bin").exists());
+            assert_eq!(std::fs::read(home.join(binary)).unwrap(), b"old-bin");
+            assert_eq!(
+                std::fs::read(home.join("admin").join("index.html")).unwrap(),
+                b"admin"
+            );
+            let saved = std::fs::read_dir(dir.0.join("backup"))
+                .unwrap()
+                .filter_map(|entry| entry.ok())
+                .find(|entry| {
+                    entry
+                        .file_name()
+                        .to_str()
+                        .is_some_and(|name| name.starts_with("0.1.0-"))
+                })
+                .expect("backup");
+            assert_eq!(
+                std::fs::read(saved.path().join(binary)).unwrap(),
+                b"old-bin"
+            );
+            assert!(!dir.0.join("versions").join("0.2.0").exists());
+            assert_eq!(
+                std::fs::read_to_string(dir.0.join("updates").join("live")).unwrap(),
+                "0.1.0\n"
+            );
+            let state: serde_yaml::Value = serde_yaml::from_str(
+                &std::fs::read_to_string(dir.0.join("updates").join("state.yml")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(state["phase"].as_str(), Some("rolled_back"));
+            assert_eq!(
+                super::super::failed_upgrade(&dir.0).as_deref(),
+                Some("0.2.0")
+            );
+        }
+
+        #[test]
+        fn a_bind_keeps_the_new_version_and_moves_the_old_tree() {
+            let dir = TempDir::new();
+            write_phase(&dir.0, "trying", "0.1.0", "0.2.0", &[]);
+            std::fs::write(dir.0.join("updates").join("live"), "0.2.0\n").unwrap();
+            plant_tree(&dir.0, "0.1.0", b"from-tree");
+            plant_tree(&dir.0, "0.2.0", b"new-tree");
+            let prefix = dir.0.clone();
+            let starts = Arc::new(Mutex::new(0u32));
+            let starts_child = Arc::clone(&starts);
+            run_until(
+                &dir.0,
+                |paths| paths.iter().filter(|path| path.ends_with("0.2.0")).count() >= 2,
+                move |path| {
+                    assert!(path.ends_with("0.2.0"));
+                    let mut count = starts_child.lock().expect("starts");
+                    *count += 1;
+                    if *count == 1 {
+                        std::fs::write(prefix.join("updates").join("started"), "\n").unwrap();
+                        exiting_child()
+                    } else {
+                        idle_child()
+                    }
+                },
+            )
+            .unwrap();
+            assert!(!dir.0.join("versions").join("0.1.0").exists());
+            assert_eq!(
+                std::fs::read(dir.0.join("versions").join("0.2.0").join("marker")).unwrap(),
+                b"new-tree"
+            );
+            let saved = std::fs::read_dir(dir.0.join("backup"))
+                .unwrap()
+                .filter_map(|entry| entry.ok())
+                .find(|entry| {
+                    entry
+                        .file_name()
+                        .to_str()
+                        .is_some_and(|name| name.starts_with("0.1.0-"))
+                })
+                .expect("backup of the previous tree");
+            assert_eq!(
+                std::fs::read(saved.path().join("marker")).unwrap(),
+                b"from-tree"
+            );
+            let state: serde_yaml::Value = serde_yaml::from_str(
+                &std::fs::read_to_string(dir.0.join("updates").join("state.yml")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(state["phase"].as_str(), Some("current"));
+            assert_eq!(
+                std::fs::read_to_string(dir.0.join("updates").join("live")).unwrap(),
+                "0.2.0\n"
+            );
+        }
+
+        #[test]
+        fn the_newer_backup_is_the_one_restored() {
+            let dir = TempDir::new();
+            write_phase(&dir.0, "trying", "0.1.0", "0.2.0", &[]);
+            std::fs::write(dir.0.join("updates").join("live"), "0.2.0\n").unwrap();
+            let older = dir.0.join("backup").join("0.1.0-20261001");
+            let newer = dir.0.join("backup").join("0.1.0-20261024");
+            std::fs::create_dir_all(&older).unwrap();
+            std::fs::create_dir_all(&newer).unwrap();
+            std::fs::write(older.join(version_binary()), b"older-bin").unwrap();
+            std::fs::write(newer.join(version_binary()), b"newer-bin").unwrap();
+            run_until(
+                &dir.0,
+                |paths| paths.iter().any(|path| path.ends_with("0.1.0")),
+                |path| {
+                    if path.ends_with("0.2.0") {
+                        Err(std::io::Error::new(std::io::ErrorKind::NotFound, "missing"))
+                    } else {
+                        idle_child()
+                    }
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                std::fs::read(dir.0.join("versions").join("0.1.0").join(version_binary())).unwrap(),
+                b"newer-bin"
+            );
+            assert_eq!(
+                std::fs::read(older.join(version_binary())).unwrap(),
+                b"older-bin"
+            );
+            assert_eq!(
+                std::fs::read(newer.join(version_binary())).unwrap(),
+                b"newer-bin"
+            );
+        }
+
+        #[test]
+        fn an_installed_tree_is_not_replaced_by_its_backup() {
+            let dir = TempDir::new();
+            write_phase(&dir.0, "trying", "0.1.0", "0.2.0", &[]);
+            std::fs::write(dir.0.join("updates").join("live"), "0.2.0\n").unwrap();
+            let installed = dir.0.join("versions").join("0.1.0");
+            std::fs::create_dir_all(&installed).unwrap();
+            std::fs::write(installed.join(version_binary()), b"kept").unwrap();
+            let saved = dir.0.join("backup").join("0.1.0-20261024");
+            std::fs::create_dir_all(&saved).unwrap();
+            std::fs::write(saved.join(version_binary()), b"older-bin").unwrap();
+            run_until(
+                &dir.0,
+                |paths| paths.iter().any(|path| path.ends_with("0.1.0")),
+                |path| {
+                    if path.ends_with("0.2.0") {
+                        Err(std::io::Error::new(
+                            std::io::ErrorKind::PermissionDenied,
+                            "not executable",
+                        ))
+                    } else {
+                        idle_child()
+                    }
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                std::fs::read(installed.join(version_binary())).unwrap(),
+                b"kept"
+            );
+        }
+
+        #[test]
+        fn a_version_inside_the_prefix_is_not_copied_before_start() {
+            let dir = TempDir::new();
+            let binary = dir.0.join("versions").join("0.1.0").join(version_binary());
+            std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
+            std::fs::write(&binary, b"already-installed").unwrap();
+            std::fs::create_dir_all(dir.0.join("updates")).unwrap();
+            std::fs::write(
+                dir.0.join("updates").join("state.yml"),
+                format!(
+                    "phase: staged\nfrom: \"0.1.0\"\nto: \"0.2.0\"\nrejected: []\nrunning: \"{}\"\n",
+                    binary.display()
+                ),
+            )
+            .unwrap();
+            std::fs::write(dir.0.join("updates").join("live"), "0.1.0\n").unwrap();
+            plant_tree(&dir.0, "0.2.0", b"new");
+            resume(&dir.0, |_| {}).unwrap();
+            assert!(!dir.0.join("backup").exists());
+            assert_eq!(std::fs::read(&binary).unwrap(), b"already-installed");
+            let state: serde_yaml::Value = serde_yaml::from_str(
+                &std::fs::read_to_string(dir.0.join("updates").join("state.yml")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(state["phase"].as_str(), Some("trying"));
+        }
+
+        #[test]
+        fn a_missing_tree_and_backup_records_the_rollback_and_stops() {
+            let dir = TempDir::new();
+            write_phase(&dir.0, "trying", "0.1.0", "0.2.0", &[]);
+            std::fs::write(dir.0.join("updates").join("live"), "0.2.0\n").unwrap();
+            let error = run_until(
+                &dir.0,
+                |_| false,
+                |_path| Err(std::io::Error::new(std::io::ErrorKind::NotFound, "missing")),
+            )
+            .unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+            let state: serde_yaml::Value = serde_yaml::from_str(
+                &std::fs::read_to_string(dir.0.join("updates").join("state.yml")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(state["phase"].as_str(), Some("rolled_back"));
+            assert_eq!(
+                super::super::failed_upgrade(&dir.0).as_deref(),
+                Some("0.2.0")
+            );
+            assert_eq!(
+                std::fs::read_to_string(dir.0.join("updates").join("live")).unwrap(),
+                "0.1.0\n"
+            );
+            assert!(!dir
+                .0
+                .join("versions")
+                .join("0.1.0")
+                .join(version_binary())
+                .exists());
         }
 
         #[test]
@@ -3202,6 +4549,53 @@ mod tests {
             )
             .unwrap();
             assert_eq!(state["phase"].as_str(), Some("current"));
+        }
+
+        #[test]
+        fn a_missing_previous_tree_finalizes_without_a_backup() {
+            let dir = TempDir::new();
+            write_phase(&dir.0, "trying", "0.1.0", "0.2.0");
+            let new = dir.0.join("versions").join("0.2.0");
+            std::fs::create_dir_all(&new).unwrap();
+            std::fs::write(new.join("marker"), b"new-tree").unwrap();
+            settle(&dir.0, day()).unwrap();
+            assert!(!dir.0.join("versions").join("0.1.0").exists());
+            assert!(!dir.0.join("backup").exists());
+            assert_eq!(std::fs::read(new.join("marker")).unwrap(), b"new-tree");
+            let state: serde_yaml::Value = serde_yaml::from_str(
+                &std::fs::read_to_string(dir.0.join("updates").join("state.yml")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(state["phase"].as_str(), Some("current"));
+            assert_eq!(state["from"].as_str(), Some("0.1.0"));
+        }
+
+        #[test]
+        fn an_empty_previous_tree_backs_up_the_live_version() {
+            let dir = TempDir::new();
+            write_phase(&dir.0, "trying", "0.1.0", "0.2.0");
+            std::fs::create_dir_all(dir.0.join("versions").join("0.1.0")).unwrap();
+            std::fs::write(dir.0.join("updates").join("live"), "0.0.9\n").unwrap();
+            let current = dir.0.join("versions").join("0.0.9");
+            let new = dir.0.join("versions").join("0.2.0");
+            std::fs::create_dir_all(&current).unwrap();
+            std::fs::create_dir_all(&new).unwrap();
+            std::fs::write(current.join("marker"), b"current-tree").unwrap();
+            std::fs::write(new.join("marker"), b"new-tree").unwrap();
+            settle(&dir.0, day()).unwrap();
+            assert!(!current.exists());
+            assert!(dir.0.join("versions").join("0.1.0").is_dir());
+            assert_eq!(
+                std::fs::read(dir.0.join("backup").join("0.0.9-20261006").join("marker")).unwrap(),
+                b"current-tree"
+            );
+            assert_eq!(std::fs::read(new.join("marker")).unwrap(), b"new-tree");
+            let state: serde_yaml::Value = serde_yaml::from_str(
+                &std::fs::read_to_string(dir.0.join("updates").join("state.yml")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(state["phase"].as_str(), Some("current"));
+            assert_eq!(state["from"].as_str(), Some("0.0.9"));
         }
 
         #[test]

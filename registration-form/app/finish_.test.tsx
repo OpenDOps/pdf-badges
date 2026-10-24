@@ -4,7 +4,7 @@ import { createRoutesStub } from "react-router";
 import type { FormDocuments } from "./form/client";
 import { foldForm } from "./form/fold";
 import { OUTBOX_KEY, readOutbox } from "./form/outbox";
-import Register, { loader } from "./routes/register";
+import Register, { clientLoader as loader } from "./routes/register";
 
 const DESK = "Получите Ваш бейдж на стойке выдачи бейджей.";
 

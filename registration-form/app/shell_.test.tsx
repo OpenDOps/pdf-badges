@@ -2,7 +2,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 
 import { foldForm } from "./form/fold";
 import { setUnauthorized } from "./form/client";
-import { loader as operatorLoader } from "./routes/operator";
+import { clientLoader as operatorLoader } from "./routes/operator";
 import { renderAt } from "./shell/test-router";
 import { resetScreenLoads } from "./shell/screens";
 
@@ -76,7 +76,7 @@ test("shell_missing_cookie_opens_the_key", async () => {
   for (const path of operatorPaths) {
     const { router, view } = renderAt(path);
     const mounted = render(view);
-    expect(await screen.findByRole("heading", { name: "Ключ" })).toBeInTheDocument();
+    expect(await screen.findByPlaceholderText("Ключ")).toBeInTheDocument();
     await waitFor(() => expect(router.state.location.pathname).toBe("/key"));
     mounted.unmount();
   }
@@ -121,7 +121,7 @@ test("shell_later_401_returns_to_the_key", async () => {
   stubFetch(200, 401);
   const { router, view } = renderAt("/form");
   render(view);
-  expect(await screen.findByRole("heading", { name: "Ключ" })).toBeInTheDocument();
+  expect(await screen.findByPlaceholderText("Ключ")).toBeInTheDocument();
   await waitFor(() => expect(router.state.location.pathname).toBe("/key"));
 });
 

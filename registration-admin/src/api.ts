@@ -128,6 +128,62 @@ export async function postSession(): Promise<boolean> {
   return body.ok === true;
 }
 
+export type UpdateStatus = {
+  version: string | null;
+  newer: string | null;
+  supervised: boolean;
+  phase: string;
+  received: number;
+  total: number | null;
+  /** Version from `updates/state.yml` when the last upgrade was rolled back. */
+  failed: string | null;
+};
+
+export async function fetchUpdate(): Promise<UpdateStatus | null> {
+  const response = await fetch("/api/update", { credentials: "same-origin" });
+  if (!response.ok) {
+    return null;
+  }
+  const body = (await response.json()) as {
+    ok?: boolean;
+    data?: {
+      version?: string | null;
+      newer?: string | null;
+      supervised?: boolean;
+      phase?: string;
+      received?: number;
+      total?: number | null;
+      failed?: string | null;
+    };
+  };
+  if (!body.ok || !body.data) {
+    return null;
+  }
+  return {
+    version: typeof body.data.version === "string" ? body.data.version : null,
+    newer: typeof body.data.newer === "string" && body.data.newer !== "" ? body.data.newer : null,
+    supervised: body.data.supervised !== false,
+    phase: body.data.phase ?? "idle",
+    received: typeof body.data.received === "number" ? body.data.received : 0,
+    total: typeof body.data.total === "number" ? body.data.total : null,
+    failed: typeof body.data.failed === "string" && body.data.failed !== "" ? body.data.failed : null,
+  };
+}
+
+export async function postUpdate(): Promise<{ ok: boolean; code: string }> {
+  const response = await fetch("/api/update", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    credentials: "same-origin",
+    body: "{}",
+  });
+  const body = (await response.json()) as { ok?: boolean; error?: { code?: string } };
+  if (!response.ok || body.ok === false) {
+    return { ok: false, code: body.error?.code ?? "unknown_error" };
+  }
+  return { ok: true, code: "" };
+}
+
 export async function fetchKeys(): Promise<unknown[]> {
   const response = await fetch("/api/keys", { credentials: "same-origin" });
   const body = (await response.json()) as { data?: unknown[] };

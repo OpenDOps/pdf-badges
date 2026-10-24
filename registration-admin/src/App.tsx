@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 import {
   fetchBinding,
   fetchEvents,
+  fetchUpdate,
   postLogin,
   postSelect,
   type Event,
@@ -21,16 +22,16 @@ export default function App() {
   }, []);
 
   const openEvents = useCallback(() => {
-    window.history.pushState({}, "", "/events");
-    setPath("/events");
+    window.history.pushState({}, "", "/admin/events");
+    setPath("/admin/events");
   }, []);
 
   const openLogin = useCallback(() => {
-    window.history.pushState({}, "", "/");
-    setPath("/");
+    window.history.pushState({}, "", "/admin");
+    setPath("/admin");
   }, []);
 
-  if (path === "/events") {
+  if (path === "/admin/events") {
     return <EventsRoute onLeave={openLogin} />;
   }
 
@@ -62,6 +63,9 @@ function EventsRoute({ onLeave }: { onLeave: () => void }) {
   const [events, setEvents] = useState<Event[]>([]);
   const [current, setCurrent] = useState<Event | null>(null);
   const [tokenStored, setTokenStored] = useState(false);
+  const [newer, setNewer] = useState<string | null>(null);
+  const [failed, setFailed] = useState<string | null>(null);
+  const [supervised, setSupervised] = useState(true);
   const [error, setError] = useState("");
 
   useEffect(() => {
@@ -88,6 +92,12 @@ function EventsRoute({ onLeave }: { onLeave: () => void }) {
         setEvents(list.events);
         setCurrent(list.current);
         setTokenStored(binding.tokenStored);
+        const update = await fetchUpdate();
+        if (!cancel && update) {
+          setNewer(update.newer);
+          setFailed(update.failed);
+          setSupervised(update.supervised);
+        }
         setReady(true);
       } catch {
         if (!cancel) {
@@ -120,6 +130,9 @@ function EventsRoute({ onLeave }: { onLeave: () => void }) {
       events={events}
       current={current}
       tokenStored={tokenStored}
+      newer={newer}
+      failed={failed}
+      supervised={supervised}
       onSelect={async (id, name) => {
         const result = await postSelect(id, name);
         if (!result.ok) {

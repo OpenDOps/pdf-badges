@@ -8,7 +8,9 @@ use ttf_parser::Face;
 use crate::struct_to_pdf::fonts::{self, LoadedFont};
 use crate::struct_to_pdf::geometry::{pdf_point, to_points};
 use crate::struct_to_pdf::markup::{self, LineMetrics, MarkupItem, StyledRun};
-use crate::struct_to_pdf::{HorizontalAlign, Page, RenderError, TextBox, Units, VerticalAlign};
+use crate::struct_to_pdf::{
+    HorizontalAlign, Page, RenderError, Rgb, TextBox, Units, VerticalAlign,
+};
 
 pub struct PendingFont {
     pub resource_name: String,
@@ -29,6 +31,7 @@ struct Word {
     leading: f64,
     line_height: f64,
     underline: bool,
+    color: Rgb,
     width_pt: f32,
     space_pt: f32,
 }
@@ -38,6 +41,7 @@ struct Segment {
     font_key: String,
     font_size: f64,
     underline: bool,
+    color: Rgb,
     width_pt: f32,
 }
 
@@ -77,7 +81,7 @@ pub fn draw_text(
     let units = page.page_size.units;
     let (content_width, _) = layout_size(text);
     let lines = if text.auto_scale {
-        fit_font_sizes(page, text, &mut parsed, &advances)?
+        fit_font_sizes(page, text, &mut parsed, &fonts, &advances)?
     } else {
         layout(
             &parsed.items,
@@ -138,13 +142,14 @@ pub fn authored_text_bounds(
         units,
         &text.id,
     )?;
-    Ok(bounds_of(&lines, units))
+    Ok(bounds_of_lines(&fonts, &lines, units))
 }
 
 fn fit_font_sizes(
     page: &Page,
     text: &TextBox,
     parsed: &mut markup::Markup,
+    fonts: &BTreeMap<String, UsedFont>,
     advances: &BTreeMap<String, Advances>,
 ) -> Result<Vec<LaidLine>, RenderError> {
     let units = page.page_size.units;
@@ -169,10 +174,9 @@ fn fit_font_sizes(
     }
     // A taller run can sit in the middle of a line, so the first height misses it.
     // Shrinking can move that run to the end of a line and make the block taller.
-    // Scale again from the new bounds while the line breaks keep changing.
-    let mut previous = line_texts(&lines);
+    // Keep scaling from the new bounds until the painted block fits.
     for _ in 0..32 {
-        let scale = fit_scale(&lines, content_width, content_height, units);
+        let scale = fit_scale(fonts, &lines, content_width, content_height, units);
         if scale >= 1.0 {
             break;
         }
@@ -185,28 +189,15 @@ fn fit_font_sizes(
             units,
             &text.id,
         )?;
-        let next = line_texts(&lines);
-        if next == previous {
-            break;
-        }
-        previous = next;
     }
     Ok(lines)
 }
 
-fn line_texts(lines: &[LaidLine]) -> Vec<String> {
-    lines
-        .iter()
-        .map(|line| {
-            line.segments
-                .iter()
-                .map(|segment| segment.text.as_str())
-                .collect::<String>()
-        })
-        .collect()
-}
-
-fn bounds_of(lines: &[LaidLine], units: Units) -> (f64, f64) {
+fn bounds_of_lines(
+    fonts: &BTreeMap<String, UsedFont>,
+    lines: &[LaidLine],
+    units: Units,
+) -> (f64, f64) {
     if lines.is_empty() {
         return (0.0, 0.0);
     }
@@ -215,15 +206,21 @@ fn bounds_of(lines: &[LaidLine], units: Units) -> (f64, f64) {
         .map(|line| line.width_pt)
         .fold(0.0f32, f32::max);
     let width = f64::from(width_pt) / f64::from(to_points(1.0, units));
-    (width, block_height_of(lines))
+    (width, layout_block_height(fonts, lines))
 }
 
-fn fit_scale(lines: &[LaidLine], content_width: f64, content_height: f64, units: Units) -> f64 {
+fn fit_scale(
+    fonts: &BTreeMap<String, UsedFont>,
+    lines: &[LaidLine],
+    content_width: f64,
+    content_height: f64,
+    units: Units,
+) -> f64 {
     let text_width_pt = lines
         .iter()
         .map(|line| line.width_pt)
         .fold(0.0f32, f32::max);
-    let text_height_pt = to_points(block_height_of(lines), units);
+    let text_height_pt = to_points(layout_block_height(fonts, lines), units);
     let content_width_pt = to_points(content_width, units);
     let content_height_pt = to_points(content_height, units);
     if text_width_pt <= content_width_pt + 0.01 && text_height_pt <= content_height_pt + 0.01 {
@@ -423,6 +420,7 @@ fn word_from(
         leading: run.leading,
         line_height: run.line_height,
         underline: run.underline,
+        color: run.color,
     })
 }
 
@@ -466,6 +464,7 @@ fn segments_of(words: &[Word]) -> (Vec<Segment>, f32) {
             if last.font_key == word.font_key
                 && last.font_size == word.font_size
                 && last.underline == word.underline
+                && last.color == word.color
             {
                 last.text.push(' ');
                 last.text.push_str(&word.text);
@@ -481,6 +480,7 @@ fn segments_of(words: &[Word]) -> (Vec<Segment>, f32) {
             font_key: word.font_key.clone(),
             font_size: word.font_size,
             underline: word.underline,
+            color: word.color,
             width_pt: word.width_pt,
         });
         pending_space = word.space_pt;
@@ -536,9 +536,9 @@ fn paint_lines(
     let (content_width, content_height) = layout_size(text);
     let content_x = 0.0;
     let content_y = 0.0;
-    let block_height = block_height_of(lines);
     let (first_key, first_size) = line_face(&lines[0]);
     let first_ascent = ascent(fonts, first_key, first_size);
+    let block_height = layout_block_height(fonts, lines);
     let block_top = match text.vertical {
         VerticalAlign::Top => content_y,
         VerticalAlign::Middle => content_y + (content_height - block_height) / 2.0,
@@ -592,6 +592,23 @@ fn paint_lines(
                 .get(&segment.font_key)
                 .and_then(|used| used.resource_name.clone())
                 .expect("font resource");
+            let (red, green, blue) = segment.color.components();
+            operations.push(Operation::new(
+                "rg",
+                vec![
+                    Object::Real(red),
+                    Object::Real(green),
+                    Object::Real(blue),
+                ],
+            ));
+            operations.push(Operation::new(
+                "RG",
+                vec![
+                    Object::Real(red),
+                    Object::Real(green),
+                    Object::Real(blue),
+                ],
+            ));
             operations.push(Operation::new("BT", vec![]));
             operations.push(Operation::new(
                 "Tf",
@@ -728,6 +745,26 @@ fn block_height_of(lines: &[LaidLine]) -> f64 {
         height += line.line_height + line.leading;
     }
     height
+}
+
+/// Height from the first baseline's ascent through the last baseline's descent.
+/// `line_height` alone can be shorter than the ink when the first and last faces
+/// differ, so layout uses the max of that ink span and the line-box sum.
+fn painted_block_height(fonts: &BTreeMap<String, UsedFont>, lines: &[LaidLine]) -> f64 {
+    if lines.is_empty() {
+        return 0.0;
+    }
+    let (first_key, first_size) = line_face(&lines[0]);
+    let (last_key, last_size) = line_face(lines.last().expect("line"));
+    let steps: f64 = lines[..lines.len() - 1]
+        .iter()
+        .map(|line| line.line_height + line.leading)
+        .sum();
+    ascent(fonts, first_key, first_size) + steps + descent(fonts, last_key, last_size)
+}
+
+fn layout_block_height(fonts: &BTreeMap<String, UsedFont>, lines: &[LaidLine]) -> f64 {
+    block_height_of(lines).max(painted_block_height(fonts, lines))
 }
 
 fn ascent(fonts: &BTreeMap<String, UsedFont>, key: &str, font_size: f64) -> f64 {

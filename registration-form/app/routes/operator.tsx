@@ -1,11 +1,12 @@
 import { useEffect } from "react";
-import { Outlet, redirect, useLocation, useNavigate } from "react-router";
+import { Outlet, redirect, useLoaderData, useLocation, useNavigate } from "react-router";
 
 import { FormClient, isUnauthorized, setUnauthorized } from "../form/client";
 import { DeskHeader, DeskNav, isDeskNav } from "../shell/header";
 import { NetworkCorner } from "../shell/network";
+import { ServerVersion } from "../shell/version";
 
-export async function loader({ request }: { request: Request }) {
+export async function clientLoader({ request }: { request: Request }) {
   try {
     const sync = await FormClient.fromRequest(request).sync();
     return {
@@ -22,6 +23,7 @@ export async function loader({ request }: { request: Request }) {
 }
 
 export default function OperatorLayout() {
+  const { admin } = useLoaderData() as { admin: boolean };
   const navigate = useNavigate();
   const { pathname } = useLocation();
   setUnauthorized(() => {
@@ -33,7 +35,8 @@ export default function OperatorLayout() {
   const desk = isDeskNav(pathname);
   return (
     <>
-      {desk ? <DeskNav /> : <NetworkCorner />}
+      {desk ? <DeskNav /> : <ServerVersion admin={admin} />}
+      {desk ? null : <NetworkCorner />}
       {desk ? null : <DeskHeader />}
       <Outlet />
     </>

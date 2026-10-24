@@ -1131,9 +1131,12 @@ mod serve_admin {
         let stand = StandIn::start(false).await;
         let scratch = Scratch::new();
         let dist = scratch.0.join("dist");
+        let form = scratch.0.join("form");
         std::fs::create_dir_all(dist.join("assets")).unwrap();
+        std::fs::create_dir_all(&form).unwrap();
         std::fs::write(dist.join("index.html"), INDEX.as_bytes()).unwrap();
         std::fs::write(dist.join("assets/app.js"), b"console.log(1)").unwrap();
+        std::fs::write(form.join("index.html"), b"<!doctype html><h1>operator-key</h1>").unwrap();
         let file = CredentialFile::new(scratch.0.join("credentials.yml"));
         file.update(|credentials| {
             credentials.set_device_id("device-1")?;
@@ -1143,6 +1146,7 @@ mod serve_admin {
         let remote = Remote::new(&stand.base).unwrap();
         let (mut app, worker) = App::new();
         app.dist = dist;
+        app.form = form;
         app.operator = OperatorState::new(file, remote).with_link(std::sync::Arc::clone(&app.link));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -1177,9 +1181,29 @@ mod serve_admin {
             .await
             .unwrap();
         assert_eq!(root.status(), reqwest::StatusCode::OK);
-        assert_eq!(root.text().await.unwrap(), INDEX);
+        assert_eq!(
+            root.text().await.unwrap(),
+            "<!doctype html><h1>operator-key</h1>"
+        );
+        let key = client
+            .get(format!("http://{}/key", running.addr))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(key.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            key.text().await.unwrap(),
+            "<!doctype html><h1>operator-key</h1>"
+        );
+        let admin = client
+            .get(format!("http://{}/admin", running.addr))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(admin.status(), reqwest::StatusCode::OK);
+        assert_eq!(admin.text().await.unwrap(), INDEX);
         let events = client
-            .get(format!("http://{}/events", running.addr))
+            .get(format!("http://{}/admin/events", running.addr))
             .send()
             .await
             .unwrap();

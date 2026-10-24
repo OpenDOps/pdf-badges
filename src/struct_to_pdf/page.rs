@@ -38,12 +38,54 @@ pub struct Bleeds {
     pub left: f64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Rgb {
+    pub red: u8,
+    pub green: u8,
+    pub blue: u8,
+}
+
+impl Rgb {
+    pub const BLACK: Rgb = Rgb {
+        red: 0,
+        green: 0,
+        blue: 0,
+    };
+    pub const WHITE: Rgb = Rgb {
+        red: 255,
+        green: 255,
+        blue: 255,
+    };
+
+    pub fn components(self) -> (f32, f32, f32) {
+        (
+            f32::from(self.red) / 255.0,
+            f32::from(self.green) / 255.0,
+            f32::from(self.blue) / 255.0,
+        )
+    }
+
+    pub fn from_hex(text: &str) -> Result<Rgb, String> {
+        let hex = text.strip_prefix('#').unwrap_or(text);
+        if hex.len() != 6 || !hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
+            return Err(format!("color must be #RRGGBB, got {text}"));
+        }
+        Ok(Rgb {
+            red: u8::from_str_radix(&hex[0..2], 16).expect("hex"),
+            green: u8::from_str_radix(&hex[2..4], 16).expect("hex"),
+            blue: u8::from_str_radix(&hex[4..6], 16).expect("hex"),
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct PageSize {
     pub width: f64,
     pub height: f64,
     pub units: Units,
     pub bleeds: Bleeds,
+    /// Page fill drawn under every box. Missing means white.
+    pub background: Option<Rgb>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -121,6 +163,8 @@ pub struct TextBody {
     pub leading: f64,
     pub line_height: f64,
     pub font_style: FontStyle,
+    /// Ink color for the box. Missing means black.
+    pub color: Option<Rgb>,
     pub preentered: Option<String>,
     pub content: Option<String>,
 }
@@ -275,11 +319,16 @@ fn parse_page_size(value: Option<&Value>) -> Result<PageSize, RenderError> {
         }
     };
     let bleeds = parse_bleeds(obj.get("bleeds"))?;
+    let background = match obj.get("background") {
+        None => None,
+        Some(value) => Some(parse_rgb(value, "page_size.background")?),
+    };
     Ok(PageSize {
         width,
         height,
         units,
         bleeds,
+        background,
     })
 }
 
@@ -791,14 +840,32 @@ fn parse_text(obj: &Map<String, Value>, id: &str) -> Result<TextBody, RenderErro
             message: "line_height must be finite".to_string(),
         });
     }
+    let color = match obj.get("color") {
+        None => None,
+        Some(value) => Some(parse_rgb(value, &format!("id={id} color"))?),
+    };
     Ok(TextBody {
         font,
         font_size,
         leading,
         line_height,
         font_style: parse_font_style(obj.get("font_style")),
+        color,
         preentered: optional_text(obj.get("preentered")),
         content: optional_text(obj.get("content")),
+    })
+}
+
+fn parse_rgb(value: &Value, context: &str) -> Result<Rgb, RenderError> {
+    let Some(text) = value.as_str() else {
+        return Err(RenderError {
+            context: context.to_string(),
+            message: "color must be a #RRGGBB string".to_string(),
+        });
+    };
+    Rgb::from_hex(text).map_err(|message| RenderError {
+        context: context.to_string(),
+        message,
     })
 }
 

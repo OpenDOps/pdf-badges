@@ -1,5 +1,6 @@
 [workspace]
 members = [".", "modules/ticket-render"]
+exclude = ["desk"]
 
 [package]
 name = "rust-reg"

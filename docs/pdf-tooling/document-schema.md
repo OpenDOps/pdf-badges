@@ -266,6 +266,7 @@ Tags may nest. Unknown tags are rejected by the writer (it does not strip them s
 | `font-weight` | `normal` or `bold` |
 | `font-style` | `normal` or `italic` |
 | `text-decoration` | `none` or `underline` |
+| `color` | `#RRGGBB` |
 
 The v0 card string is one box with two faces and a bold company line:
 
@@ -325,6 +326,7 @@ span style properties (semicolon-separated; nothing else is valid)
   font-weight       normal | bold
   font-style        normal | italic
   text-decoration   none | underline
+  color             #RRGGBB
 
 Text
   {{name}} stays those characters. It is not substituted.

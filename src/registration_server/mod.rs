@@ -66,8 +66,10 @@ pub struct App {
     pub prints: PrintQueue,
     pub link: Arc<Link>,
     pub operator: OperatorState,
-    /// Built admin files. `/` and `/events` serve `index.html` from here.
+    /// Built admin files. `/admin` and `/admin/events` serve `index.html` from here.
     pub dist: PathBuf,
+    /// Built operator screens. `/` and `/key` serve `index.html` from here.
+    pub form: PathBuf,
     /// Event opened from the credential file, if one is logged in.
     pub current: Arc<Mutex<CurrentEvent>>,
     /// Set while a sync wake is inside the probe or the queue.
@@ -82,6 +84,9 @@ pub struct App {
     pub(crate) prefix: PathBuf,
     /// Set when `POST /api/update` has staged a tree. The test reads this. The process exits after the response.
     pub(crate) exit_requested: Arc<AtomicBool>,
+    /// Tests allow an update without `rust-reg-run` as the parent. Production always checks the live parent.
+    #[cfg(test)]
+    pub(crate) supervised: bool,
 }
 
 impl App {
@@ -120,6 +125,7 @@ impl App {
                 link,
                 operator,
                 dist: PathBuf::from("registration-admin/dist"),
+                form: PathBuf::from("registration-form/build/client"),
                 current: Arc::new(Mutex::new(CurrentEvent::new("."))),
                 sync_running: Arc::new(AtomicBool::new(false)),
                 sync_notify: Arc::new(Notify::new()),
@@ -127,6 +133,8 @@ impl App {
                 updates: Arc::new(update::ReleaseCheck::new()),
                 prefix: update::default_prefix(),
                 exit_requested: Arc::new(AtomicBool::new(false)),
+                #[cfg(test)]
+                supervised: true,
             },
             worker,
         )
@@ -144,6 +152,8 @@ pub struct Config {
     pub remote_base: String,
     /// `registration-admin/dist` from `npm run build`.
     pub dist: PathBuf,
+    /// `registration-form/build/client` from `npm run build`.
+    pub form: PathBuf,
     /// Credential document. A missing file loads as an empty document.
     pub credentials_path: PathBuf,
     /// Debug lines for HTTP, login, the event list, select, sync, and print.
@@ -200,6 +210,11 @@ pub fn run(config: Config) -> Result<(), Box<dyn std::error::Error + Send + Sync
     if config.debug {
         init_debug_log();
     }
+    if update::parent_is_supervisor() {
+        eprintln!("registration-server parent rust-reg-run");
+    } else {
+        eprintln!("registration-server no parent wrapper; update disabled");
+    }
     eprintln!("registration-server remote {}", config.remote_base);
     if config.debug {
         log::debug!(
@@ -247,7 +262,12 @@ pub fn run(config: Config) -> Result<(), Box<dyn std::error::Error + Send + Sync
     app.operator = OperatorState::new(credentials, remote)
         .with_link(Arc::clone(&app.link))
         .with_current(Arc::clone(&current));
+    app.operator.load_persisted_session();
+    if let Some(prefix) = update::install_prefix(&config.credentials_path) {
+        app.prefix = prefix;
+    }
     app.dist = config.dist.clone();
+    app.form = config.form.clone();
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let signal_tx = shutdown_tx.clone();
     let _close_event = CloseEvent(Arc::clone(&current));

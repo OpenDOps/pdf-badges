@@ -86,6 +86,7 @@ pub fn safe_public_file(root: &Path, url_path: &str) -> Option<PathBuf> {
     Some(file)
 }
 
+#[cfg(test)]
 pub fn admin_router(root: PathBuf) -> Router {
     Router::new().fallback(static_file).with_state(root)
 }
@@ -146,24 +147,31 @@ fn file_meta(path: &Path) -> Option<FileMeta> {
     })
 }
 
+#[cfg(test)]
 async fn static_file(State(root): State<PathBuf>, request: Request) -> Response {
     serve_public(&root, request).await
 }
 
-/// `GET` or `HEAD` for one file under `root`, with the same validators as [`admin_router`].
+/// `GET` or `HEAD` for one file under `root`.
 pub(crate) async fn serve_public(root: &Path, request: Request) -> Response {
+    let path = request.uri().path().to_string();
+    serve_mapped(root, &path, request).await
+}
+
+/// One file under `root`, addressed by `url_path` rather than the request URI.
+pub(crate) async fn serve_mapped(root: &Path, url_path: &str, request: Request) -> Response {
     let method = request.method().clone();
     if method != Method::GET && method != Method::HEAD {
         return StatusCode::METHOD_NOT_ALLOWED.into_response();
     }
-    let Some(path) = safe_public_file(root, request.uri().path()) else {
+    let Some(path) = safe_public_file(root, url_path) else {
         return StatusCode::NOT_FOUND.into_response();
     };
     let headers = request.headers().clone();
     serve_file(&path, method, &headers).await
 }
 
-/// `index.html` for `/` and `/events`, with the same validators as any other file.
+/// `index.html`, with the same validators as any other file.
 pub(crate) async fn serve_index(root: &Path, request: Request) -> Response {
     let method = request.method().clone();
     if method != Method::GET && method != Method::HEAD {
@@ -280,9 +288,94 @@ impl OperatorState {
     pub fn credential_file(&self) -> &CredentialFile {
         &self.credentials
     }
+
+    /// The admin login cookie still names a live session.
+    pub fn has_live_session(&self, headers: &HeaderMap) -> bool {
+        live_session(self, headers).is_some()
+    }
+
+    /// Store this login and write it beside the credential file.
+    pub fn keep_session(&self, id: String, session: OperatorSession) {
+        {
+            let mut sessions = self.sessions.lock().unwrap_or_else(|err| err.into_inner());
+            sessions.clear();
+            sessions.insert(
+                id.clone(),
+                OperatorLease {
+                    session: session.clone(),
+                    expires_at: Instant::now() + self.session_ttl,
+                },
+            );
+        }
+        self.write_session_file(&id, &session);
+    }
+
+    /// Read the session written by the previous process and accept that cookie again.
+    pub fn load_persisted_session(&self) {
+        let Ok(text) = std::fs::read_to_string(self.session_file()) else {
+            return;
+        };
+        let Ok(stored) = serde_yaml::from_str::<StoredSession>(&text) else {
+            return;
+        };
+        let Ok(session) =
+            OperatorSession::resume(&stored.base, &stored.device_id, &stored.session_id)
+        else {
+            return;
+        };
+        let mut sessions = self.sessions.lock().unwrap_or_else(|err| err.into_inner());
+        sessions.insert(
+            stored.id,
+            OperatorLease {
+                session,
+                expires_at: Instant::now() + self.session_ttl,
+            },
+        );
+    }
+
+    #[cfg(test)]
+    pub fn holds_session(&self, id: &str) -> bool {
+        self.sessions
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .contains_key(id)
+    }
+
+    fn session_file(&self) -> std::path::PathBuf {
+        self.credentials
+            .path()
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join("operator-session.yml")
+    }
+
+    fn write_session_file(&self, id: &str, session: &OperatorSession) {
+        let stored = StoredSession {
+            id: id.to_string(),
+            device_id: session.device_id().to_string(),
+            base: session.remote_base().to_string(),
+            session_id: session.remote_session().to_string(),
+        };
+        let Ok(text) = serde_yaml::to_string(&stored) else {
+            return;
+        };
+        let _ = std::fs::write(self.session_file(), text);
+    }
+
+    fn forget_session_file(&self) {
+        let _ = std::fs::remove_file(self.session_file());
+    }
 }
 
-/// JSON routes for the admin page. Static files stay on [`admin_router`].
+#[derive(serde::Serialize, serde::Deserialize)]
+struct StoredSession {
+    id: String,
+    device_id: String,
+    base: String,
+    session_id: String,
+}
+
+/// JSON routes for the admin page.
 pub fn api_router(state: OperatorState) -> Router {
     Router::new()
         .route("/api/login", post(login))
@@ -357,17 +450,7 @@ async fn network(State(state): State<OperatorState>) -> Response {
 
 fn login_ok(state: &OperatorState, session: OperatorSession, timeout_secs: u64) -> Response {
     let id = uuid::Uuid::new_v4().to_string();
-    {
-        let mut sessions = state.sessions.lock().unwrap_or_else(|err| err.into_inner());
-        sessions.clear();
-        sessions.insert(
-            id.clone(),
-            OperatorLease {
-                session,
-                expires_at: Instant::now() + state.session_ttl,
-            },
-        );
-    }
+    state.keep_session(id.clone(), session);
     let cookie = Cookie::build((OPERATOR_COOKIE, id))
         .http_only(true)
         .same_site(SameSite::Lax)
@@ -790,6 +873,8 @@ fn live_session(state: &OperatorState, headers: &HeaderMap) -> Option<OperatorSe
     let lease = sessions.get(&id)?;
     if Instant::now() >= lease.expires_at {
         sessions.remove(&id);
+        drop(sessions);
+        state.forget_session_file();
         return None;
     }
     Some(lease.session.clone())
@@ -805,6 +890,8 @@ fn touch_session(state: &OperatorState, headers: &HeaderMap) -> bool {
     };
     if Instant::now() >= lease.expires_at {
         sessions.remove(&id);
+        drop(sessions);
+        state.forget_session_file();
         return false;
     }
     lease.expires_at = Instant::now() + state.session_ttl;
@@ -817,6 +904,8 @@ fn drop_session(state: &OperatorState, headers: &HeaderMap) {
     };
     let mut sessions = state.sessions.lock().unwrap_or_else(|err| err.into_inner());
     sessions.remove(&id);
+    drop(sessions);
+    state.forget_session_file();
 }
 
 fn current_event(file: &CredentialFile) -> serde_json::Value {
@@ -914,6 +1003,27 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn a_restart_keeps_the_operator_cookie() {
+        let dir = TempDir::new();
+        let path = dir.0.join("credentials.yml");
+        std::fs::write(&path, b"device_id: device-1\n").unwrap();
+        let state = OperatorState::new(
+            CredentialFile::new(&path),
+            Remote::new("http://127.0.0.1:9").unwrap(),
+        );
+        let session =
+            OperatorSession::resume("http://127.0.0.1:9/", "device-1", "jsess-1").unwrap();
+        state.keep_session("cookie-1".into(), session);
+        let again = OperatorState::new(
+            CredentialFile::new(&path),
+            Remote::new("http://127.0.0.1:9").unwrap(),
+        );
+        assert!(!again.holds_session("cookie-1"));
+        again.load_persisted_session();
+        assert!(again.holds_session("cookie-1"));
     }
 
     fn meta_of(path: &Path) -> FileMeta {

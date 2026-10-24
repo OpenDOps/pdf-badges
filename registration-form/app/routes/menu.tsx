@@ -1,8 +1,7 @@
-import type { MouseEvent, PointerEvent, ReactNode } from "react";
+import { type MouseEvent, type PointerEvent, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
-import { useLoaderData, useMatches } from "react-router";
+import { useMatches } from "react-router";
 
-import { FormClient } from "../form/client";
 import { ScreenFrame, ScreenLink } from "../shell/header";
 
 function fieldOf(matches: { data: unknown }[], name: string): unknown {
@@ -35,9 +34,9 @@ function qrSrc(origin: string): string {
 }
 
 const tile =
-  "h-36 overflow-hidden rounded-lg border border-slate-300 bg-white shadow-sm [--spot-x:50%] [--spot-y:50%] hover:bg-[radial-gradient(circle_at_var(--spot-x)_var(--spot-y),#7dd3fc,#ffffff_62%)]";
+  "h-24 overflow-hidden rounded-lg border border-slate-300 bg-white shadow-sm [--spot-x:50%] [--spot-y:50%] hover:bg-[radial-gradient(circle_at_var(--spot-x)_var(--spot-y),#7dd3fc,#ffffff_62%)]";
 const face =
-  "flex h-full w-full items-center justify-center bg-transparent px-4 text-center text-xl font-semibold text-gray-900";
+  "flex h-full w-full items-center justify-center bg-transparent px-3 text-center text-lg font-semibold text-gray-900";
 
 function trackSpot(event: PointerEvent<HTMLElement> | MouseEvent<HTMLElement>) {
   const bounds = event.currentTarget.getBoundingClientRect();
@@ -66,30 +65,20 @@ function MenuTile({ to, disabled, children }: { to: string; disabled?: boolean; 
   );
 }
 
-export async function loader({ request }: { request: Request }) {
-  try {
-    return await FormClient.fromRequest(request).update();
-  } catch {
-    return { version: null, newer: null };
-  }
-}
-
 export default function Menu() {
   const { t } = useTranslation();
-  const { newer } = useLoaderData<typeof loader>();
   const matches = useMatches();
   const waiting = numberOf(matches, "waiting");
   const admin = flagOf(matches, "admin");
   const addresses = addressesOf(matches);
   const origin = fieldOf(matches, "origin");
-  const offer = typeof newer === "string" && newer !== "" ? newer : null;
   return (
     <ScreenFrame
       screen="menu"
-      className="grid min-h-screen grid-rows-[1fr_auto] px-4 pb-8 pt-28 text-center"
+      className="box-border grid h-screen max-h-screen grid-rows-[auto_minmax(0,1fr)] overflow-hidden px-4 pb-3 pt-24 text-center"
     >
-      <div className="flex items-center justify-center">
-        <div className="grid w-full max-w-3xl grid-cols-2 gap-4">
+      <div className="flex items-center justify-center py-2">
+        <div className="grid w-full max-w-3xl grid-cols-2 gap-3">
           <MenuTile to="/form">{t("menu.operator")}</MenuTile>
           <MenuTile to="/visitors">{t("menu.print")}</MenuTile>
           {admin ? (
@@ -100,30 +89,24 @@ export default function Menu() {
           ) : null}
         </div>
       </div>
-      <div>
-        {offer ? (
+      <div className="flex min-h-0 flex-col items-center overflow-hidden">
+        <div className="shrink-0">
           <p>
-            <button
-              type="button"
-              className="rounded-lg border border-slate-300 bg-white px-6 py-3 text-xl font-semibold text-gray-900"
-              onClick={() => {
-                void new FormClient().confirmUpdate().catch(() => undefined);
-              }}
-            >
-              {t("menu.update")}
-            </button>{" "}
-            <span>{offer}</span>
+            {t("menu.waiting")} <span data-count="waiting">{waiting}</span>
           </p>
-        ) : null}
-        <p>
-          {t("menu.waiting")} <span data-count="waiting">{waiting}</span>
-        </p>
-        {addresses.map((address) => (
-          <p key={address}>
-            {t("menu.address")} <span data-address={address}>{address}</span>
-          </p>
-        ))}
-        <img className="mx-auto" src={qrSrc(typeof origin === "string" ? origin : "")} alt={t("menu.qr")} />
+          {addresses.map((address) => (
+            <p key={address}>
+              {t("menu.address")} <span data-address={address}>{address}</span>
+            </p>
+          ))}
+        </div>
+        <div className="flex min-h-0 w-full flex-1 items-center justify-center">
+          <img
+            className="max-h-full max-w-full object-contain"
+            src={qrSrc(typeof origin === "string" ? origin : "")}
+            alt={t("menu.qr")}
+          />
+        </div>
       </div>
     </ScreenFrame>
   );

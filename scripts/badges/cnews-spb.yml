@@ -1,0 +1,56 @@
+# CNews SPB badge. One auto_scale box: orange company, then white surname/name.
+# 90mm x 130mm with 3mm bleeds. Tektur from Google Fonts (OFL).
+page_size:
+  width: 90
+  height: 130
+  units: mm
+  bleeds:
+    top: 3
+    right: 3
+    bottom: 3
+    left: 3
+resources:
+  images: {}
+  fonts:
+    tektur:
+      name: tektur
+      font_family: Tektur
+      weight: normal
+      italic: false
+      embedded: true
+      source_path: fonts/Tektur-Regular.ttf
+    tektur-medium:
+      name: tektur-medium
+      font_family: Tektur
+      weight: 500
+      italic: false
+      embedded: true
+      source_path: fonts/Tektur-Medium.ttf
+contents:
+  - id: badge
+    posX: 13
+    posY: 49.5
+    width: 64
+    height: 37.5
+    template: true
+    auto_scale: true
+    alignment:
+      horizontal: center
+      vertical: middle
+    padding:
+      top: 0
+      right: 0
+      bottom: 0
+      left: 0
+    text:
+      font: tektur
+      font_size: 8.466667
+      leading: 0
+      line_height: 5
+      color: "#FF6A00"
+      font_style:
+        weight: normal
+        italic: false
+        underline: false
+      preentered: '<span font="tektur" line-height="8.466667" style="font-size: 8.466667; color: #FF6A00">{{company}}<br></span><br><span font="tektur-medium" line-height="9.172222" style="font-size: 9.172222; color: #FFFFFF">{{surname}}<br>{{name}}</span>'
+      content: null

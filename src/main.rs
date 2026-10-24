@@ -138,6 +138,10 @@ struct RegistrationServerArgs {
     #[arg(long, default_value = "registration-admin/dist")]
     dist: PathBuf,
 
+    /// Built operator screens (`npm run build` in registration-form)
+    #[arg(long, default_value = "registration-form/build/client")]
+    form: PathBuf,
+
     /// Credential document
     #[arg(long, default_value = "credentials.yml")]
     credentials: PathBuf,
@@ -175,6 +179,7 @@ fn registration_server_cli() -> Result<(), Box<dyn std::error::Error>> {
         sync_in_flight: args.sync_in_flight,
         remote_base: remote_base.into(),
         dist: args.dist,
+        form: args.form,
         credentials_path: args.credentials,
         debug: args.debug,
         debug_ping: args.debug_ping,

@@ -4,7 +4,7 @@ import { createRoutesStub } from "react-router";
 import type { FormDocuments } from "./form/client";
 import { foldForm } from "./form/fold";
 import { readOutbox } from "./form/outbox";
-import Desk, { loader } from "./routes/desk";
+import Desk, { clientLoader as loader } from "./routes/desk";
 import { resetDeskCatalog } from "./shell/catalog";
 
 function isRecord(value: unknown): value is Record<string, unknown> {

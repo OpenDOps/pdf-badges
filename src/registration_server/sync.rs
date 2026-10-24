@@ -80,6 +80,7 @@ impl From<reqwest::Error> for DownloadError {
     }
 }
 
+#[cfg(test)]
 pub fn client(in_flight: usize) -> reqwest::Client {
     reqwest::Client::builder()
         .pool_max_idle_per_host(in_flight)

@@ -700,6 +700,7 @@ contents:
     approx(num(&tm.operands[3]), 0.0);
 }
 
+#[test]
 fn baseline_at_top_plus_ascent() {
     let (page, base_dir) = load_fixture("text-baseline.yaml");
     let bytes = render_page(&page, &base_dir).unwrap();
@@ -1419,6 +1420,37 @@ fn shrinks_tall_block() {
     approx(
         drawn_block_height(&page, &bytes, text.text.line_height * scale),
         to_points(content_height, Units::Mm),
+    );
+}
+
+#[test]
+fn shrinks_again_when_wrap_stays() {
+    // A wide first line forces a width scale. Forced breaks keep the same wrap
+    // after that, and the block is still too tall until another shrink.
+    let (page, base_dir) = load_fixture("text-scale-stable-wrap.yaml");
+    let text = text_box(&page);
+    let (unscaled_width, unscaled_height) = authored_text_bounds(&page, text, &base_dir).unwrap();
+    let (content_width, content_height) = content_size(&page);
+    assert!(
+        unscaled_width > content_width,
+        "line width {unscaled_width} already fits"
+    );
+    assert!(
+        unscaled_height > content_height,
+        "block height {unscaled_height} already fits"
+    );
+    let bytes = render_page(&page, &base_dir).unwrap();
+    let sizes = tf_sizes(&bytes);
+    let scale = sizes.iter().copied().fold(f32::INFINITY, f32::min)
+        / to_points(text.text.font_size, Units::Mm);
+    assert!(
+        scale < content_width as f32 / unscaled_width as f32 - 0.01,
+        "expected a second height shrink beyond the width scale; scale={scale}"
+    );
+    let height = drawn_block_height(&page, &bytes, text.text.line_height * f64::from(scale));
+    assert!(
+        height <= to_points(content_height, Units::Mm) + 0.5,
+        "drawn height {height} still exceeds the box"
     );
 }
 

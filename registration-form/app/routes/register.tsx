@@ -80,7 +80,7 @@ function useIdle(ms: number, onIdle: () => void) {
   }, [ms]);
 }
 
-export async function loader({ request }: { request: Request }) {
+export async function clientLoader({ request }: { request: Request }) {
   const form = await FormClient.fromRequest(request).load();
   const mobile = request.headers.get("Sec-CH-UA-Mobile");
   return {
@@ -88,10 +88,6 @@ export async function loader({ request }: { request: Request }) {
     form,
     idleMs: idleMs(request),
   };
-}
-
-export function headers() {
-  return { Vary: "Sec-CH-UA-Mobile" };
 }
 
 function splashUrl(locale: string, phone: boolean): string {
@@ -131,7 +127,7 @@ function Greeting({
 }
 
 export default function Register() {
-  const { layout, form, idleMs: idle } = useLoaderData<typeof loader>();
+  const { layout, form, idleMs: idle } = useLoaderData<typeof clientLoader>();
   const documents = form as FormDocuments;
   const { t } = useTranslation();
   const [state, setState] = useState(() => build(documents, "ru"));

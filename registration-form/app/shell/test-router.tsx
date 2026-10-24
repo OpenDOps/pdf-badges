@@ -1,8 +1,8 @@
 import { createMemoryRouter, redirect, RouterProvider, type RouteObject } from "react-router";
 
-import { loader as registerLoader } from "../routes/register";
+import { clientLoader as registerLoader } from "../routes/register";
 import Register from "../routes/register";
-import { loader as operatorLoader } from "../routes/operator";
+import { clientLoader as operatorLoader } from "../routes/operator";
 import OperatorLayout from "../routes/operator";
 import { loadScreen } from "./screens";
 

@@ -51,24 +51,27 @@ export function NetworkCorner({ pinned = true }: { pinned?: boolean }) {
     };
   }, []);
 
-  if (!corner) return null;
-  const remote =
-    corner.remote === "up" ? t("network.remoteUp") : corner.remote === "down" ? t("network.remoteDown") : t("network.remoteUnknown");
-  const quality =
-    corner.quality === "good" || corner.quality === "fair" || corner.quality === "poor"
-      ? t(`network.${corner.quality}`)
-      : t("network.qualityUnknown");
-  const remoteSignal = corner.remote === "up" ? "good" : corner.remote === "down" ? "bad" : "warn";
-  const qualitySignal =
-    corner.quality === "good" ? "good" : corner.quality === "fair" ? "warn" : corner.quality === "poor" ? "bad" : "warn";
+  const line = tickerOf(corner, t);
+  if (!line) return null;
 
   return (
     <p role="status" data-network data-pinned={pinned ? "" : undefined} className="flex min-w-0 flex-row items-center">
-      {corner.local ? null : <StatusLine signal="bad" text={t("network.localDown")} />}
-      <StatusLine signal={remoteSignal} text={remote} />
-      {corner.remote === "down" ? null : <StatusLine signal={qualitySignal} text={quality} />}
+      <StatusLine signal={line.signal} text={line.text} />
     </p>
   );
+}
+
+function tickerOf(
+  corner: Corner | null,
+  t: (key: string) => string,
+): { signal: Signal; text: string } | null {
+  if (!corner) return null;
+  if (!corner.local) return { signal: "bad", text: t("network.localDown") };
+  if (corner.remote === "down") return { signal: "bad", text: t("network.remoteDown") };
+  if (corner.quality === "good") return { signal: "good", text: t("network.good") };
+  if (corner.quality === "fair") return { signal: "warn", text: t("network.fair") };
+  if (corner.quality === "poor") return { signal: "bad", text: t("network.poor") };
+  return null;
 }
 
 type Signal = "good" | "warn" | "bad";

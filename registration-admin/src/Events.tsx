@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import { postSession } from "./api";
+import { fetchUpdate, postSession, postUpdate } from "./api";
 import NetworkSignal, { useNetwork } from "./NetworkSignal";
 
 const SESSION_PING_MS = 30_000;
@@ -22,6 +22,12 @@ type EventsProps = {
   keepSession?: boolean;
   /** Whole seconds. Used when the network reading is not ready yet. */
   timeoutSecs?: number;
+  /** Newer release from `GET /api/update`. Absent when this build is current. */
+  newer?: string | null;
+  /** Version that was rolled back. Absent when the last upgrade was not rolled back. */
+  failed?: string | null;
+  /** `false` when this process was not started by `rust-reg-run`. */
+  supervised?: boolean;
 };
 
 export default function Events({
@@ -32,6 +38,9 @@ export default function Events({
   watchNetwork = true,
   keepSession = true,
   timeoutSecs = 10,
+  newer = null,
+  failed = null,
+  supervised = true,
 }: EventsProps) {
   const { t } = useTranslation();
   const network = useNetwork(watchNetwork);
@@ -39,6 +48,103 @@ export default function Events({
   const [left, setLeft] = useState(0);
   const [error, setError] = useState("");
   const inFlight = useRef(false);
+  const [upgrade, setUpgrade] = useState<"idle" | "downloading" | "extracting" | "applying" | "success" | "failed">("idle");
+  const [received, setReceived] = useState(0);
+  const [total, setTotal] = useState<number | null>(null);
+  const [target, setTarget] = useState<string | null>(newer);
+  const poll = useRef<number | null>(null);
+  const posted = useRef(false);
+
+  useEffect(() => {
+    setTarget(newer);
+  }, [newer]);
+
+  useEffect(() => {
+    return () => {
+      if (poll.current !== null) {
+        window.clearInterval(poll.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (upgrade !== "success") {
+      return;
+    }
+    const timer = window.setTimeout(() => setUpgrade("idle"), 10_000);
+    return () => window.clearTimeout(timer);
+  }, [upgrade]);
+
+  function versionLabel(version: string) {
+    return version.startsWith("v") ? version : `v${version}`;
+  }
+
+  function stopPoll() {
+    if (poll.current !== null) {
+      window.clearInterval(poll.current);
+      poll.current = null;
+    }
+  }
+
+  async function watch(wanted: string) {
+    try {
+      const status = await fetchUpdate();
+      if (!status) {
+        setUpgrade("applying");
+        return;
+      }
+      if (
+        status.version === wanted &&
+        status.phase !== "downloading" &&
+        status.phase !== "extracting" &&
+        status.phase !== "applying"
+      ) {
+        stopPoll();
+        setTarget(null);
+        setUpgrade("success");
+        return;
+      }
+      if (status.phase === "downloading" || status.phase === "extracting") {
+        setUpgrade(status.phase);
+        setReceived(status.received);
+        setTotal(status.total);
+        return;
+      }
+      if (posted.current || status.phase === "applying") {
+        setUpgrade("applying");
+      }
+    } catch {
+      setUpgrade("applying");
+    }
+  }
+
+  function beginUpgrade() {
+    if (!supervised || !target || upgrade === "downloading" || upgrade === "extracting" || upgrade === "applying") {
+      return;
+    }
+    const wanted = target;
+    posted.current = false;
+    setUpgrade("downloading");
+    setReceived(0);
+    setTotal(null);
+    stopPoll();
+    poll.current = window.setInterval(() => {
+      void watch(wanted);
+    }, 400);
+    void postUpdate()
+      .then((result) => {
+        if (!result.ok) {
+          stopPoll();
+          setUpgrade("failed");
+          return;
+        }
+        posted.current = true;
+        setUpgrade("applying");
+      })
+      .catch(() => {
+        setUpgrade("applying");
+      });
+  }
 
   useEffect(() => {
     if (!keepSession) {
@@ -87,8 +193,75 @@ export default function Events({
 
   const locked = busy || left > 0;
 
+  const percent = total && total > 0 ? Math.min(100, Math.round((received / total) * 100)) : null;
+
   return (
-    <main className="min-h-screen bg-zinc-50 px-4 py-10 text-zinc-900">
+    <main className="min-h-screen bg-zinc-50 px-4 pb-10 pt-16 text-zinc-900">
+      <header className="fixed inset-x-0 top-0 z-10 flex h-12 items-center justify-start gap-3 bg-zinc-50 px-4 pr-72">
+        {upgrade === "downloading" || upgrade === "extracting" ? (
+          <div className="flex items-center gap-2">
+            <div className="flex w-56 flex-col gap-1">
+              <p className="text-xs text-zinc-600">
+                {upgrade === "extracting" ? t("events.extracting") : t("events.downloading")}
+              </p>
+              <div
+                role="progressbar"
+                aria-valuemin={0}
+                aria-valuemax={total ?? 100}
+                aria-valuenow={percent ?? 0}
+                className="h-2 overflow-hidden rounded-full bg-zinc-200"
+              >
+                <div
+                  className={percent === null ? "h-full w-1/3 animate-pulse bg-amber-400" : "h-full bg-amber-400"}
+                  style={percent === null ? undefined : { width: `${percent}%` }}
+                />
+              </div>
+            </div>
+            {percent === null ? null : (
+              <span className="w-10 text-right text-xs tabular-nums text-zinc-700">{percent}%</span>
+            )}
+          </div>
+        ) : null}
+        {upgrade === "applying" ? (
+          <p role="status" className="rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-sm text-amber-900">
+            {t("events.applying")}
+          </p>
+        ) : null}
+        {upgrade === "success" ? (
+          <p role="status" className="rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-sm text-emerald-800">
+            {t("events.success")}
+          </p>
+        ) : null}
+        {upgrade === "failed" ? (
+          <p role="alert" className="text-sm text-red-600">
+            {t("events.failed")}
+          </p>
+        ) : null}
+        {failed ? (
+          <p role="status" className="text-sm text-red-700">
+            {t("events.previous_failed", { version: versionLabel(failed) })}
+          </p>
+        ) : null}
+        {target && upgrade === "idle" ? (
+          <button
+            type="button"
+            disabled={!supervised}
+            onClick={beginUpgrade}
+            className={
+              supervised
+                ? "cursor-pointer select-text rounded-full border border-amber-300 bg-amber-50 px-3 py-1 text-sm font-medium text-amber-950"
+                : "cursor-not-allowed select-text rounded-full border border-zinc-200 bg-zinc-100 px-3 py-1 text-sm font-medium text-zinc-500"
+            }
+          >
+            {t("events.upgrade", { version: versionLabel(target) })}
+          </button>
+        ) : null}
+        {supervised ? null : (
+          <p role="status" className="text-xs text-zinc-600">
+            {t("events.no_wrapper")}
+          </p>
+        )}
+      </header>
       <NetworkSignal status={network} />
       {left > 0 ? (
         <div className="fixed inset-0 z-20 flex items-center justify-center bg-zinc-900/40 px-4">

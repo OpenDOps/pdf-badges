@@ -2,7 +2,7 @@ import { fireEvent, render, screen, within } from "@testing-library/react";
 import { createRoutesStub } from "react-router";
 
 import { foldForm } from "./form/fold";
-import Register, { loader } from "./routes/register";
+import Register, { clientLoader as loader } from "./routes/register";
 
 beforeEach(() => {
   vi.stubGlobal(

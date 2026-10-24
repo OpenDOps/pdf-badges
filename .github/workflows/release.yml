@@ -128,8 +128,39 @@ jobs:
             echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           fi
 
-  build:
+  front:
     needs: select
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.select.outputs.sha }}
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+      - name: Build the admin app
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run build
+        working-directory: registration-admin
+      - name: Build the operator and kiosk app
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run build
+        working-directory: registration-form
+      - uses: actions/upload-artifact@v7
+        with:
+          name: frontend
+          if-no-files-found: error
+          include-hidden-files: true
+          path: |
+            registration-admin/dist
+            registration-form/build/client
+
+  build:
+    needs: [select, front]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -163,13 +194,15 @@ jobs:
           fi
           echo "$RUNNER_TEMP/protoc/bin" >> "$GITHUB_PATH"
           rm protoc.zip
-      - uses: actions/setup-node@v7
+      - uses: actions/download-artifact@v8
         with:
-          node-version: "22"
+          name: frontend
+          path: .
       - id: pack
         shell: bash
         env:
           REGISTRATION_RELEASE_TAG: v${{ needs.select.outputs.version }}
+          REGISTRATION_SKIP_FRONT: "1"
         run: |
           set -euo pipefail
           mkdir -p target/release

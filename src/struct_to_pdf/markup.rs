@@ -1,4 +1,4 @@
-use crate::struct_to_pdf::{RenderError, TextBox};
+use crate::struct_to_pdf::{RenderError, Rgb, TextBox};
 
 #[derive(Clone, Debug)]
 pub struct StyledRun {
@@ -8,6 +8,7 @@ pub struct StyledRun {
     pub leading: f64,
     pub line_height: f64,
     pub underline: bool,
+    pub color: Rgb,
 }
 
 #[derive(Clone, Debug)]
@@ -38,6 +39,7 @@ struct Style {
     weight: String,
     italic: bool,
     underline: bool,
+    color: Rgb,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -65,6 +67,7 @@ pub fn parse(input: &str, text: &TextBox) -> Result<Markup, RenderError> {
             weight: text.text.font_style.weight.clone(),
             italic: text.text.font_style.italic,
             underline: text.text.font_style.underline,
+            color: text.text.color.unwrap_or(Rgb::BLACK),
         },
     }];
     let mut items = Vec::new();
@@ -236,6 +239,9 @@ fn apply_style_list(value: &str, style: &mut Style, id: &str) -> Result<(), Rend
                 "underline" => style.underline = true,
                 _ => return Err(error(id, format!("unknown style {key}"))),
             },
+            "color" => {
+                style.color = Rgb::from_hex(raw).map_err(|message| error(id, message))?;
+            }
             _ => return Err(error(id, format!("unknown style {key}"))),
         }
     }
@@ -307,6 +313,7 @@ fn flush_run(buffer: &mut String, stack: &[Frame], items: &mut Vec<MarkupItem>) 
         leading: style.leading,
         line_height: style.line_height,
         underline: style.underline,
+        color: style.color,
     }));
 }
 

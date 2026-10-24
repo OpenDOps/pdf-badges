@@ -5,9 +5,11 @@ use image::RgbaImage;
 use ticket_render::{AreaKind, Layout, PreparedFace};
 
 use crate::struct_to_pdf::{
-    index_template, load_page, prepare_visitor, render as render_raster, render_pixels,
-    render_visitor, FaceSet, Page, Raster, TemplateIndex,
+    index_template, load_page, prepare_visitor, render_pixels, render_visitor, FaceSet, Page,
+    TemplateIndex,
 };
+#[cfg(test)]
+use crate::struct_to_pdf::{render as render_raster, Raster};
 
 #[derive(Debug)]
 pub struct PageFileError {
@@ -20,6 +22,7 @@ impl std::fmt::Display for PageFileError {
     }
 }
 
+#[cfg(test)]
 pub fn page_pdf(
     category_dir: &Path,
     values: &HashMap<String, String>,
@@ -32,6 +35,7 @@ pub fn page_pdf(
     render_visitor(&page, values, photos, category_dir).map_err(page_error)
 }
 
+#[cfg(test)]
 pub fn render(
     category_dir: &Path,
     values: &HashMap<String, String>,
@@ -45,6 +49,7 @@ pub fn render(
 }
 
 /// The Zebra values from `base/printer_conf/{name}.json` that become `^XA` lines.
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct ZebraSettings {
     pub speed: String,
@@ -55,6 +60,7 @@ pub struct ZebraSettings {
     pub tear_off: String,
 }
 
+#[cfg(test)]
 impl Default for ZebraSettings {
     fn default() -> Self {
         Self {
@@ -68,6 +74,7 @@ impl Default for ZebraSettings {
     }
 }
 
+#[cfg(test)]
 impl ZebraSettings {
     fn lines(&self) -> String {
         let mode = match self.print_mode.as_str() {
@@ -84,6 +91,7 @@ impl ZebraSettings {
     }
 }
 
+#[cfg(test)]
 pub fn page_zpl(
     category_dir: &Path,
     values: &HashMap<String, String>,
@@ -103,6 +111,7 @@ pub fn page_zpl(
     Ok(wrap_zpl(&payload, width, printer_px, settings))
 }
 
+#[cfg(test)]
 pub fn wrap_zpl(
     payload: &[u8],
     width_px: u32,
@@ -483,6 +492,7 @@ fn page_error(error: crate::struct_to_pdf::RenderError) -> PageFileError {
     }
 }
 
+#[cfg(test)]
 fn page_path(category_dir: &Path) -> Result<std::path::PathBuf, PageFileError> {
     for name in ["page.yaml", "page.yml", "page.json"] {
         let path = category_dir.join(name);
@@ -965,6 +975,81 @@ contents:
             badge_page, barcode_ink, decode_png, photos, temp_dir, values, write_page,
         };
         use super::*;
+
+        #[test]
+        fn br_breaks_lines_in_the_graphic() {
+            let dir = temp_dir("zpl-br");
+            let font = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/struct-to-pdf/fonts/LiberationSerif-Regular.ttf")
+                .display()
+                .to_string();
+            write_page(
+                &dir,
+                "page.yaml",
+                &format!(
+                    r#"
+page_size:
+  width: 200
+  height: 120
+  units: points
+  bleeds: {{top: 0, right: 0, bottom: 0, left: 0}}
+resources:
+  images: {{}}
+  fonts:
+    font1:
+      name: font1
+      embedded: true
+      source_path: "{font}"
+contents:
+  - id: person
+    posX: 10
+    posY: 10
+    width: 180
+    height: 100
+    alignment:
+      horizontal: left
+      vertical: top
+    padding: {{top: 0, right: 0, bottom: 0, left: 0}}
+    template: true
+    text:
+      font: font1
+      font_size: 24
+      leading: 0
+      line_height: 28
+      preentered: "{{{{surname}}}}<br>{{{{name}}}}"
+      content: null
+"#
+                ),
+            );
+            let shown = values(&[("surname", "Mayorova"), ("name", "Ekaterina")]);
+            let raster = render(&dir, &shown, &HashMap::new(), 100.0).unwrap();
+            let image = decode_png(&raster.png);
+            let rows: Vec<u32> = (0..image.height())
+                .filter(|&y| (0..image.width()).any(|x| image.get_pixel(x, y).0 != [255, 255, 255, 255]))
+                .collect();
+            assert!(
+                rows.len() >= 2,
+                "expected ink on more than one row, got {rows:?}"
+            );
+            let gaps = rows.windows(2).filter(|pair| pair[1] > pair[0] + 1).count();
+            assert!(
+                gaps >= 1,
+                "expected a gap between surname and name rows, ink rows={rows:?}"
+            );
+            let body = page_zpl(
+                &dir,
+                &shown,
+                &HashMap::new(),
+                100.0,
+                4.1,
+                &ZebraSettings::default(),
+            )
+            .unwrap();
+            let text = std::str::from_utf8(&body).unwrap();
+            let payload = ticket_render::png_graphic(&raster.png).unwrap();
+            let payload = std::str::from_utf8(&payload).unwrap();
+            assert!(text.contains(payload), "ZPL must carry the broken lines");
+        }
 
         #[test]
         fn yaml_page_is_zpl() {

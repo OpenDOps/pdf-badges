@@ -19,6 +19,9 @@ function renderEvents(
     watchNetwork: boolean;
     keepSession: boolean;
     timeoutSecs: number;
+    newer: string | null;
+    failed: string | null;
+    supervised: boolean;
   }> = {},
 ) {
   return render(
@@ -30,6 +33,9 @@ function renderEvents(
       watchNetwork={props.watchNetwork ?? false}
       keepSession={props.keepSession ?? false}
       timeoutSecs={props.timeoutSecs ?? 0}
+      newer={props.newer ?? null}
+      failed={props.failed ?? null}
+      supervised={props.supervised ?? true}
     />,
   );
 }
@@ -209,6 +215,101 @@ test("screen_shows_stored_and_empty_keys", async () => {
   expect(screen.getByText("Токен проекта сохранён")).toBeInTheDocument();
   expect(screen.getByText("Нет ключей")).toBeInTheDocument();
   vi.unstubAllGlobals();
+});
+
+test("events_starts_the_offered_upgrade", async () => {
+  const calls: string[] = [];
+  let release = () => {};
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      calls.push(`${method} ${url}`);
+      if (url.endsWith("/api/update") && method === "GET") {
+        return {
+          ok: true,
+          json: async () => ({
+            ok: true,
+            data: { version: "0.1.0", newer: "2.0.0", phase: "downloading", received: 40, total: 100 },
+          }),
+        };
+      }
+      if (url.endsWith("/api/update") && method === "POST") {
+        await gate;
+        return { ok: true, json: async () => ({ ok: true, data: { version: "2.0.0" } }) };
+      }
+      return { ok: true, json: async () => ({ ok: true, data: {} }) };
+    }),
+  );
+  renderEvents({ newer: "2.0.0" });
+  const offer = screen.getByRole("button", { name: "Обновить до v2.0.0" });
+  expect(offer).toHaveClass("cursor-pointer", "select-text");
+  fireEvent.click(offer);
+  expect(await screen.findByRole("progressbar")).toBeInTheDocument();
+  expect(screen.getByText("Загрузка обновления")).toBeInTheDocument();
+  expect(await screen.findByText("40%")).toBeInTheDocument();
+  expect(calls.some((call) => call.startsWith("POST") && call.includes("/api/update"))).toBe(true);
+  release();
+  expect(await screen.findByText("Идёт обновление")).toBeInTheDocument();
+  vi.unstubAllGlobals();
+});
+
+test("events_shows_extract_progress", async () => {
+  let release = () => {};
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (url.endsWith("/api/update") && method === "GET") {
+        return {
+          ok: true,
+          json: async () => ({
+            ok: true,
+            data: { version: "0.1.0", newer: "2.0.0", phase: "extracting", received: 25, total: 100 },
+          }),
+        };
+      }
+      if (url.endsWith("/api/update") && method === "POST") {
+        await gate;
+        return { ok: true, json: async () => ({ ok: true, data: { version: "2.0.0" } }) };
+      }
+      return { ok: true, json: async () => ({ ok: true, data: {} }) };
+    }),
+  );
+  renderEvents({ newer: "2.0.0" });
+  fireEvent.click(screen.getByRole("button", { name: "Обновить до v2.0.0" }));
+  expect(await screen.findByText("Распаковка обновления")).toBeInTheDocument();
+  expect(screen.getByRole("progressbar")).toBeInTheDocument();
+  expect(await screen.findByText("25%")).toBeInTheDocument();
+  release();
+  expect(await screen.findByText("Идёт обновление")).toBeInTheDocument();
+  vi.unstubAllGlobals();
+});
+
+test("events_disables_upgrade_without_the_wrapper", () => {
+  const fetchMock = vi.fn();
+  vi.stubGlobal("fetch", fetchMock);
+  renderEvents({ newer: "2.0.0", supervised: false });
+  const offer = screen.getByRole("button", { name: "Обновить до v2.0.0" });
+  expect(offer).toBeDisabled();
+  expect(offer).toHaveClass("cursor-not-allowed");
+  expect(screen.getByText("Программа запущена без обёртки")).toBeInTheDocument();
+  fireEvent.click(offer);
+  expect(fetchMock).not.toHaveBeenCalled();
+  vi.unstubAllGlobals();
+});
+
+test("events_notes_a_rolled_back_upgrade", () => {
+  renderEvents({ failed: "2.0.0-alpha.1" });
+  expect(screen.getByText("Предыдущее обновление до v2.0.0-alpha.1 не удалось")).toBeInTheDocument();
 });
 
 test("keys_block_empty", () => {

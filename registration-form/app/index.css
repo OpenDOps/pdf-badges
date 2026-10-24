@@ -40,7 +40,8 @@
   }
 
   [data-network] {
-    width: 100%;
+    width: max-content;
+    max-width: calc(100% - 1.5rem);
     min-width: 0;
     gap: 0.35rem;
   }
@@ -50,12 +51,32 @@
     top: 0.25rem;
     right: 0.75rem;
     z-index: 70;
-    width: min(36rem, calc(100% - 1.5rem));
+    width: max-content;
+    max-width: min(36rem, calc(100% - 1.5rem));
+  }
+
+  [data-version-stack] {
+    position: fixed;
+    top: 0.25rem;
+    left: 0.75rem;
+    z-index: 70;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.35rem;
+    width: max-content;
+    max-width: calc(100% - 1.5rem);
+  }
+
+  [data-version] {
+    width: max-content;
+    max-width: 100%;
   }
 
   [data-network] [data-signal] {
-    flex: 1 1 0;
-    min-width: 0;
+    flex: 0 0 auto;
+    width: max-content;
+    max-width: 100%;
     gap: 0.35rem;
     padding: 0.2rem 0.65rem;
     font-size: 0.875rem;
@@ -263,6 +284,26 @@
 
   main {
     padding: 1.5rem 1rem 2rem;
+  }
+
+  [data-screen="key"] {
+    box-sizing: border-box;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  [data-screen="key"] form {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    width: min(24rem, 100%);
+  }
+
+  [data-screen="key"] input,
+  [data-screen="key"] button {
+    width: 100%;
   }
 
   [data-testid="frame"] {

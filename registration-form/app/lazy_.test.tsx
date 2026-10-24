@@ -43,7 +43,7 @@ afterEach(() => {
 test("lazy_key_loads_no_other_screen", async () => {
   const { view } = renderAt("/key");
   render(view);
-  expect(await screen.findByRole("heading", { name: "Ключ" })).toBeInTheDocument();
+  expect(await screen.findByPlaceholderText("Ключ")).toBeInTheDocument();
   await waitFor(() => expect(screenLoads().length).toBeGreaterThan(0));
   expect(screenLoads().every((file) => file === "routes/key.tsx")).toBe(true);
 });

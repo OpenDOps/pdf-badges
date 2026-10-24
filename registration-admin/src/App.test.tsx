@@ -4,7 +4,7 @@ import App from "./App";
 import "./i18n";
 
 beforeEach(() => {
-  window.history.pushState({}, "", "/");
+  window.history.pushState({}, "", "/admin");
 });
 
 afterEach(() => {
@@ -43,6 +43,12 @@ function mockApi() {
           },
         });
       }
+      if (url.endsWith("/api/update") && init?.method !== "POST") {
+        return json({
+          ok: true,
+          data: { version: "0.1.0", newer: null, phase: "idle", received: 0, total: null },
+        });
+      }
       if (url.endsWith("/api/binding")) {
         return json({
           ok: true,
@@ -72,7 +78,7 @@ test("app_shows_login", () => {
 
 test("app_shows_events", async () => {
   mockApi();
-  window.history.pushState({}, "", "/events");
+  window.history.pushState({}, "", "/admin/events");
   render(<App />);
   expect(
     await screen.findByRole("heading", { name: "Мероприятия" }),
@@ -96,5 +102,5 @@ test("app_opens_events_after_login", async () => {
   expect(
     await screen.findByRole("heading", { name: "Мероприятия" }),
   ).toBeInTheDocument();
-  expect(window.location.pathname).toBe("/events");
+  expect(window.location.pathname).toBe("/admin/events");
 });

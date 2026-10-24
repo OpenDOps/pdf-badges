@@ -25,6 +25,7 @@ pub struct PrintWorker {
 }
 
 impl PrintWorker {
+    #[cfg(test)]
     pub(crate) fn try_recv(&mut self) -> Option<PrintJob> {
         self.rx.try_recv().ok()
     }

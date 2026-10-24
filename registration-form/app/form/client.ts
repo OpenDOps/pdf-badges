@@ -196,6 +196,16 @@ export class FormClient {
     return this.getJson(`/api/registrations?${params}`);
   }
 
+  async boundEvent(): Promise<{ id: string | null; name: string | null }> {
+    const data = await this.getJson<unknown>("/api/event");
+    if (!data || typeof data !== "object" || Array.isArray(data)) return { id: null, name: null };
+    const record = data as { id?: unknown; name?: unknown };
+    return {
+      id: typeof record.id === "string" && record.id !== "" ? record.id : null,
+      name: typeof record.name === "string" && record.name !== "" ? record.name : null,
+    };
+  }
+
   sync(): Promise<{ waiting: number; synced?: number; addresses?: string[]; is_admin?: boolean }> {
     return this.getJson("/api/sync");
   }

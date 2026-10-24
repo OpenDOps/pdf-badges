@@ -111,7 +111,7 @@ function stamp(visitor: Record<string, unknown>, category: string, ticket: strin
   }
 }
 
-export async function loader({ request }: { request: Request }) {
+export async function clientLoader({ request }: { request: Request }) {
   return { form: await FormClient.fromRequest(request).load() };
 }
 

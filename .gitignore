@@ -1,5 +1,6 @@
 # Rust build output
 /target/
+/desk/target/
 
 # Local badge template (fonts and layout stay on the machine)
 /scripts/badges/tadviser.yaml

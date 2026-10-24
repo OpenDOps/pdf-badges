@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
 
 import { setUnauthorized } from "./form/client";
 import { foldForm } from "./form/fold";
@@ -105,6 +105,8 @@ test("menu_shows_the_register_qr", async () => {
   const src = img.getAttribute("src") ?? "";
   expect(src).toContain("/api/qr");
   expect(src).toContain(encodeURIComponent("/register"));
+  expect(img.className).toContain("max-h-full");
+  expect(img.closest("[data-screen='menu']")?.className).toContain("h-screen");
 });
 
 test("menu_shows_sync_address_and_network", async () => {
@@ -136,11 +138,11 @@ test("menu_shows_sync_address_and_network", async () => {
   expect(screen.getByText("Не синхронизировано")).toBeInTheDocument();
   expect(screen.queryByText("Синхронизировано")).not.toBeInTheDocument();
   expect(screen.queryByRole("heading", { name: "Главная" })).not.toBeInTheDocument();
-  const remote = await screen.findByText("Сервер синхронизации доступен");
+  const quality = await screen.findByText("Связь хорошая");
   expect(screen.queryByText("Локальный сервер доступен")).not.toBeInTheDocument();
-  expect(remote.closest("[data-signal]")).toHaveAttribute("data-signal", "good");
-  const quality = screen.getByText("Связь хорошая");
+  expect(screen.queryByText("Сервер синхронизации доступен")).not.toBeInTheDocument();
   expect(quality.closest("[data-signal]")).toHaveAttribute("data-signal", "good");
+  expect(document.querySelectorAll("[data-signal]")).toHaveLength(1);
 });
 
 test("menu_hides_unmeasured_quality_when_remote_is_down", async () => {
@@ -165,6 +167,8 @@ test("menu_hides_unmeasured_quality_when_remote_is_down", async () => {
   render(view);
   expect(await screen.findByText("Нет соединения с сервером синхронизации")).toBeInTheDocument();
   expect(screen.queryByText("Качество связи ещё не измерено")).not.toBeInTheDocument();
+  expect(screen.queryByText("Связь слабая")).not.toBeInTheDocument();
+  expect(document.querySelectorAll("[data-signal]")).toHaveLength(1);
 });
 
 test("menu_shows_local_down_in_red", async () => {
@@ -187,12 +191,16 @@ test("menu_shows_local_down_in_red", async () => {
   const local = await screen.findByText("Нет соединения с локальным сервером");
   expect(local.closest("[data-signal]")).toHaveAttribute("data-signal", "bad");
   expect(screen.queryByText("Локальный сервер доступен")).not.toBeInTheDocument();
+  expect(screen.queryByText("Сервер синхронизации ещё не проверен")).not.toBeInTheDocument();
+  expect(screen.queryByText("Качество связи ещё не измерено")).not.toBeInTheDocument();
+  expect(document.querySelectorAll("[data-signal]")).toHaveLength(1);
 });
 
 test("menu_omits_update_and_moderation", async () => {
   const { view } = renderAt("/");
   render(view);
   expect(await screen.findByRole("link", { name: "Форма регистрации" })).toBeInTheDocument();
+  expect((await screen.findByText("v0.1.0")).closest("[data-version]")).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Обновить" })).not.toBeInTheDocument();
   expect(screen.queryByRole("checkbox", { name: "Включить модерацию" })).not.toBeInTheDocument();
 });
@@ -225,7 +233,7 @@ test("menu_offers_the_update", async () => {
       const method = init?.method ?? "GET";
       calls.push({ href: url.href, path: url.pathname, method, credentials: init?.credentials });
       if (url.pathname === "/api/sync") {
-        return new Response(JSON.stringify({ waiting: 0, is_admin: false }), {
+        return new Response(JSON.stringify({ waiting: 0, is_admin: true }), {
           status: 200,
           headers: { "Content-Type": "application/json" },
         });
@@ -247,19 +255,41 @@ test("menu_offers_the_update", async () => {
   );
   const { view } = renderAt("/");
   render(view);
-  expect(await screen.findByRole("button", { name: "Обновить" })).toBeInTheDocument();
-  expect(screen.getByText("0.2.0")).toBeInTheDocument();
+  const offer = await screen.findByRole("link", { name: "Доступно обновление до версии v0.2.0" });
+  expect(offer).toHaveAttribute("href", "/admin");
+  expect(offer).toHaveAttribute("data-signal", "warn");
+  expect(screen.queryByRole("button", { name: "Обновить" })).not.toBeInTheDocument();
   expect(screen.queryByRole("checkbox", { name: "Включить модерацию" })).not.toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: "Обновить" }));
-  await waitFor(() => {
-    expect(calls).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ path: "/api/update", method: "POST", credentials: "include" }),
-      ]),
-    );
-  });
+  expect(calls.some((call) => call.method === "POST")).toBe(false);
   expect(calls.some((call) => call.path === "/api/update/check")).toBe(false);
-  expect(calls.every((call) => new URL(call.href).hostname === "localhost")).toBe(true);
+});
+
+test("menu_operator_omits_the_update_ticker", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL) => {
+      const pathname = pathnameOf(input);
+      if (pathname === "/api/sync") {
+        return new Response(JSON.stringify({ waiting: 0, is_admin: false }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (pathname === "/api/update") {
+        return new Response(JSON.stringify({ ok: true, data: { version: "0.1.0", newer: "0.2.0" } }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } });
+    }),
+  );
+  const { view } = renderAt("/");
+  render(view);
+  expect(await screen.findByText("v0.1.0")).toBeInTheDocument();
+  expect(screen.queryByRole("link", { name: "Доступно обновление до версии v0.2.0" })).not.toBeInTheDocument();
+  const links = screen.getAllByRole("link");
+  expect(links.map((link) => link.textContent)).toEqual(["Форма регистрации", "Печать"]);
 });
 
 test("register_omits_the_update", async () => {

@@ -1,1 +1,1 @@
-export { default, loader } from "./desk";
+export { default, clientLoader } from "./desk";

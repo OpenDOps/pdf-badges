@@ -3,7 +3,7 @@ import type { LoaderFunction } from "react-router";
 
 type ScreenModule = {
   default: ComponentType;
-  loader?: LoaderFunction;
+  clientLoader?: LoaderFunction;
 };
 
 type ScreenFile =
@@ -49,5 +49,7 @@ export async function loadScreen(path: string) {
   if (!screen) throw new Error(`unknown screen ${path}`);
   loads.push(screen.file);
   const module = await screen.load();
-  return module.loader ? { Component: module.default, loader: module.loader } : { Component: module.default };
+  return module.clientLoader
+    ? { Component: module.default, loader: module.clientLoader }
+    : { Component: module.default };
 }

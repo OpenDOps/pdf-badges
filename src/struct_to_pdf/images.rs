@@ -20,13 +20,35 @@ pub fn paint_contents(page: &Page, base_dir: &Path) -> Result<PaintedPage, Rende
     let mut xobjects = Vec::new();
     let mut fonts = Vec::new();
     let mut font_index = 0;
+    let (media_width, media_height) = media_size(page);
+
+    if let Some(background) = page.page_size.background {
+        let (red, green, blue) = background.components();
+        operations.push(Operation::new(
+            "rg",
+            vec![
+                Object::Real(red),
+                Object::Real(green),
+                Object::Real(blue),
+            ],
+        ));
+        operations.push(Operation::new(
+            "re",
+            vec![
+                Object::Real(0.0),
+                Object::Real(0.0),
+                Object::Real(media_width),
+                Object::Real(media_height),
+            ],
+        ));
+        operations.push(Operation::new("f", vec![]));
+    }
 
     if page
         .contents
         .iter()
         .any(|entry| !matches!(entry, ContentEntry::Text(_)))
     {
-        let (media_width, media_height) = media_size(page);
         operations.push(Operation::new("q", vec![]));
         operations.push(Operation::new(
             "re",

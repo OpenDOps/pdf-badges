@@ -2,7 +2,8 @@
 //!
 //! `reqwest` performs the calls. The `cookie` crate reads `JSESSIONID` from
 //! `Set-Cookie`, and later calls send that one cookie. The temptoken and the
-//! session id stay in memory. `bind` writes the project token and drops them.
+//! session id is written beside the credential file so a restarted process
+//! accepts the same operator cookie. `bind` writes the project token.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -243,8 +244,29 @@ impl std::fmt::Debug for OperatorSession {
 }
 
 impl OperatorSession {
+    /// Rebuild a session after the process starts again. The remote `JSESSIONID` is the saved value.
+    pub fn resume(base: &str, device_id: &str, session_id: &str) -> Result<Self, RemoteError> {
+        let http = session_client(DEFAULT_TIMEOUT)?;
+        let base = Url::parse(base).map_err(|_| RemoteError::BadResponse("remote base".into()))?;
+        Ok(Self {
+            http,
+            base,
+            device_id: device_id.to_string(),
+            session_id: session_id.to_string(),
+            flight: Arc::new(AtomicBool::new(false)),
+        })
+    }
+
     pub fn device_id(&self) -> &str {
         &self.device_id
+    }
+
+    pub fn remote_base(&self) -> &str {
+        self.base.as_str()
+    }
+
+    pub fn remote_session(&self) -> &str {
+        &self.session_id
     }
 
     /// `GET boxapi/expos/ru`. `name` is `name.ru.str`, or empty when that path is absent.

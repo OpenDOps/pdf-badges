@@ -3,8 +3,8 @@ import { createRoutesStub } from "react-router";
 
 import { foldForm } from "./form/fold";
 import App, { ErrorBoundary } from "./root";
-import Desk, { loader as deskLoader } from "./routes/desk";
-import Register, { headers, loader } from "./routes/register";
+import Desk, { clientLoader as deskLoader } from "./routes/desk";
+import Register, { clientLoader as loader } from "./routes/register";
 
 beforeEach(() => {
   vi.stubGlobal(
@@ -50,8 +50,6 @@ function registerAt(mobile: string | null) {
 }
 
 test("routes_register_is_the_kiosk", async () => {
-  expect(headers()).toEqual({ Vary: "Sec-CH-UA-Mobile" });
-
   for (const mobile of [null, "?0"] as const) {
     const Stub = registerAt(mobile);
     const view = render(<Stub initialEntries={["/register"]} />);

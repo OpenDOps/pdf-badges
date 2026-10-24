@@ -21,6 +21,7 @@ use crate::registration_server::{App, ServeError};
 pub fn router(app: App) -> Router {
     let gate = Arc::clone(&app.gate);
     let dist = app.dist.clone();
+    let form = app.form.clone();
     let operator = app
         .operator
         .clone()
@@ -66,17 +67,34 @@ pub fn router(app: App) -> Router {
         .route("/registrations/{id}", get(lookup))
         .route("/print", post(enqueue_print))
         .route("/ws", get(ws))
-        .route("/", get(index).head(index))
-        .route("/events", get(index).head(index))
+        .route("/", get(form_index).head(form_index))
+        .route("/admin", get(admin_index).head(admin_index))
+        .route("/admin/events", get(admin_index).head(admin_index))
         .with_state(app);
     crate::registration_server::admin::api_router(operator)
         .merge(pages)
         .fallback(move |request: Request| {
             let dist = dist.clone();
+            let form = form.clone();
             async move {
-                let path = request.uri().path();
+                let path = request.uri().path().to_string();
                 if path == "/api" || path.starts_with("/api/") {
                     return api_missing().await;
+                }
+                if let Some(rest) = path.strip_prefix("/admin") {
+                    let mapped = if rest.is_empty() || rest == "/" || rest == "/events" {
+                        "/index.html"
+                    } else {
+                        rest
+                    };
+                    return crate::registration_server::admin::serve_mapped(&dist, mapped, request)
+                        .await;
+                }
+                if crate::registration_server::admin::safe_public_file(&form, &path).is_some() {
+                    return crate::registration_server::admin::serve_public(&form, request).await;
+                }
+                if form_screen(&path) {
+                    return crate::registration_server::admin::serve_index(&form, request).await;
                 }
                 crate::registration_server::admin::serve_public(&dist, request).await
             }
@@ -116,8 +134,29 @@ async fn track_inflight(State(gate): State<Arc<Gate>>, request: Request, next: N
     response
 }
 
-async fn index(State(app): State<App>, request: Request) -> Response {
+async fn form_index(State(app): State<App>, request: Request) -> Response {
+    crate::registration_server::admin::serve_index(&app.form, request).await
+}
+
+async fn admin_index(State(app): State<App>, request: Request) -> Response {
     crate::registration_server::admin::serve_index(&app.dist, request).await
+}
+
+fn form_screen(path: &str) -> bool {
+    matches!(
+        path,
+        "/" | "/register"
+            | "/key"
+            | "/desk"
+            | "/form"
+            | "/visitor"
+            | "/visitors"
+            | "/print"
+            | "/import"
+            | "/settings"
+            | "/settings/registration"
+            | "/printers"
+    )
 }
 
 async fn api_missing() -> Response {
@@ -167,8 +206,15 @@ fn api_error(status: StatusCode, code: &'static str) -> Response {
 }
 
 async fn event(State(app): State<App>) -> Response {
-    let id = crate::registration_server::current::CurrentEvent::lock(&app.current).event_id();
-    api_ok(serde_json::json!({ "id": id }))
+    let id = CurrentEvent::lock(&app.current).event_id();
+    let name = app
+        .operator
+        .credential_file()
+        .load()
+        .ok()
+        .filter(|credentials| credentials.event_id() == id.as_deref())
+        .and_then(|credentials| credentials.event_name().map(str::to_string));
+    api_ok(serde_json::json!({ "id": id, "name": name }))
 }
 
 async fn form_vars(State(app): State<App>) -> Response {
@@ -1187,17 +1233,21 @@ pub(crate) fn require_desk(app: &App, headers: &HeaderMap) -> Result<(), Respons
 }
 
 async fn update_status(State(app): State<App>, headers: HeaderMap) -> Response {
-    if let Err(response) = require_desk(&app, &headers) {
-        return response;
+    if !can_read_update(&app, &headers) {
+        return api_error(StatusCode::UNAUTHORIZED, "unauthorized");
     }
     api_ok(crate::registration_server::update::update_document(&app))
 }
 
 async fn update_install(State(app): State<App>, request: Request) -> Response {
-    let held = app.gate.enter_request();
-    if let Err(response) = require_desk(&app, request.headers()) {
-        return response;
+    if !app.operator.has_live_session(request.headers()) {
+        return api_error(StatusCode::UNAUTHORIZED, "unauthorized");
     }
+    if !crate::registration_server::update::update_allowed(&app) {
+        eprintln!("registration-server update: refused, parent is not rust-reg-run");
+        return api_error(StatusCode::CONFLICT, "no_supervisor");
+    }
+    let held = app.gate.enter_request();
     if crate::registration_server::update::print_busy(&app) {
         return api_error(StatusCode::CONFLICT, "print_busy");
     }
@@ -1209,9 +1259,11 @@ async fn update_install(State(app): State<App>, request: Request) -> Response {
             api_ok(serde_json::json!({ "version": version }))
         }
         Err(crate::registration_server::update::StageFailure::Checksum) => {
+            eprintln!("registration-server update: checksum mismatch");
             api_error(StatusCode::CONFLICT, "checksum_mismatch")
         }
         Err(crate::registration_server::update::StageFailure::Failed) => {
+            eprintln!("registration-server update: install failed");
             api_error(StatusCode::CONFLICT, "download_failed")
         }
     }
@@ -1230,6 +1282,10 @@ async fn update_check(State(app): State<App>, headers: HeaderMap) -> Response {
             api_error(StatusCode::TOO_MANY_REQUESTS, "check_in_progress")
         }
     }
+}
+
+fn can_read_update(app: &App, headers: &HeaderMap) -> bool {
+    require_desk(app, headers).is_ok() || app.operator.has_live_session(headers)
 }
 
 fn require_admin(app: &App, headers: &HeaderMap) -> Result<(), Response> {
@@ -1450,7 +1506,12 @@ mod tests {
         let current = Arc::new(Mutex::new(CurrentEvent::new(&dir.0)));
         CurrentEvent::lock(&current).open_bound(&file).unwrap();
         let (mut app, worker) = App::new();
-        app.current = current;
+        app.current = Arc::clone(&current);
+        app.operator = crate::registration_server::admin::OperatorState::new(
+            CredentialFile::new(file.path()),
+            crate::registration_server::remote::Remote::new("http://127.0.0.1:1").unwrap(),
+        )
+        .with_current(current);
         Venue {
             dir,
             app,
@@ -1493,7 +1554,7 @@ mod tests {
             assert_eq!(status, StatusCode::OK);
             assert_eq!(
                 json_body(&body),
-                serde_json::json!({ "ok": true, "data": { "id": "EVT" } })
+                serde_json::json!({ "ok": true, "data": { "id": "EVT", "name": "Event" } })
             );
 
             CurrentEvent::lock(&venue.app.current)
@@ -1503,7 +1564,7 @@ mod tests {
             assert_eq!(status, StatusCode::OK);
             assert_eq!(
                 json_body(&body),
-                serde_json::json!({ "ok": true, "data": { "id": null } })
+                serde_json::json!({ "ok": true, "data": { "id": null, "name": null } })
             );
         }
     }

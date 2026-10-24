@@ -17,7 +17,7 @@ use lopdf::{dictionary, Document, Object, ObjectId, Stream};
 pub use geometry::{media_box, media_size, pdf_point, to_points, trim_box};
 pub use page::{
     load_page, parse_page, Barcode, Bleeds, ContentEntry, FontResource, FontStyle, HorizontalAlign,
-    ImagePlacement, ImageResource, Padding, Page, PageSize, Photo, RenderError, SourceFormat,
+    ImagePlacement, ImageResource, Padding, Page, PageSize, Photo, RenderError, Rgb, SourceFormat,
     TextBody, TextBox, Units, VerticalAlign,
 };
 pub(crate) use raster::{bmp_bytes, png_bytes, render_pixels, FaceSet};

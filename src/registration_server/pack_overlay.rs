@@ -58,7 +58,33 @@ fn stage(args: &[String]) -> io::Result<()> {
 fn first_install(exe: &Path) -> io::Result<()> {
     let prefix = PathBuf::from(r"C:\Program Files\rust-reg");
     extract_folder(exe, &prefix, "tree")?;
-    register_service(&prefix)
+    register_service(&prefix)?;
+    install_shortcut(&prefix)
+}
+
+#[cfg(windows)]
+fn install_shortcut(prefix: &Path) -> io::Result<()> {
+    let target = prefix.join("bin").join("rust-reg-desk.exe");
+    if !target.exists() {
+        return Ok(());
+    }
+    let link = PathBuf::from(r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs\reg-server.lnk");
+    let script = format!(
+        "$s = (New-Object -ComObject WScript.Shell).CreateShortcut('{}'); $s.TargetPath = '{}'; $s.WorkingDirectory = '{}'; $s.Description = 'Registration server'; $s.Save()",
+        link.display(),
+        target.display(),
+        prefix.display()
+    );
+    let status = Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .status()?;
+    if !status.success() {
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            "reg-server start menu shortcut",
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(windows)]

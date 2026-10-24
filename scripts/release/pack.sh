@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Build this machine's release asset and print its SHA256SUMS line.
 # REGISTRATION_RELEASE_TAG, when unset, becomes v plus the Cargo.toml version.
+# The desk tray is packed with the platform asset. REGISTRATION_SKIP_DESK=1
+# leaves that wrapper out and ships the standalone server.
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
@@ -44,14 +46,24 @@ esac
 
 echo "pack: cargo build --release $tag" >&2
 cargo build --release --bin rust-reg --bin rust-reg-run >&2
+with_desk=1
+if [[ "${REGISTRATION_SKIP_DESK:-}" == "1" ]]; then
+  with_desk=0
+  echo "pack: standalone release, skipping the desk wrapper" >&2
+else
+  echo "pack: cargo build desk wrapper" >&2
+  cargo build --release --manifest-path "$root/desk/Cargo.toml" --target-dir "$root/target" >&2
+fi
 
 release_dir="$root/target/release"
 if [[ "$os" == windows ]]; then
   bin_name=rust-reg.exe
   run_name=rust-reg-run.exe
+  desk_name=rust-reg-desk.exe
 else
   bin_name=rust-reg
   run_name=rust-reg-run
+  desk_name=rust-reg-desk
 fi
 
 build_front() {
@@ -64,8 +76,18 @@ build_front() {
   (cd "$dir" && npm run build >&2)
 }
 
-build_front "$root/registration-admin"
-build_front "$root/registration-form"
+admin_dist="$root/registration-admin/dist"
+form_client="$root/registration-form/build/client"
+if [[ "${REGISTRATION_SKIP_FRONT:-}" == "1" ]]; then
+  echo "pack: using the prebuilt admin and form trees" >&2
+  if [[ ! -f "$admin_dist/index.html" || ! -f "$form_client/index.html" ]]; then
+    echo "pack: prebuilt admin/dist or form/build/client is missing index.html" >&2
+    exit 1
+  fi
+else
+  build_front "$root/registration-admin"
+  build_front "$root/registration-form"
+fi
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/rust-reg-pack.XXXXXX")
 cleanup() { rm -rf "$work"; }
@@ -76,8 +98,10 @@ assemble_version() {
   mkdir -p "$dest/admin" "$dest/form"
   cp "$release_dir/$bin_name" "$dest/$bin_name"
   chmod 755 "$dest/$bin_name" || true
-  cp -R "$root/registration-admin/dist/." "$dest/admin/"
-  cp -R "$root/registration-form/build/." "$dest/form/"
+  cp -R "$admin_dist/." "$dest/admin/"
+  cp -R "$form_client/." "$dest/form/"
+  # The client build copies public/dbenums next to the form. That dump is not part of the release.
+  rm -rf "$dest/form/dbenums"
   printf '%s\n' "$tag" > "$dest/RELEASE"
 }
 
@@ -89,6 +113,40 @@ case "$os" in
     mkdir -p "$work/root/Library/LaunchDaemons"
     cp "$release_dir/$run_name" "$prefix/bin/$run_name"
     chmod 755 "$prefix/bin/$run_name"
+    if [[ "$with_desk" == 1 ]]; then
+      cp "$release_dir/$desk_name" "$prefix/bin/$desk_name"
+      chmod 755 "$prefix/bin/$desk_name"
+      app="$work/root/Applications/reg-server.app/Contents"
+      mkdir -p "$app/MacOS"
+      cp "$release_dir/$desk_name" "$app/MacOS/reg-server"
+      chmod 755 "$app/MacOS/reg-server"
+      cat > "$app/Info.plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key>
+  <string>reg-server</string>
+  <key>CFBundleDisplayName</key>
+  <string>reg-server</string>
+  <key>CFBundleIdentifier</key>
+  <string>com.opendops.rust-reg.desk</string>
+  <key>CFBundleExecutable</key>
+  <string>reg-server</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleVersion</key>
+  <string>$version</string>
+  <key>CFBundleShortVersionString</key>
+  <string>$version</string>
+  <key>LSUIElement</key>
+  <true/>
+  <key>LSMinimumSystemVersion</key>
+  <string>11.0</string>
+</dict>
+</plist>
+EOF
+    fi
     assemble_version "$version_dir"
     cat > "$work/root/Library/LaunchDaemons/com.opendops.rust-reg.plist" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -124,6 +182,28 @@ EOF
     mkdir -p "$deb/opt/rust-reg/bin" "$deb/lib/systemd/system" "$deb/DEBIAN"
     cp "$release_dir/$run_name" "$deb/opt/rust-reg/bin/$run_name"
     chmod 755 "$deb/opt/rust-reg/bin/$run_name"
+    if [[ "$with_desk" == 1 ]]; then
+      cp "$release_dir/$desk_name" "$deb/opt/rust-reg/bin/$desk_name"
+      chmod 755 "$deb/opt/rust-reg/bin/$desk_name"
+      mkdir -p "$deb/usr/share/applications" "$deb/usr/share/icons/hicolor/scalable/apps"
+      cat > "$deb/usr/share/applications/rust-reg.desktop" <<'EOF'
+[Desktop Entry]
+Type=Application
+Name=reg-server
+Comment=Registration server
+Exec=/opt/rust-reg/bin/rust-reg-desk
+Icon=rust-reg
+Terminal=false
+Categories=Utility;
+StartupNotify=false
+EOF
+    cat > "$deb/usr/share/icons/hicolor/scalable/apps/rust-reg.svg" <<'EOF'
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+  <rect width="64" height="64" rx="12" fill="#1f6feb"/>
+  <rect x="18" y="18" width="28" height="28" rx="4" fill="#ffffff"/>
+</svg>
+EOF
+    fi
     assemble_version "$version_dir"
     cat > "$deb/lib/systemd/system/rust-reg.service" <<'EOF'
 [Unit]
@@ -146,7 +226,23 @@ Architecture: amd64
 Maintainer: OpenDOps <opendops@users.noreply.github.com>
 Description: Registration server
 EOF
-    cat > "$deb/DEBIAN/postinst" <<'EOF'
+    if [[ "$with_desk" == 1 ]]; then
+      cat > "$deb/DEBIAN/postinst" <<'EOF'
+#!/bin/sh
+set -e
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl daemon-reload
+  systemctl enable rust-reg.service
+fi
+if command -v update-desktop-database >/dev/null 2>&1; then
+  update-desktop-database /usr/share/applications || true
+fi
+if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+  gtk-update-icon-cache -f /usr/share/icons/hicolor || true
+fi
+EOF
+    else
+      cat > "$deb/DEBIAN/postinst" <<'EOF'
 #!/bin/sh
 set -e
 if command -v systemctl >/dev/null 2>&1; then
@@ -154,6 +250,7 @@ if command -v systemctl >/dev/null 2>&1; then
   systemctl enable rust-reg.service
 fi
 EOF
+    fi
     chmod 755 "$deb/DEBIAN/postinst"
     asset="$release_dir/rust-reg_${version}_amd64.deb"
     dpkg-deb --root-owner-group --build "$deb" "$asset" >&2
@@ -165,6 +262,9 @@ EOF
     assemble_version "$stage"
     assemble_version "$tree_version"
     cp "$release_dir/$run_name" "$work/tree/bin/$run_name"
+    if [[ "$with_desk" == 1 ]]; then
+      cp "$release_dir/$desk_name" "$work/tree/bin/$desk_name"
+    fi
     tar -C "$work" -cf "$work/payload.tar" stage tree
     asset="$release_dir/rust-reg-${version}.exe"
     cp "$release_dir/$bin_name" "$asset"

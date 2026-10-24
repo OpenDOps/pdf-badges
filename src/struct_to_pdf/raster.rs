@@ -8,8 +8,10 @@ use image::imageops::FilterType;
 use image::{DynamicImage, ImageFormat, RgbImage, Rgba, RgbaImage};
 
 use crate::struct_to_pdf::barcode::{self, Symbol};
+use crate::struct_to_pdf::fonts;
+use crate::struct_to_pdf::markup::{self, LineMetrics, MarkupItem, StyledRun};
 use crate::struct_to_pdf::{
-    Barcode, ContentEntry, HorizontalAlign, ImagePlacement, Page, Photo, RenderError, TextBox,
+    Barcode, ContentEntry, HorizontalAlign, ImagePlacement, Page, Photo, RenderError, Rgb, TextBox,
     Units, VerticalAlign,
 };
 
@@ -140,7 +142,12 @@ fn paint(
             message: "page has no pixels".to_string(),
         });
     }
-    let mut image = RgbaImage::from_pixel(width, height, Rgba([255, 255, 255, 255]));
+    let background = page.page_size.background.unwrap_or(Rgb::WHITE);
+    let mut image = RgbaImage::from_pixel(
+        width,
+        height,
+        Rgba([background.red, background.green, background.blue, 255]),
+    );
     let mut fonts = HashMap::new();
     for entry in &page.contents {
         match entry {
@@ -312,14 +319,8 @@ fn draw_text(
     if shown.is_empty() {
         return Ok(());
     }
-    let cached = faces.and_then(|faces| faces.get(&text.text.font));
-    let owned;
-    let (font, glyphs) = if let Some(face) = cached {
-        (&face.font, Some(&face.glyphs))
-    } else {
-        owned = open_font(page, &text.text.font, base_dir, fonts, &text.id)?;
-        (owned, None)
-    };
+    let mut parsed = markup::parse(shown, text)?;
+    ensure_fonts(page, text, base_dir, fonts, faces, &parsed)?;
     let (box_x, box_y, box_right, box_bottom) =
         entry_box(page, text.pos_x, text.pos_y, text.width, text.height, dpi);
     let pad_left = length_px(text.padding.left, page.page_size.units, dpi).round() as i32;
@@ -333,43 +334,443 @@ fn draw_text(
     if content_w == 0 || content_h == 0 {
         return Ok(());
     }
-    let size = length_px(text.text.font_size, page.page_size.units, dpi).max(1.0) as f32;
-    let line_h = length_px(
-        text.text.line_height + text.text.leading,
-        page.page_size.units,
-        dpi,
-    )
-    .max(1.0);
-    let lines = wrap(font, glyphs, shown, size, content_w as f32);
-    let block_h = line_h * lines.len() as f64;
+    let units = page.page_size.units;
+    let lines = if text.auto_scale {
+        fit_lines(
+            fonts,
+            faces,
+            &mut parsed,
+            content_w as f32,
+            content_h as f32,
+            units,
+            dpi,
+            &text.id,
+        )?
+    } else {
+        layout_lines(
+            fonts,
+            faces,
+            &parsed.items,
+            &parsed.end_metrics,
+            content_w as f32,
+            units,
+            dpi,
+            &text.id,
+        )?
+    };
+    if lines.is_empty() {
+        return Ok(());
+    }
+    let line_box_h: f32 = lines
+        .iter()
+        .map(|line| line.line_height + line.leading)
+        .sum();
+    let painted_h = painted_block_height_px(fonts, faces, &lines)?;
+    let block_h = line_box_h.max(painted_h);
     let top = match text.vertical {
         VerticalAlign::Top => 0.0,
-        VerticalAlign::Middle => ((content_h as f64) - block_h) / 2.0,
-        VerticalAlign::Bottom => (content_h as f64) - block_h,
+        VerticalAlign::Middle => ((content_h as f32) - block_h) / 2.0,
+        VerticalAlign::Bottom => (content_h as f32) - block_h,
     };
-    for (index, line) in lines.iter().enumerate() {
-        let width = line_width(font, glyphs, line, size);
+    let mut cursor_y = top;
+    for line in &lines {
         let left = match text.horizontal {
             HorizontalAlign::Left => 0.0,
-            HorizontalAlign::Center => (content_w as f32 - width) / 2.0,
-            HorizontalAlign::Right => content_w as f32 - width,
+            HorizontalAlign::Center => (content_w as f32 - line.width) / 2.0,
+            HorizontalAlign::Right => content_w as f32 - line.width,
         };
-        let baseline = top + line_h * index as f64;
-        blit_line(
-            image,
-            font,
-            glyphs,
-            line,
-            size,
-            origin_x as f32 + left,
-            origin_y as f32 + baseline as f32,
-            origin_x,
-            origin_y,
-            origin_x + content_w,
-            origin_y + content_h,
-        );
+        let mut cursor_x = left;
+        for segment in &line.segments {
+            let (font, glyphs) = face_for(fonts, faces, &segment.font_key)?;
+            blit_line(
+                image,
+                font,
+                glyphs,
+                &segment.text,
+                segment.size,
+                segment.color,
+                origin_x as f32 + cursor_x,
+                origin_y as f32 + cursor_y,
+                origin_x,
+                origin_y,
+                origin_x + content_w,
+                origin_y + content_h,
+            );
+            if segment.underline && segment.width > 0.0 {
+                let ascent = font
+                    .horizontal_line_metrics(segment.size)
+                    .map(|metrics| metrics.ascent)
+                    .unwrap_or(segment.size * 0.8);
+                let y = (origin_y as f32 + cursor_y + ascent + segment.size * 0.08).round() as i32;
+                let x0 = (origin_x as f32 + cursor_x).round() as i32;
+                let x1 = (origin_x as f32 + cursor_x + segment.width).round() as i32;
+                for x in x0..x1 {
+                    if x >= origin_x && x < origin_x + content_w && y >= origin_y && y < origin_y + content_h
+                    {
+                        blend(image, x, y, 255, segment.color);
+                    }
+                }
+            }
+            cursor_x += segment.width;
+        }
+        cursor_y += line.line_height + line.leading;
     }
     Ok(())
+}
+
+struct PixSegment {
+    text: String,
+    font_key: String,
+    size: f32,
+    underline: bool,
+    color: Rgb,
+    width: f32,
+}
+
+struct PixLine {
+    segments: Vec<PixSegment>,
+    width: f32,
+    line_height: f32,
+    leading: f32,
+}
+
+struct PixWord {
+    text: String,
+    font_key: String,
+    size: f32,
+    leading: f32,
+    line_height: f32,
+    underline: bool,
+    color: Rgb,
+    width: f32,
+    space: f32,
+}
+
+fn fit_lines(
+    fonts: &HashMap<String, Font>,
+    faces: Option<&FaceSet>,
+    parsed: &mut markup::Markup,
+    content_w: f32,
+    content_h: f32,
+    units: Units,
+    dpi: f64,
+    id: &str,
+) -> Result<Vec<PixLine>, RenderError> {
+    let mut lines = layout_lines(
+        fonts,
+        faces,
+        &parsed.items,
+        &parsed.end_metrics,
+        content_w,
+        units,
+        dpi,
+        id,
+    )?;
+    if lines.is_empty() {
+        return Ok(lines);
+    }
+    for _ in 0..32 {
+        let scale = fit_scale(fonts, faces, &lines, content_w, content_h)?;
+        if scale >= 1.0 {
+            break;
+        }
+        scale_markup(parsed, scale as f64);
+        lines = layout_lines(
+            fonts,
+            faces,
+            &parsed.items,
+            &parsed.end_metrics,
+            content_w,
+            units,
+            dpi,
+            id,
+        )?;
+    }
+    Ok(lines)
+}
+
+fn fit_scale(
+    fonts: &HashMap<String, Font>,
+    faces: Option<&FaceSet>,
+    lines: &[PixLine],
+    content_w: f32,
+    content_h: f32,
+) -> Result<f32, RenderError> {
+    let text_w = lines.iter().map(|line| line.width).fold(0.0f32, f32::max);
+    let line_box_h: f32 = lines
+        .iter()
+        .map(|line| line.line_height + line.leading)
+        .sum();
+    let text_h = line_box_h.max(painted_block_height_px(fonts, faces, lines)?);
+    if text_w <= content_w + 0.01 && text_h <= content_h + 0.01 {
+        return Ok(1.0);
+    }
+    let width_scale = if text_w > 0.0 {
+        content_w / text_w
+    } else {
+        1.0
+    };
+    let height_scale = if text_h > 0.0 {
+        content_h / text_h
+    } else {
+        1.0
+    };
+    Ok(width_scale.min(height_scale).min(1.0))
+}
+
+fn painted_block_height_px(
+    fonts: &HashMap<String, Font>,
+    faces: Option<&FaceSet>,
+    lines: &[PixLine],
+) -> Result<f32, RenderError> {
+    if lines.is_empty() {
+        return Ok(0.0);
+    }
+    // Raster positions each line from its top and draws with ascent inside the
+    // line. The ink of the last line therefore needs ascent+descent below that
+    // line's top, while earlier lines advance by line_height+leading.
+    let steps: f32 = lines[..lines.len() - 1]
+        .iter()
+        .map(|line| line.line_height + line.leading)
+        .sum();
+    let last = lines.last().expect("line");
+    let (ascent, descent) = if let Some(segment) = last.segments.first() {
+        let (font, _) = face_for(fonts, faces, &segment.font_key)?;
+        let metrics = font.horizontal_line_metrics(segment.size);
+        (
+            metrics.map(|m| m.ascent).unwrap_or(segment.size * 0.8),
+            metrics
+                .map(|m| m.descent.abs())
+                .unwrap_or(segment.size * 0.2),
+        )
+    } else {
+        (last.line_height * 0.8, last.line_height * 0.2)
+    };
+    Ok(steps + ascent + descent)
+}
+
+fn scale_markup(parsed: &mut markup::Markup, scale: f64) {
+    for item in &mut parsed.items {
+        match item {
+            MarkupItem::Run(run) => {
+                run.font_size *= scale;
+                run.leading *= scale;
+                run.line_height *= scale;
+            }
+            MarkupItem::Break(metrics) => scale_metrics(metrics, scale),
+        }
+    }
+    scale_metrics(&mut parsed.end_metrics, scale);
+}
+
+fn scale_metrics(metrics: &mut LineMetrics, scale: f64) {
+    metrics.font_size *= scale;
+    metrics.leading *= scale;
+    metrics.line_height *= scale;
+}
+
+fn layout_lines(
+    fonts: &HashMap<String, Font>,
+    faces: Option<&FaceSet>,
+    items: &[MarkupItem],
+    end_metrics: &LineMetrics,
+    content_w: f32,
+    units: Units,
+    dpi: f64,
+    id: &str,
+) -> Result<Vec<PixLine>, RenderError> {
+    let mut lines = Vec::new();
+    let mut words = Vec::new();
+    for item in items {
+        match item {
+            MarkupItem::Run(run) => {
+                for piece in run.text.split(' ').filter(|word| !word.is_empty()) {
+                    let word = word_from(fonts, faces, run, piece, units, dpi, id)?;
+                    if words.is_empty()
+                        || words_width(&words)
+                            + words.last().expect("word").space
+                            + word.width
+                            <= content_w + 0.01
+                    {
+                        words.push(word);
+                        continue;
+                    }
+                    let ended = words.last().expect("line has a word");
+                    let line_height = ended.line_height;
+                    let leading = ended.leading;
+                    lines.push(finish_line(
+                        std::mem::take(&mut words),
+                        line_height,
+                        leading,
+                    ));
+                    words.push(word);
+                }
+            }
+            MarkupItem::Break(metrics) => {
+                let line_height = length_px(metrics.line_height, units, dpi).max(1.0) as f32;
+                let leading = length_px(metrics.leading, units, dpi).max(0.0) as f32;
+                lines.push(finish_line(std::mem::take(&mut words), line_height, leading));
+            }
+        }
+    }
+    if !words.is_empty() {
+        let line_height = length_px(end_metrics.line_height, units, dpi).max(1.0) as f32;
+        let leading = length_px(end_metrics.leading, units, dpi).max(0.0) as f32;
+        lines.push(finish_line(words, line_height, leading));
+    }
+    Ok(lines)
+}
+
+fn word_from(
+    fonts: &HashMap<String, Font>,
+    faces: Option<&FaceSet>,
+    run: &StyledRun,
+    text: &str,
+    units: Units,
+    dpi: f64,
+    id: &str,
+) -> Result<PixWord, RenderError> {
+    let size = length_px(run.font_size, units, dpi).max(1.0) as f32;
+    let leading = length_px(run.leading, units, dpi).max(0.0) as f32;
+    let line_height = length_px(run.line_height, units, dpi).max(1.0) as f32;
+    let (font, glyphs) = face_for(fonts, faces, &run.font_key)?;
+    let width = measure(font, glyphs, text, size, id)?;
+    let space = measure(font, glyphs, " ", size, id)?;
+    Ok(PixWord {
+        text: text.to_string(),
+        font_key: run.font_key.clone(),
+        size,
+        leading,
+        line_height,
+        underline: run.underline,
+        color: run.color,
+        width,
+        space,
+    })
+}
+
+fn finish_line(words: Vec<PixWord>, line_height: f32, leading: f32) -> PixLine {
+    let (segments, width) = segments_of(&words);
+    PixLine {
+        segments,
+        width,
+        line_height,
+        leading,
+    }
+}
+
+fn words_width(words: &[PixWord]) -> f32 {
+    let mut total = 0.0;
+    for (index, word) in words.iter().enumerate() {
+        if index > 0 {
+            total += words[index - 1].space;
+        }
+        total += word.width;
+    }
+    total
+}
+
+fn segments_of(words: &[PixWord]) -> (Vec<PixSegment>, f32) {
+    let mut segments: Vec<PixSegment> = Vec::new();
+    let mut pending_space = 0.0;
+    for word in words {
+        if let Some(last) = segments.last_mut() {
+            if last.font_key == word.font_key
+                && (last.size - word.size).abs() < f32::EPSILON
+                && last.underline == word.underline
+                && last.color == word.color
+            {
+                last.text.push(' ');
+                last.text.push_str(&word.text);
+                last.width += pending_space + word.width;
+                pending_space = word.space;
+                continue;
+            }
+            last.text.push(' ');
+            last.width += pending_space;
+        }
+        segments.push(PixSegment {
+            text: word.text.clone(),
+            font_key: word.font_key.clone(),
+            size: word.size,
+            underline: word.underline,
+            color: word.color,
+            width: word.width,
+        });
+        pending_space = word.space;
+    }
+    let width = segments.iter().map(|segment| segment.width).sum();
+    (segments, width)
+}
+
+fn measure(
+    font: &Font,
+    glyphs: Option<&GlyphCache>,
+    text: &str,
+    size: f32,
+    id: &str,
+) -> Result<f32, RenderError> {
+    let mut missing = Vec::new();
+    let mut width = 0.0f32;
+    for ch in text.chars() {
+        if font.lookup_glyph_index(ch) == 0 && ch != ' ' {
+            if !missing.contains(&ch) {
+                missing.push(ch);
+            }
+            continue;
+        }
+        width += rasterize(font, glyphs, ch, size).0.advance_width;
+    }
+    if !missing.is_empty() {
+        return Err(fonts::uncovered(id, &missing));
+    }
+    Ok(width)
+}
+
+fn ensure_fonts(
+    page: &Page,
+    text: &TextBox,
+    base_dir: &Path,
+    fonts: &mut HashMap<String, Font>,
+    faces: Option<&FaceSet>,
+    parsed: &markup::Markup,
+) -> Result<(), RenderError> {
+    let mut keys = Vec::new();
+    for item in &parsed.items {
+        match item {
+            MarkupItem::Run(run) => push_key(&mut keys, &run.font_key),
+            MarkupItem::Break(metrics) => push_key(&mut keys, &metrics.font_key),
+        }
+    }
+    push_key(&mut keys, &parsed.end_metrics.font_key);
+    for key in keys {
+        if faces.is_some_and(|faces| faces.get(&key).is_some()) {
+            continue;
+        }
+        open_font(page, &key, base_dir, fonts, &text.id)?;
+    }
+    Ok(())
+}
+
+fn push_key(keys: &mut Vec<String>, key: &str) {
+    if !keys.iter().any(|existing| existing == key) {
+        keys.push(key.to_string());
+    }
+}
+
+fn face_for<'a>(
+    fonts: &'a HashMap<String, Font>,
+    faces: Option<&'a FaceSet>,
+    key: &str,
+) -> Result<(&'a Font, Option<&'a GlyphCache>), RenderError> {
+    if let Some(face) = faces.and_then(|faces| faces.get(key)) {
+        return Ok((&face.font, Some(&face.glyphs)));
+    }
+    let font = fonts.get(key).ok_or_else(|| RenderError {
+        context: key.to_string(),
+        message: format!("font {key} was not opened"),
+    })?;
+    Ok((font, None))
 }
 
 fn open_font<'a>(
@@ -408,37 +809,6 @@ fn open_font<'a>(
 
 type GlyphCache = Mutex<HashMap<(u32, char), (Metrics, Vec<u8>)>>;
 
-fn wrap(
-    font: &Font,
-    glyphs: Option<&GlyphCache>,
-    text: &str,
-    size: f32,
-    max_width: f32,
-) -> Vec<String> {
-    let mut lines = Vec::new();
-    for paragraph in text.split('\n') {
-        let mut line = String::new();
-        for word in paragraph.split_inclusive(' ') {
-            let candidate = format!("{line}{word}");
-            if !line.is_empty() && line_width(font, glyphs, &candidate, size) > max_width {
-                lines.push(std::mem::take(&mut line));
-            }
-            line.push_str(word);
-        }
-        lines.push(line);
-    }
-    if lines.is_empty() {
-        lines.push(String::new());
-    }
-    lines
-}
-
-fn line_width(font: &Font, glyphs: Option<&GlyphCache>, text: &str, size: f32) -> f32 {
-    text.chars()
-        .map(|ch| rasterize(font, glyphs, ch, size).0.advance_width)
-        .sum()
-}
-
 fn rasterize(font: &Font, glyphs: Option<&GlyphCache>, ch: char, size: f32) -> (Metrics, Vec<u8>) {
     let Some(glyphs) = glyphs else {
         return font.rasterize(ch, size);
@@ -459,6 +829,7 @@ fn blit_line(
     glyphs: Option<&GlyphCache>,
     text: &str,
     size: f32,
+    color: Rgb,
     left: f32,
     top: f32,
     clip_left: i32,
@@ -484,7 +855,7 @@ fn blit_line(
                 if x < clip_left || y < clip_top || x >= clip_right || y >= clip_bottom {
                     continue;
                 }
-                blend(image, x, y, coverage);
+                blend(image, x, y, coverage, color);
             }
         }
         cursor += glyph.advance_width;
@@ -555,7 +926,7 @@ fn paint_matrix(
     }
 }
 
-fn blend(image: &mut RgbaImage, x: i32, y: i32, coverage: u8) {
+fn blend(image: &mut RgbaImage, x: i32, y: i32, coverage: u8, color: Rgb) {
     if x < 0 || y < 0 {
         return;
     }
@@ -565,12 +936,18 @@ fn blend(image: &mut RgbaImage, x: i32, y: i32, coverage: u8) {
         return;
     }
     let pixel = image.get_pixel(x, y);
-    let keep = 255 - coverage as u16;
-    let mix = |channel: u8| ((u16::from(channel) * keep) / 255) as u8;
+    let cover = u16::from(coverage);
+    let keep = 255 - cover;
+    let mix = |channel: u8, ink: u8| ((u16::from(ink) * cover + u16::from(channel) * keep) / 255) as u8;
     image.put_pixel(
         x,
         y,
-        Rgba([mix(pixel[0]), mix(pixel[1]), mix(pixel[2]), 255]),
+        Rgba([
+            mix(pixel[0], color.red),
+            mix(pixel[1], color.green),
+            mix(pixel[2], color.blue),
+            255,
+        ]),
     );
 }
 

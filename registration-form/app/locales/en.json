@@ -36,7 +36,10 @@
   },
   "key": {
     "placeholder": "Key",
-    "enter": "Enter"
+    "enter": "Enter",
+    "uid": "UID {{id}}",
+    "none": "No event is selected",
+    "select": "Select an event"
   },
   "nav": {
     "label": "Sections",
@@ -81,7 +84,8 @@
     "waiting": "Not synced",
     "synced": "Synced",
     "address": "Address",
-    "update": "Update"
+    "update": "Update",
+    "updateAvailable": "Update for version {{version}} is available"
   },
   "network": {
     "localUp": "Local server is reachable",

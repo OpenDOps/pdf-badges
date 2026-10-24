@@ -1,0 +1,4 @@
+id: admin-session
+device_id: device-1
+base: http://127.0.0.1:9/
+session_id: jsess
