@@ -1184,7 +1184,13 @@ pub(crate) async fn install(
     let _ = std::fs::remove_file(&downloaded.path);
     eprintln!("registration-server update: stage");
     let stage_started = Instant::now();
-    if let Err(err) = write_staged(&app.prefix, release_version(), &version) {
+    if let Err(err) = write_staged(
+        &app.prefix,
+        release_version(),
+        &version,
+        &app.dist,
+        &app.form,
+    ) {
         eprintln!(
             "registration-server update: stage failed {err} {}ms",
             stage_started.elapsed().as_millis()
@@ -1231,6 +1237,14 @@ struct InstallState {
     /// Executable that was running when the upgrade was staged. Empty when unknown.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     running: String,
+    /// Admin static files the staged process was serving, when that directory is
+    /// not already `versions/<from>/admin`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    admin: String,
+    /// Operator screens the staged process was serving, when that directory is
+    /// not already `versions/<from>/form`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    form: String,
 }
 
 #[derive(Clone, Copy)]
@@ -1240,13 +1254,21 @@ pub(crate) struct Day {
     pub day: u32,
 }
 
-fn write_staged(prefix: &Path, from: &str, to: &str) -> io::Result<()> {
+fn write_staged(
+    prefix: &Path,
+    from: &str,
+    to: &str,
+    admin: &Path,
+    form: &Path,
+) -> io::Result<()> {
     let mut state = read_state(prefix).unwrap_or(InstallState {
         phase: String::new(),
         from: String::new(),
         to: String::new(),
         rejected: Vec::new(),
         running: String::new(),
+        admin: String::new(),
+        form: String::new(),
     });
     state.phase = "staged".into();
     state.from = from.into();
@@ -1255,9 +1277,33 @@ fn write_staged(prefix: &Path, from: &str, to: &str) -> io::Result<()> {
     if !running.is_empty() {
         state.running = running;
     }
+    state.admin = recorded_static(prefix, from, "admin", admin);
+    state.form = recorded_static(prefix, from, "form", form);
     write_state(prefix, &state)?;
     clear_started(prefix)?;
     Ok(())
+}
+
+/// Keep a static directory that is not already the installed version tree.
+fn recorded_static(prefix: &Path, version: &str, name: &str, path: &Path) -> String {
+    if !path.is_dir() {
+        return String::new();
+    }
+    let installed = version_dir(prefix, version).join(name);
+    if same_dir(path, &installed) {
+        return String::new();
+    }
+    std::fs::canonicalize(path)
+        .unwrap_or_else(|_| path.to_path_buf())
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn same_dir(left: &Path, right: &Path) -> bool {
+    match (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => left == right,
+    }
 }
 
 fn clear_started(prefix: &Path) -> io::Result<()> {
@@ -1778,6 +1824,7 @@ fn decide(prefix: &Path) -> io::Result<PathBuf> {
                 settle(prefix, local_today())?;
                 Ok(version_dir(prefix, &to))
             } else {
+                backup_running_executable(prefix, &state, local_today())?;
                 Ok(version_dir(prefix, &state.to))
             }
         }
@@ -1832,6 +1879,8 @@ fn roll_back(prefix: &Path, state: &InstallState) -> io::Result<PathBuf> {
             to: state.to.clone(),
             rejected,
             running: state.running.clone(),
+            admin: state.admin.clone(),
+            form: state.form.clone(),
         },
     )?;
     Ok(version_dir(prefix, &state.from))
@@ -1851,54 +1900,101 @@ fn current_version_executable() -> String {
     }
 }
 
-/// Copy the staged process into `backup/<from>-<date>/` when it is not already
-/// `versions/<from>/`. The source stays in place.
+/// Copy the staged process into `backup/<from>-<date>/` before the new version starts.
+/// An executable that is not already `versions/<from>/` is copied there. Admin and form
+/// static trees are copied from the directories the staged process was serving, from
+/// siblings of that executable, or from `versions/<from>/`. The sources stay in place.
+/// A backup that already holds the executable still receives static trees it is missing.
 fn backup_running_executable(prefix: &Path, state: &InstallState, today: Day) -> io::Result<()> {
-    if state.running.is_empty() || state.from.is_empty() {
-        return Ok(());
-    }
-    let source = PathBuf::from(&state.running);
-    if !source.is_file() {
-        return Ok(());
-    }
-    let installed = version_dir(prefix, &state.from).join(version_binary_name());
-    if source == installed {
+    if state.from.is_empty() {
         return Ok(());
     }
     let dest_root = prefix
         .join("backup")
         .join(backup_dir_name(&state.from, today));
-    let dest_bin = dest_root.join(version_binary_name());
-    if dest_bin.is_file() {
-        return Ok(());
-    }
-    std::fs::create_dir_all(&dest_root)?;
-    std::fs::copy(&source, &dest_bin)?;
-    if let Some(parent) = source.parent() {
-        for name in ["admin", "form"] {
-            let sibling = parent.join(name);
-            if sibling.is_dir() {
-                copy_version_tree(&sibling, &dest_root.join(name))?;
-            }
+    let mut wrote = false;
+    let installed = version_dir(prefix, &state.from).join(version_binary_name());
+    let source = PathBuf::from(&state.running);
+    if source.is_file() && source != installed {
+        let dest_bin = dest_root.join(version_binary_name());
+        if !dest_bin.is_file() {
+            std::fs::create_dir_all(&dest_root)?;
+            std::fs::copy(&source, &dest_bin)?;
+            wrote = true;
         }
     }
-    sync_dir(&dest_root)?;
-    if let Some(backup) = dest_root.parent() {
-        sync_dir(backup)?;
+    for (name, recorded) in [("admin", state.admin.as_str()), ("form", state.form.as_str())] {
+        let dest = dest_root.join(name);
+        if dest.exists() {
+            continue;
+        }
+        let Some(from) = static_tree_source(prefix, state, name, recorded) else {
+            continue;
+        };
+        if same_dir(&from, &dest) {
+            continue;
+        }
+        std::fs::create_dir_all(&dest_root)?;
+        copy_version_tree(&from, &dest)?;
+        wrote = true;
+    }
+    if wrote {
+        sync_dir(&dest_root)?;
+        if let Some(backup) = dest_root.parent() {
+            sync_dir(backup)?;
+        }
     }
     Ok(())
 }
 
-/// Put the newest `backup/<version>-*` tree back at `versions/<version>/` when that binary is missing.
+/// Where the static tree for `name` (`admin` or `form`) is read from.
+/// A directory recorded at stage time wins. Otherwise a sibling of the running
+/// executable, when that sibling is not already `versions/<from>/<name>`.
+/// Otherwise `versions/<from>/<name>`.
+fn static_tree_source(
+    prefix: &Path,
+    state: &InstallState,
+    name: &str,
+    recorded: &str,
+) -> Option<PathBuf> {
+    if !recorded.is_empty() {
+        let path = PathBuf::from(recorded);
+        if path.is_dir() {
+            return Some(path);
+        }
+    }
+    let installed = version_dir(prefix, &state.from).join(name);
+    if !state.running.is_empty() {
+        if let Some(parent) = Path::new(&state.running).parent() {
+            let sibling = parent.join(name);
+            if sibling.is_dir() && !same_dir(&sibling, &installed) {
+                return Some(sibling);
+            }
+        }
+    }
+    installed.is_dir().then_some(installed)
+}
+
+/// Put the newest `backup/<version>-*` tree back at `versions/<version>/`.
+/// A missing binary restores the whole tree. A binary that is already there still
+/// receives `admin/` and `form/` when those directories are missing.
 fn restore_backed_up_version(prefix: &Path, version: &str) -> io::Result<()> {
     let dest = version_dir(prefix, version);
-    if dest.join(version_binary_name()).is_file() {
-        return Ok(());
-    }
     let Some(backup) = latest_backup(prefix, version) else {
         return Ok(());
     };
-    copy_version_tree(&backup, &dest)?;
+    let binary = dest.join(version_binary_name());
+    if !binary.is_file() {
+        copy_version_tree(&backup, &dest)?;
+    } else {
+        for name in ["admin", "form"] {
+            let from = backup.join(name);
+            let to = dest.join(name);
+            if from.is_dir() && !to.exists() {
+                copy_version_tree(&from, &to)?;
+            }
+        }
+    }
     if let Some(versions) = dest.parent() {
         sync_dir(versions)?;
     }
@@ -1936,6 +2032,26 @@ fn copy_version_tree(from: &Path, to: &Path) -> io::Result<()> {
             copy_version_tree(&entry.path(), &dest)?;
         } else if kind.is_file() {
             std::fs::copy(entry.path(), dest)?;
+        }
+    }
+    Ok(())
+}
+
+/// Move entries from `from` into `to`. A name that is already in `to` stays as it is.
+fn merge_into(from: &Path, to: &Path) -> io::Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let dest = to.join(entry.file_name());
+        let kind = entry.file_type()?;
+        if kind.is_dir() {
+            if dest.exists() {
+                merge_into(&entry.path(), &dest)?;
+            } else {
+                std::fs::rename(entry.path(), dest)?;
+            }
+        } else if kind.is_file() && !dest.exists() {
+            std::fs::rename(entry.path(), dest)?;
         }
     }
     Ok(())
@@ -1982,7 +2098,12 @@ pub(crate) fn settle(prefix: &Path, today: Day) -> io::Result<()> {
     if version_occupied(&from_dir) {
         state.from = from_name;
         std::fs::create_dir_all(&backup_root)?;
-        std::fs::rename(&from_dir, &backup)?;
+        if backup.exists() {
+            merge_into(&from_dir, &backup)?;
+            std::fs::remove_dir_all(&from_dir)?;
+        } else {
+            std::fs::rename(&from_dir, &backup)?;
+        }
         sync_dir(&backup_root)?;
         if let Some(versions) = from_dir.parent() {
             sync_dir(versions)?;
@@ -4380,6 +4501,150 @@ mod tests {
         }
 
         #[test]
+        fn static_files_from_the_previous_version_are_restored() {
+            let dir = TempDir::new();
+            let binary = version_binary();
+            let installed = dir.0.join("versions").join("0.1.0");
+            std::fs::create_dir_all(&installed).unwrap();
+            std::fs::write(installed.join(binary), b"kept").unwrap();
+            let screens = dir.0.join("screens");
+            std::fs::create_dir_all(screens.join("admin").join("assets")).unwrap();
+            std::fs::create_dir_all(screens.join("form")).unwrap();
+            std::fs::write(screens.join("admin").join("index.html"), b"admin").unwrap();
+            std::fs::write(screens.join("admin").join("assets").join("app.js"), b"js").unwrap();
+            std::fs::write(screens.join("form").join("index.html"), b"form").unwrap();
+            let home = dir.0.join("elsewhere");
+            std::fs::create_dir_all(&home).unwrap();
+            std::fs::write(home.join(binary), b"old-bin").unwrap();
+            std::fs::create_dir_all(dir.0.join("updates")).unwrap();
+            std::fs::write(
+                dir.0.join("updates").join("state.yml"),
+                format!(
+                    "phase: trying\nfrom: \"0.1.0\"\nto: \"0.2.0\"\nrejected: []\nrunning: \"{}\"\nadmin: \"{}\"\nform: \"{}\"\n",
+                    home.join(binary).display(),
+                    screens.join("admin").display(),
+                    screens.join("form").display()
+                ),
+            )
+            .unwrap();
+            std::fs::write(dir.0.join("updates").join("live"), "0.2.0\n").unwrap();
+            run_until(
+                &dir.0,
+                |paths| paths.iter().any(|path| path.ends_with("0.1.0")),
+                |path| {
+                    if path.ends_with("0.2.0") {
+                        Err(std::io::Error::new(std::io::ErrorKind::NotFound, "missing"))
+                    } else {
+                        idle_child()
+                    }
+                },
+            )
+            .unwrap();
+            assert_eq!(std::fs::read(installed.join(binary)).unwrap(), b"kept");
+            assert_eq!(
+                std::fs::read(installed.join("admin").join("index.html")).unwrap(),
+                b"admin"
+            );
+            assert_eq!(
+                std::fs::read(installed.join("admin").join("assets").join("app.js")).unwrap(),
+                b"js"
+            );
+            assert_eq!(
+                std::fs::read(installed.join("form").join("index.html")).unwrap(),
+                b"form"
+            );
+            assert_eq!(
+                std::fs::read(screens.join("admin").join("assets").join("app.js")).unwrap(),
+                b"js"
+            );
+            let saved = std::fs::read_dir(dir.0.join("backup"))
+                .unwrap()
+                .filter_map(|entry| entry.ok())
+                .find(|entry| {
+                    entry
+                        .file_name()
+                        .to_str()
+                        .is_some_and(|name| name.starts_with("0.1.0-"))
+                })
+                .expect("backup");
+            assert_eq!(
+                std::fs::read(saved.path().join("admin").join("assets").join("app.js")).unwrap(),
+                b"js"
+            );
+            assert_eq!(
+                std::fs::read(saved.path().join("form").join("index.html")).unwrap(),
+                b"form"
+            );
+            assert!(!dir.0.join("versions").join("0.2.0").exists());
+            let state: serde_yaml::Value = serde_yaml::from_str(
+                &std::fs::read_to_string(dir.0.join("updates").join("state.yml")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(state["phase"].as_str(), Some("rolled_back"));
+        }
+
+        #[test]
+        fn the_from_directory_static_files_are_backed_up() {
+            let dir = TempDir::new();
+            let binary = version_binary();
+            let installed = dir.0.join("versions").join("0.1.0");
+            std::fs::create_dir_all(installed.join("admin").join("assets")).unwrap();
+            std::fs::create_dir_all(installed.join("form")).unwrap();
+            std::fs::write(installed.join("admin").join("index.html"), b"admin").unwrap();
+            std::fs::write(installed.join("admin").join("assets").join("app.js"), b"js").unwrap();
+            std::fs::write(installed.join("form").join("index.html"), b"form").unwrap();
+            let home = dir.0.join("elsewhere");
+            std::fs::create_dir_all(&home).unwrap();
+            std::fs::write(home.join(binary), b"old-bin").unwrap();
+            std::fs::create_dir_all(dir.0.join("updates")).unwrap();
+            std::fs::write(
+                dir.0.join("updates").join("state.yml"),
+                format!(
+                    "phase: trying\nfrom: \"0.1.0\"\nto: \"0.2.0\"\nrejected: []\nrunning: \"{}\"\n",
+                    home.join(binary).display()
+                ),
+            )
+            .unwrap();
+            std::fs::write(dir.0.join("updates").join("live"), "0.2.0\n").unwrap();
+            run_until(
+                &dir.0,
+                |paths| paths.iter().any(|path| path.ends_with("0.1.0")),
+                |path| {
+                    if path.ends_with("0.2.0") {
+                        Err(std::io::Error::new(std::io::ErrorKind::NotFound, "missing"))
+                    } else {
+                        idle_child()
+                    }
+                },
+            )
+            .unwrap();
+            assert_eq!(std::fs::read(installed.join(binary)).unwrap(), b"old-bin");
+            assert_eq!(
+                std::fs::read(installed.join("admin").join("assets").join("app.js")).unwrap(),
+                b"js"
+            );
+            assert_eq!(
+                std::fs::read(installed.join("form").join("index.html")).unwrap(),
+                b"form"
+            );
+            let saved = std::fs::read_dir(dir.0.join("backup"))
+                .unwrap()
+                .filter_map(|entry| entry.ok())
+                .find(|entry| {
+                    entry
+                        .file_name()
+                        .to_str()
+                        .is_some_and(|name| name.starts_with("0.1.0-"))
+                })
+                .expect("backup");
+            assert_eq!(
+                std::fs::read(saved.path().join("admin").join("index.html")).unwrap(),
+                b"admin"
+            );
+            assert_eq!(std::fs::read(saved.path().join(binary)).unwrap(), b"old-bin");
+        }
+
+        #[test]
         fn trying_with_started_keeps_the_new_tree() {
             let dir = TempDir::new();
             write_phase(&dir.0, "trying", "0.1.0", "0.2.0", &[]);
@@ -4549,6 +4814,24 @@ mod tests {
             )
             .unwrap();
             assert_eq!(state["phase"].as_str(), Some("current"));
+        }
+
+        #[test]
+        fn an_existing_backup_keeps_static_files_already_copied() {
+            let dir = TempDir::new();
+            write_phase(&dir.0, "trying", "0.1.0", "0.2.0");
+            let old = dir.0.join("versions").join("0.1.0");
+            let saved = dir.0.join("backup").join("0.1.0-20261006");
+            std::fs::create_dir_all(old.join("admin")).unwrap();
+            std::fs::create_dir_all(saved.join("admin")).unwrap();
+            std::fs::write(old.join("rust-reg"), b"from-bin").unwrap();
+            std::fs::write(old.join("admin").join("index.html"), b"from-admin").unwrap();
+            std::fs::write(saved.join("admin").join("index.html"), b"backed-admin").unwrap();
+            std::fs::write(saved.join("rust-reg"), b"backed-bin").unwrap();
+            settle(&dir.0, day()).unwrap();
+            assert!(!old.exists());
+            assert_eq!(std::fs::read(saved.join("admin").join("index.html")).unwrap(), b"backed-admin");
+            assert_eq!(std::fs::read(saved.join("rust-reg")).unwrap(), b"backed-bin");
         }
 
         #[test]
