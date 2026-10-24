@@ -4,7 +4,7 @@ exclude = ["desk"]
 
 [package]
 name = "rust-reg"
-version = "2.0.0-alpha.1"
+version = "2.0.0-alpha.2"
 edition = "2021"
 default-run = "rust-reg"
 
