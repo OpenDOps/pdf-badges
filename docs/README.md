@@ -19,7 +19,7 @@ pdf-tooling            Rust library other languages wrap; also Docker, gRPC
 multi-page PDF         one page per data row
 ```
 
-`excel-tooling` reads a workbook, lets the caller pick a sheet and a header row, and returns the table. `pdf-tooling` is a Rust library. It loads a page structure, finds mustache fields in the boxes marked as templates, accepts a binding from column name to field, and draws one PDF page for each row. A Rust program links the crate. C, Java, and Python wrap the C ABI. The Docker service calls the same functions. Google Sheets and Yandex Tables will be further openers on `excel-tooling`. They produce the same `Table`.
+`excel-tooling` reads a workbook, lets the caller pick a sheet and a header row, and returns the table. `pdf-tooling` is a Rust library. It loads a page structure, finds mustache fields in the boxes marked as templates, accepts a binding from column name to field, and draws one PDF page for each row. A Rust program links the crate. C, Java, and Python wrap the C ABI. The Docker service calls the same functions. Yandex Tables is a later opener on `excel-tooling` and produces the same `Table`. Google Sheets is watched by its own Rust service, [google-tables/design.md](google-tables/design.md), which follows the excel header rules and emits row changes. The registration admin can use that watch as the sync source, [registration-server/sheets-source.md](registration-server/sheets-source.md).
 
 The caller is not a third service yet. It opens the workbook, selects the sheet and the header, loads the template, sets the binding, and posts the table to the PDF service.
 
@@ -35,12 +35,14 @@ proto/
   irbis/pdf/v1/pdf.proto
 modules/
   pdf-tooling/                  Rust crate, Dockerfile, tests
-  excel-tooling/                Python package, Dockerfile, tests
+  excel-tooling/                Python, Calc source and its gRPC service
+  google-tables/                Rust binary: hidden UID and fingerprint columns, LMDB
 docs/
   README.md                     this file
   table.md                      shared Table contract
   pdf-tooling/                  PDF module: extract, template editor, writer
   excel-tooling/                reader, gRPC, later sheet adapters
+  google-tables/                Sheets watch, hidden UID and fingerprint columns, LMDB, row events
   basic-excel-pdf-integration/  scan, fill, gRPC, excel caller
   registration-server/          on-device HTTP, print, and the first event-sync host
   event-sync/                   sync library: catalog slices and the C ABI
@@ -59,6 +61,9 @@ Today the Rust code still lives at the repository root (`src/`, `tests/`, the ro
 |---|---|
 | [table.md](table.md) | Column ids, typed cells, how a row is keyed |
 | [excel-tooling/design.md](excel-tooling/design.md) | LibreOffice reader, sheet and header selection, gRPC, Docker |
+| [google-tables/design.md](google-tables/design.md) | Google Sheets watch: header and column API, hidden UID and fingerprint columns, LMDB snapshot, added/updated/deleted events |
+| [google-tables/implementation-plan.md](google-tables/implementation-plan.md) | Build sequence for that watch, including a live sheet and the event queue |
+| [registration-server/sheets-source.md](registration-server/sheets-source.md) | Admin can sync from a Google Sheet: local watcher, local JetStream, no remote queue |
 | [excel-tooling/implementation-plan.md](excel-tooling/implementation-plan.md) | MVP build sequence for that reader |
 | [excel-tooling/runbook.md](excel-tooling/runbook.md) | How to start the service and check a workbook by hand |
 | [pdf-tooling/README.md](pdf-tooling/README.md) | PDF module: extract, template editor, writer |

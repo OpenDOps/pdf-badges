@@ -405,7 +405,10 @@ fn draw_text(
                 let x0 = (origin_x as f32 + cursor_x).round() as i32;
                 let x1 = (origin_x as f32 + cursor_x + segment.width).round() as i32;
                 for x in x0..x1 {
-                    if x >= origin_x && x < origin_x + content_w && y >= origin_y && y < origin_y + content_h
+                    if x >= origin_x
+                        && x < origin_x + content_w
+                        && y >= origin_y
+                        && y < origin_y + content_h
                     {
                         blend(image, x, y, 255, segment.color);
                     }
@@ -587,9 +590,7 @@ fn layout_lines(
                 for piece in run.text.split(' ').filter(|word| !word.is_empty()) {
                     let word = word_from(fonts, faces, run, piece, units, dpi, id)?;
                     if words.is_empty()
-                        || words_width(&words)
-                            + words.last().expect("word").space
-                            + word.width
+                        || words_width(&words) + words.last().expect("word").space + word.width
                             <= content_w + 0.01
                     {
                         words.push(word);
@@ -609,7 +610,11 @@ fn layout_lines(
             MarkupItem::Break(metrics) => {
                 let line_height = length_px(metrics.line_height, units, dpi).max(1.0) as f32;
                 let leading = length_px(metrics.leading, units, dpi).max(0.0) as f32;
-                lines.push(finish_line(std::mem::take(&mut words), line_height, leading));
+                lines.push(finish_line(
+                    std::mem::take(&mut words),
+                    line_height,
+                    leading,
+                ));
             }
         }
     }
@@ -938,7 +943,8 @@ fn blend(image: &mut RgbaImage, x: i32, y: i32, coverage: u8, color: Rgb) {
     let pixel = image.get_pixel(x, y);
     let cover = u16::from(coverage);
     let keep = 255 - cover;
-    let mix = |channel: u8, ink: u8| ((u16::from(ink) * cover + u16::from(channel) * keep) / 255) as u8;
+    let mix =
+        |channel: u8, ink: u8| ((u16::from(ink) * cover + u16::from(channel) * keep) / 255) as u8;
     image.put_pixel(
         x,
         y,

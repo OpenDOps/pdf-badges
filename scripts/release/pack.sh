@@ -52,8 +52,13 @@ case "$toolchain" in
   stable-x86_64-apple-darwin) mac_cpu=intel ;;
 esac
 
+case "$os" in
+  macos|linux) native_print_backend=cups ;;
+  windows) native_print_backend=spooler ;;
+esac
+echo "pack: native print backend ${native_print_backend}" >&2
 echo "pack: cargo +${toolchain} build --release $tag" >&2
-cargo "+${toolchain}" build --release --bin rust-reg --bin rust-reg-run >&2
+cargo "+${toolchain}" build --release --lib --bin rust-reg --bin rust-reg-run >&2
 with_desk=1
 if [[ "${REGISTRATION_SKIP_DESK:-}" == "1" ]]; then
   with_desk=0
@@ -106,6 +111,8 @@ assemble_version() {
   mkdir -p "$dest/admin" "$dest/form"
   cp "$release_dir/$bin_name" "$dest/$bin_name"
   chmod 755 "$dest/$bin_name" || true
+  cp "$release_dir/$run_name" "$dest/$run_name"
+  chmod 755 "$dest/$run_name" || true
   cp -R "$admin_dist/." "$dest/admin/"
   cp -R "$form_client/." "$dest/form/"
   # The client build copies public/dbenums next to the form. That dump is not part of the release.
@@ -119,8 +126,6 @@ case "$os" in
     version_dir="$prefix/versions/$version"
     mkdir -p "$prefix/bin" "$(dirname "$work/root/Library/LaunchDaemons")"
     mkdir -p "$work/root/Library/LaunchDaemons"
-    cp "$release_dir/$run_name" "$prefix/bin/$run_name"
-    chmod 755 "$prefix/bin/$run_name"
     if [[ "$with_desk" == 1 ]]; then
       cp "$release_dir/$desk_name" "$prefix/bin/$desk_name"
       chmod 755 "$prefix/bin/$desk_name"
@@ -156,6 +161,8 @@ case "$os" in
 EOF
     fi
     assemble_version "$version_dir"
+    cp "$version_dir/$run_name" "$prefix/bin/$run_name"
+    chmod 755 "$prefix/bin/$run_name"
     cat > "$work/root/Library/LaunchDaemons/com.opendops.rust-reg.plist" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -192,8 +199,6 @@ EOF
     deb="$work/deb"
     version_dir="$deb/opt/rust-reg/versions/$version"
     mkdir -p "$deb/opt/rust-reg/bin" "$deb/lib/systemd/system" "$deb/DEBIAN"
-    cp "$release_dir/$run_name" "$deb/opt/rust-reg/bin/$run_name"
-    chmod 755 "$deb/opt/rust-reg/bin/$run_name"
     if [[ "$with_desk" == 1 ]]; then
       cp "$release_dir/$desk_name" "$deb/opt/rust-reg/bin/$desk_name"
       chmod 755 "$deb/opt/rust-reg/bin/$desk_name"
@@ -217,6 +222,8 @@ EOF
 EOF
     fi
     assemble_version "$version_dir"
+    cp "$version_dir/$run_name" "$deb/opt/rust-reg/bin/$run_name"
+    chmod 755 "$deb/opt/rust-reg/bin/$run_name"
     cat > "$deb/lib/systemd/system/rust-reg.service" <<'EOF'
 [Unit]
 Description=rust-reg registration server
@@ -272,7 +279,7 @@ EOF
     version_dir="$tree_version"
     mkdir -p "$work/tree/bin" "$tree_version"
     assemble_version "$tree_version"
-    cp "$release_dir/$run_name" "$work/tree/bin/$run_name"
+    cp "$tree_version/$run_name" "$work/tree/bin/$run_name"
     if [[ "$with_desk" == 1 ]]; then
       cp "$release_dir/$desk_name" "$work/tree/bin/$desk_name"
     fi

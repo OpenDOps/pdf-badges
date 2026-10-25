@@ -1,6 +1,6 @@
 # Porting login, the event file, sync, printing, the local HTTP API, and the registration UI
 
-The device logs in once, stores the project token, opens the database for the selected event, keeps that event in sync, prints badges on the server thread, and answers the local HTTP API the floor and the operator use. The registration screens are a separate React Router app. A version tag publishes the Linux, macOS, and Windows packages, and the install asks before it switches to a newer build. The wire contract is [login-and-token.md](login-and-token.md). Local HTTP stays ahead of remote work as in [design.md](design.md). Inside the sync thread a download is taken before an upload. Drawing and CUPS are [printing.md](printing.md). The local routes are [http-implementation-plan.md](http-implementation-plan.md). The form is [form-design.md](form-design.md).
+The device logs in once, stores the project token, opens the database for the selected event, keeps that event in sync, prints badges on the server thread, and answers the local HTTP API the floor and the operator use. The registration screens are a separate React Router app. A release tag publishes the Linux, Apple silicon, Intel macOS, and Windows packages, and the install asks before it switches to a newer build. Each package also carries a tray wrapper that starts that server. The wire contract is [login-and-token.md](login-and-token.md). Local HTTP stays ahead of remote work as in [design.md](design.md). Inside the sync thread a download is taken before an upload. Drawing and CUPS are [printing.md](printing.md). The local routes are [http-implementation-plan.md](http-implementation-plan.md). The form is [form-design.md](form-design.md). A Google Sheet can replace the remote sync queue. That choice is step 13.
 
 The remote API stays. The Scala session scraper, the properties-file side effects, and the sync loop tangled into "save the token" do not.
 
@@ -15,14 +15,24 @@ The remote API stays. The Scala session scraper, the properties-file side effect
 | [5. Switch](#step-5--switch-load-or-init) | Open, init, or load the selected event | done |
 | [6. Tokens](#step-6--working-with-tokens) | Send the stored token and drop a dead binding | done |
 | [7. Sync](#step-7--sync) | The download and upload queue | done |
-| [8. Printing](#step-8--printing) | Draw a badge and submit it to CUPS | in progress |
-| [9. Local HTTP API](#step-9--local-http-api) | The `/api` routes the floor and the desk call | in progress |
+| [8. Printing](#step-8--printing) | Draw a badge and submit it to CUPS | done |
+| [9. Local HTTP API](#step-9--local-http-api) | The `/api` routes the floor and the desk call | done |
 | [10. Registration UI](#step-10--registration-ui) | The form, then the operator screens around it | in progress |
-| [11. Release and update](#step-11--release-and-update) | GitHub release packages, then a checked swap with rollback | not started |
+| [11. Release and update](#step-11--release-and-update) | GitHub release packages, then a checked swap with rollback | in progress |
+| [12. Tray wrapper](#step-12--tray-wrapper) | Open the tray on Linux, macOS, and Windows | not started |
+| [13. Google Sheet source](#step-13--google-sheet-source) | Admin binds a sheet; the sync thread applies its row events | not started |
 
-Step 8's layout, both renderers, and the in-memory badge are done. Queues, routing, and the print worker are not started.
+Step 8 is done. Steps 1 through 19 of the printing plan are done.
+
+Step 9 is done. Steps 1 through 6 of the HTTP plan are done. The scan API and the leadgen API are not ported.
 
 Step 10's form plan is done. Its operator-screen plan is done through the form path (step 5). Visitors, print, import, settings, and printers are not started.
+
+Step 11 is checked on macOS. The Linux deb and the Windows exe have been published and have not been installed or updated on those machines. The step is accepted when that manual test has passed on both, and when an older binary has read a release from `api.github.com`.
+
+Step 12's tray code is in `desk/`. The icon has not been opened on Linux, macOS, or Windows. `cargo test --manifest-path desk/Cargo.toml` does not open a display. The step is accepted when the checks in [tray-wrapper-testing-plan.md](tray-wrapper-testing-plan.md) have passed on all three.
+
+Step 13 is not started. The watcher it consumes is [google-tables/implementation-plan.md](../google-tables/implementation-plan.md). This step is the admin choice, the local processes, and the sync-thread consumer.
 
 The stored id is `event_id`. The remote paths stay `boxapi/expos`, `eid`, and `profile/synchdev/{device_id}/{event_id}`.
 
@@ -36,9 +46,11 @@ The stored id is `event_id`. The remote paths stay `boxapi/expos`, `eid`, and `p
 - One HTTP helper that attaches `dev_id`, `token`, and `eid` to a request, proves a stored token, and drops the binding when the server says it is dead.
 - A sync queue of ready downloads and uploads. Local HTTP runs first, then a download, then an upload. The queue is as long as the socket cap.
 - Printing a badge on the server thread: find a CUPS queue, draw it with the ticket-render crate, send one IPP job. The sync queue does not print.
-- The local HTTP API: registrations, search, scans, forms, printers, and keys. The mustache pages are not served.
+- The local HTTP API: registrations, search, forms, printers, and keys. The mustache pages are not served. The scan API and the leadgen API are not ported.
 - The registration UI: the kiosk at `/register` and the desk at `/desk`. Both run the form from [form-design.md](form-design.md). That app is its own project and can be built before printing and before the local HTTP API.
-- The three release packages and the updater that installs a newer GitHub release after the operator agrees and the checksum matches.
+- The release installers, the upgrade zips, and the updater that installs a newer GitHub release after the operator agrees and the checksum matches.
+- The tray wrapper, `rust-reg-desk`, built once for Linux, macOS, and Windows. It starts the server and shows the listen address. The registration screens stay in the browser.
+- A sheet source on the same device: the admin binds a Google Sheet, and the sync thread applies that watcher's row events instead of the remote download queue. [sheets-source.md](sheets-source.md) is that split. Building the watcher is the google-tables plan, not this step.
 
 ## What this plan leaves
 
@@ -213,7 +225,7 @@ Uploads follow the Scala order. A batch that the server accepts is marked synced
 
 ## Step 8 — Printing
 
-Status: in progress. The layout, both renderers, and preparing them when the event opens are done. Queues through the worker are not started.
+Status: done. Steps 1 through 19 of [printing-implementation-plan.md](printing-implementation-plan.md) are done.
 
 The design is [printing.md](printing.md). The build sequence is [printing-implementation-plan.md](printing-implementation-plan.md).
 
@@ -226,16 +238,16 @@ The server thread finds CUPS queues, draws one badge with the `ticket-render` cr
 
 ## Step 9 — Local HTTP API
 
-Status: in progress. Liveness, the form files, visitors, desk, and sync status are done. Print, scans, and leadgen are not started.
+Status: done. Steps 1 through 6 of [http-implementation-plan.md](http-implementation-plan.md) are done: liveness, the form files, visitors, print, desk, and sync status. The scan API and the leadgen API are not ported.
 
 The design and the build sequence are [http-implementation-plan.md](http-implementation-plan.md).
 
 This is the last server step. It replaces the Scala `RegApp` routes the floor and the desk call. Responses are JSON on `/api`. The process does not render a mustache page.
 
-- A registration is saved, searched, printed, and scanned through the open event file. Print jobs go to the step 8 worker.
-- Forms, enums, backgrounds, zones, and ticket barcodes are the files sync already stored.
+- A registration is saved, searched, and printed through the open event file. Print jobs go to the step 8 worker.
+- Forms, enums, and backgrounds are the files sync already stored.
 - Keys, printer settings, and routing are the operator routes. They require the operator cookie from step 3.
-- `GET /health` stays. The skeleton `GET /registrations/{id}`, `POST /print`, and `GET /ws` fold into the routes in that plan.
+- `GET /health` stays. `GET /ws` stays the idle lookup socket. The skeleton `GET /registrations/{id}` and `POST /print` fold into the routes in that plan.
 
 ## Step 10 — Registration UI
 
@@ -255,75 +267,128 @@ The form reads one document, `GET /forms/form.json`. Vite builds that response f
 
 ## Step 11 — Release and update
 
-Status: not started.
+Status: in progress. The macOS pack and the updater tests are done. The Linux and Windows install and update are step 16 of the release plan, and they have not been run. The live check against `api.github.com` has not been run. The step is accepted only after both.
 
-The build sequence is [release-implementation-plan.md](release-implementation-plan.md). It does not wait on a printer. `print_busy` is a job already on the print channel.
+The build sequence is [release-implementation-plan.md](release-implementation-plan.md). It does not wait on a printer. `print_busy` is a job already on the print channel, or a print the worker has started.
 
-A tag `vX.Y.Z` builds three packages and publishes them on one GitHub release. The running install looks for a newer release. It asks the operator, and it restarts only after the file's SHA-256 matches the release. A start that never opens the listen socket is rolled back to the previous tree. After a start that does open it, that previous tree is a dated backup, and a backup older than seven days is removed.
+A tag `release-X.Y.Z` builds the installers and an upgrade zip for each system, and publishes them on one GitHub release. The binary bakes `vX.Y.Z`. The running install looks for a newer release. It asks the operator, and it restarts only after the zip's SHA-256 matches the release. A start that never opens the listen socket is rolled back to the previous tree, and that version is not offered again. After a start that does open it, that previous tree is a dated backup. A backup dated seven or more days earlier is removed.
 
-The event directory and the credential file stay outside the versioned tree. A swap and a rollback leave both where they are.
+The credential file and the event directory stay in `data/`. A swap, a rollback, and a backup move leave both where they are.
 
 ### Publish
 
-`.github/workflows/release.yml` runs on a tag `release-X.Y.Z`, or from a manual run that types `X.Y.Z` and checks Linux, macOS, and Windows. The workflow writes `X.Y.Z` into `Cargo.toml` and pushes that commit when the version changed. One Ubuntu job builds `registration-admin` and `registration-form` once. The checked runners then build that commit in parallel, reuse those files, and bake `vX.Y.Z` into the release binary. One later job creates or updates the GitHub release `release-X.Y.Z` and uploads the built assets and `SHA256SUMS`. A version with `-alpha`, `-beta`, or `-rc` is marked pre-release. A version without that suffix is not. A manual run that leaves a system unchecked does not rebuild that asset, and the previous file of that name stays on the release.
+`.github/workflows/release.yml` runs on a tag `release-X.Y.Z`, or from a manual run that types `X.Y.Z` and checks Linux, macOS, and Windows. The workflow writes `X.Y.Z` into `Cargo.toml` and `Cargo.lock` and pushes that commit when the version changed. One Ubuntu job builds `registration-admin` and `registration-form` once. The checked runners then build that commit in parallel, reuse those files, and bake `vX.Y.Z` into `rust-reg` and `rust-reg-run`. Each runner first tests `registration_server::native_print` for its own system: Linux and macOS compile the CUPS client, and Windows compiles the spooler client. Checking macOS builds both Apple silicon and Intel. One later job creates or updates the GitHub release `release-X.Y.Z` and uploads the built assets and `SHA256SUMS`. A version with `-alpha`, `-beta`, or `-rc` is marked pre-release. A version without that suffix is not. A manual run that leaves a system unchecked does not rebuild that asset, and the previous file of that name stays on the release.
 
-| Runner | Asset | How it is packed |
+| Runner | Installer | Upgrade zip |
 |---|---|---|
-| `ubuntu-latest` | `rust-reg_<version>_amd64.deb` | `dpkg-deb` |
-| `macos-latest` | `rust-reg-<version>.pkg` | `pkgbuild` for Apple silicon |
-| `macos-15-intel` | `rust-reg-<version>-intel.pkg` | `pkgbuild` for Intel |
-| `windows-latest` | `rust-reg-<version>.exe` | the installer that writes the same tree |
+| `ubuntu-latest` | `rust-reg_<version>_amd64.deb` | `rust-reg-<version>-linux.zip` |
+| `macos-latest` | `rust-reg-<version>.pkg` | `rust-reg-<version>-macos.zip` |
+| `macos-15-intel` | `rust-reg-<version>-intel.pkg` | `rust-reg-<version>-macos-intel.zip` |
+| `windows-latest` | `rust-reg-<version>.exe` | `rust-reg-<version>-windows.zip` |
 
-`SHA256SUMS` is one line per asset: the hex digest, two spaces, the file name.
+The deb is `dpkg-deb`. Each pkg is `pkgbuild`. The exe is the server binary with a ustar of the install tree appended. A local pack follows the CPU: Apple silicon uses `stable-aarch64-apple-darwin`, and an Intel Mac uses `stable-x86_64-apple-darwin`. `SHA256SUMS` is one line per installer and one line per zip: lowercase hex, two spaces, the file name.
 
-The first install uses the package. A later update extracts the new tree from that same asset and does not run maintainer scripts, `installer`, or the exe's start-the-service path. The Linux unit, the launchd plist, and the Windows service stay the ones the first install registered. Each of them starts the supervisor `bin/rust-reg-run`. That supervisor is the parent of the server and lives outside `versions/`, so a new tree does not replace it.
+The first install uses the package. It copies `versions/<version>/rust-reg-run` to `bin/rust-reg-run` and registers the service. A later update downloads the zip. It does not run maintainer scripts, `installer`, or the exe's start-the-service path, and it does not rewrite the unit, the launchd plist, or the Windows service. Each of them starts `bin/rust-reg-run`. That supervisor is the parent of the server. It starts `versions/<live>/rust-reg registration-server` and passes `--credentials <prefix>/data/credentials.yml`, `--dist <prefix>/versions/<live>/admin`, and `--form <prefix>/versions/<live>/form`.
 
-Which tree is live is one file, `updates/live`, holding a version. The supervisor writes it by renaming a temporary file over it. Version directories are not renamed onto each other. The previous directory stays in place until a start has opened the socket.
+Which tree is live is one file, `updates/live`, holding a version. `updates/live` and `state.yml` are written as a temporary file in the same directory, then fsync, rename, and fsync the directory. Version directories are not renamed onto each other.
 
 ```text
 <prefix>/
-  bin/rust-reg-run                      supervisor
+  bin/rust-reg-run                      first install; an update replaces this file in place
+  bin/rust-reg-desk                     tray; first install; an update leaves this file
   versions/<version>/
     rust-reg                            rust-reg.exe on Windows
+    rust-reg-run                        rust-reg-run.exe on Windows; same tag as rust-reg
     admin/                              registration-admin dist
-    form/                               registration-form dist
-    RELEASE                             one line, the tag compiled into rust-reg
-  backup/<version>-<YYYYMMDD>/          moved here after a start that opened the socket
+    form/                               registration-form build
+    RELEASE                             one line, the baked tag
+  backup/<version>-<YYYYMMDD>/
   updates/
-    live                                one line, the version to exec
-    state.yml                           staged, trying, current, or rolled_back
-    started                             written by the child after it is listening
+    live                                one line, the version to start
+    state.yml                           phase, from, to, rejected
+    started                             written after the listen socket is open
+  data/credentials.yml
+  data/<event_id>/
 ```
 
-`<prefix>` is `/opt/rust-reg` on Linux, `/Library/rust-reg` on macOS, and `C:\Program Files\rust-reg` on Windows. `dpkg-deb -x` unpacks the deb into a partial directory that is then renamed to `versions/<version>/`. The pkg payload is expanded the same way, without `installer`. The exe is run with a staging directory and without starting the service, and that directory is renamed to `versions/<version>/` the same way.
+`<prefix>` is `/opt/rust-reg` on Linux, `/Library/rust-reg` on macOS, and `C:\Program Files\rust-reg` on Windows. `state.yml` `phase` is `staged`, `trying`, `current`, or `rolled_back`. `rejected` lists versions that failed before the socket opened. When the server that staged the upgrade was started from outside `versions/<from>/`, `state.yml` also records that executable and, when they are not already the installed trees, the `admin` and `form` directories it was serving.
 
 ### Look, then ask
 
-A newer release is read from GitHub, `GET https://api.github.com/repos/<owner>/<repo>/releases/latest`. The remote registration server has no update path, and this check does not call it. The sync thread only schedules that request, once the listen socket is open and again every six hours. It is not a sync download. The project token is not sent. A draft or a prerelease is skipped. `tag_name` is kept when it is `v` or `release-` plus a version greater than the release tag compiled into the binary. A version is `MAJOR.MINOR.PATCH`, or those numbers plus `-alpha.N`, `-beta.N`, or `-rc.N`. `REGISTRATION_UPDATE_REPO` overrides the compiled `owner/repo`. `REGISTRATION_UPDATE_PRERELEASE=1` instead reads `GET /repos/<owner>/<repo>/releases` and keeps pre-releases, then offers the newest of those versions.
+A newer release is read from GitHub, `GET https://api.github.com/repos/OpenDOps/pdf-badges/releases/latest`. The remote registration server has no update path, and this check does not call it. The sync thread only schedules that request, once the listen socket is open and again every six hours. It is not a sync download. The request sends `User-Agent: rust-reg` and `Accept: application/vnd.github+json`. The project token is not sent, and there is no `Authorization` header. A draft or a prerelease is skipped. `tag_name` is kept when it is `v` or `release-` plus a version greater than the tag compiled into the binary, and that version is not in `rejected`. A version is `MAJOR.MINOR.PATCH`, or those numbers plus `-alpha.N`, `-beta.N`, or `-rc.N`. For the same numbers, `alpha` is before `beta`, `beta` is before `rc`, and a version with no suffix is newer than one with a suffix. `REGISTRATION_UPDATE_REPO` overrides `OpenDOps/pdf-badges`. `REGISTRATION_UPDATE_PRERELEASE=1` instead reads `GET /repos/<owner>/<repo>/releases` and keeps pre-releases, then offers the newest of those versions. A failed request leaves the previous offer.
 
-`GET /api/update` requires the desk cookie. The data is the running version and, when the check found one, the newer version. It does not call GitHub. `POST /api/update/check` requires the same cookie and runs that GitHub lookup immediately, then returns the same data. A failure leaves the previous offer and returns `update_check_failed`. The desk menu shows "Обновить" with that version. Confirming posts `POST /api/update`. Until that post, nothing is downloaded and the process does not exit. `/register` does not show the control. The menu test `menu_omits_update_and_moderation` gains the control for a waiting update in the same change; the moderation checkbox stays absent. The menu does not post `POST /api/update/check`.
+`GET /api/update` requires the desk cookie. The data is the running version and, when the check found one, the newer version. It does not call GitHub. `POST /api/update/check` requires the same cookie and runs that lookup immediately, then returns the same data. A failure leaves the previous offer and returns `502` `update_check_failed`. A check already in flight is `429` `check_in_progress`. A missing cookie is `401` `unauthorized`. The desk menu shows "Обновить" with that version. Confirming posts `POST /api/update`. Until that post, nothing is downloaded and the process does not exit. `/register` does not show the control. The moderation checkbox stays absent. The menu does not post `POST /api/update/check`.
 
 The Scala paths `GET /updatecheck`, `GET /version`, `GET /update`, and `GET /need_update` stay unserved.
 
+Two checks are still open. An older binary, started against a scratch prefix, reads `https://api.github.com`, and `GET /api/update` names that binary's version and the newer release. Separately, the published deb is installed and then updated on a Linux machine, and the published exe is installed and then updated on a Windows machine. A macOS pass does not accept those two packages.
+
 ### Install
 
-`POST /api/update` requires the desk cookie. A print job still in the channel returns `print_busy` and leaves the process running.
+`POST /api/update` requires the desk cookie. A job on the print channel, or the gate's print flag, returns `409` `print_busy` and leaves the process running.
 
-1. Download this machine's upgrade zip next to `versions/` under a temporary name. The file is `rust-reg-<version>-linux.zip`, `rust-reg-<version>-macos.zip` on Apple silicon, `rust-reg-<version>-macos-intel.zip` on Intel, or `rust-reg-<version>-windows.zip`. macOS chooses from `hw.optional.arm64`. The download waits out the same gate as sync: local HTTP and a print job go first.
-2. Download `SHA256SUMS` from that release and compare the digest of the asset. A mismatch deletes the file and returns `checksum_mismatch`. `updates/live` stays the running version.
-3. Unpack into `versions/<new>.partial`, then rename that directory to `versions/<new>/`. The rename is the moment the tree is complete.
-4. Write `state.yml` with phase `staged`, `from` the running version, and `to` the new version. Delete `updates/started` if it remains. Fsync the state file. `updates/live` still names `from`.
-5. Exit. The supervisor points `live` at the new tree.
+1. Download this machine's upgrade zip next to `versions/` as `<name>.partial`. The file is `rust-reg-<version>-linux.zip`, `rust-reg-<version>-macos.zip` on Apple silicon, `rust-reg-<version>-macos-intel.zip` on Intel, or `rust-reg-<version>-windows.zip`. macOS reads `hw.optional.arm64`, so an Intel build running under Rosetta on Apple silicon still takes the Apple silicon zip. The download waits until the gate has no print in progress and no local request other than this one.
+2. Download `SHA256SUMS` from that release and compare the digest. A mismatch deletes the file and returns `409` `checksum_mismatch`. `updates/live` stays the running version.
+3. Unpack into `versions/<new>.partial`, fsync, then rename that directory to `versions/<new>/`. The payload is `rust-reg` (`rust-reg.exe` on Windows), `rust-reg-run`, `admin/`, `form/`, and `RELEASE`. A ustar of those same entries is accepted too. The rename is the moment the tree is complete. A failed copy removes `.partial`. `bin/rust-reg-run` is left as it is.
+4. Write `state.yml` with phase `staged`, `from` the running version, and `to` the new version. Delete `updates/started` if it remains. `updates/live` still names `from`.
+5. Return `200` and `{ "version": "<to>" }`, then exit. The supervisor points `live` at the new tree.
 
 On its next start the supervisor reads `state.yml`:
 
-- Phase `staged`: write `updates/live` as `to`, fsync that file, set the phase to `trying`, fsync `state.yml`, then exec `versions/<to>`. The phase is durable before the exec, so a child that dies is the rollback case below.
-- Phase `trying` with no `started` file: the last exec never opened the socket. Write `updates/live` back to `from`, delete `versions/<to>/`, set the phase to `rolled_back`, and exec `versions/<from>`. `versions/<from>/` was never moved. A later check can offer a newer release. This failed version is not tried again.
-- Phase `trying` with a `started` file: the socket opened, and the child exited before it finished the backup move. Finish that move, set the phase to `current`, exec `versions/<to>`.
-- Phase `current` or `rolled_back`: exec the version in `updates/live`.
+- Phase `staged`: when `versions/<from>/` is missing or empty and `updates/live` names another version that has a tree, `from` becomes that version. An executable recorded in `running` that sits outside `versions/<from>/` is copied into `backup/<from>-<YYYYMMDD>/`, with the `admin` and `form` trees, and the source stays. Write `updates/live` as `to`, remove `updates/started`, set the phase to `trying`, then start `versions/<to>`. The phase is durable before that start.
+- Phase `trying` with no `started` file: the new process never opened the socket, or it could not be spawned. Write `updates/live` back to `from`. Restore a missing `versions/<from>/rust-reg` from the newest `backup/<from>-*` directory, and restore a missing `admin/` or `form/` when the binary is already there. Delete `versions/<to>/`, append `to` to `rejected`, set the phase to `rolled_back`, and start `versions/<from>`. A later check skips a version in `rejected`.
+- Phase `trying` with a `started` file: the socket opened, and the child exited before it finished the backup move. Finish that move, set the phase to `current`, and start `versions/<to>`.
+- Phase `current` or `rolled_back`: start the version in `updates/live`.
+
+A stop of the service stops the child and the parent exits. The phase and the version directories stay.
 
 ### After the socket is open
 
-The new process writes `updates/started` and fsyncs it once the listen socket is open. While the phase is `trying`, it then moves `versions/<from>/` to `backup/<from>-<YYYYMMDD>/`, sets the phase to `current`, and fsyncs `state.yml`. It removes each backup directory whose date is more than seven days before today.
+The new process writes `updates/started` and fsyncs it once the listen socket is open, before the sync thread's first update check. While the phase is `trying`, it moves the previous tree to `backup/<version>-<YYYYMMDD>/`, sets the phase to `current`, and fsyncs `state.yml`. The previous tree is `versions/<from>/` when that directory has files. When it is missing or empty, the tree is the one `updates/live` names, if that version is not `to` and that directory has files. When neither directory has a tree, no backup is created and the phase still becomes `current`. A backup dated seven or more days earlier is removed. A later start with phase `current` does not move `versions/` again and does not rewrite `started`.
 
-A crash after `started` is on disk is a normal restart of the version in `updates/live`. The supervisor leaves that version in place. The backup from that start is what remains of the old build until the seven days pass.
+Once the phase is `current`, the running wrapper is compared with `versions/<to>/rust-reg-run`. The wrapper reads its own path. The server reads the parent executable when that file is named `rust-reg-run` or `rust-reg-run.exe`. The same digest leaves the file. A different digest replaces it, fsyncs the new file, and fsyncs the directory that holds it. A missing path does not create `bin/rust-reg-run`. The process that performed the switch keeps the image it was started with. The next start of that same path is the new wrapper. A phase that is still `staged`, `trying`, or `rolled_back` does not copy. A failed copy leaves the previous file, leaves `versions/<to>/` in place, and leaves the phase `current`.
+
+`data/credentials.yml` and `data/<event_id>/` stay in place across the unpack, the rollback, the backup move, and the wrapper copy.
+
+## Step 12 — Tray wrapper
+
+Status: not started.
+
+This step is the manual check. The tray code is already in `desk/`. The check is [tray-wrapper-testing-plan.md](tray-wrapper-testing-plan.md). `cargo test --manifest-path desk/Cargo.toml` covers the listen line, which binary an installed path starts, and the macOS icon pixels. It does not open a display. A pass on one machine does not cover the other two.
+
+The server process has no window. `rust-reg-desk` starts it and shows a tray icon: a status icon on Linux, a menu-bar item on macOS, and a notification-area icon on Windows. The menu shows the listen address and Quit. A second launch exits. Quit stops the server this tray started, or the installed service when that service already held the port.
+
+## Step 13 — Google Sheet source
+
+Status: not started.
+
+The design is [sheets-source.md](sheets-source.md). The watcher is [google-tables/design.md](../google-tables/design.md), and its build sequence is [google-tables/implementation-plan.md](../google-tables/implementation-plan.md). This step starts when that watcher can publish a `RowChange` to local JetStream. It does not reimplement header finding or the sheet scan.
+
+One event has one source, `remote` or `sheet`. `remote` is steps 2 through 7: the project token and the download and upload queue. `sheet` replaces that queue for the open event. The floor HTTP API and printing stay as they are. Visitor uids are the UIDs google-tables wrote into the sheet.
+
+The credential file gains `sync_source`. Empty means `remote`, so a file written by steps 1 through 7 stays a remote binding. `sheet` stores the spreadsheet id, the Google `sheetId`, the excluded fingerprint columns, and the map from sheet column name to visitor field. The event id is the spreadsheet id. `project_token` stays empty. The service-account JSON is a file next to the credentials, not a field in the YAML. Logout deletes the sheet fields the same way it deletes `event_id` and `project_token`.
+
+The admin event screen offers the source. `remote` keeps `POST /api/login`, `GET /api/events`, and `POST /api/events/select`. `sheet` uses:
+
+| action | local route | what it calls |
+|---|---|---|
+| choose the sheet source | `POST /api/source` | stores `sync_source` `sheet` and starts the local watcher |
+| open a spreadsheet | `POST /api/sheet/open` | google-tables `OpenSpreadsheet` |
+| pick the tab and the header, or name the columns | `POST /api/sheet/header` | `SelectSheet`, then `SelectHeader` or `SelectColumns`, then `SetColumnOptions` |
+| bind column names to visitor fields | `POST /api/sheet/bind` | stores the map, calls `EnsureIdentity` and `StartWatch`, then step 5 opens `base/{spreadsheet_id}` |
+
+`POST /api/source` with `remote` stops the watcher and the local JetStream consumer and returns the operator to the event list. A running remote queue is cleared first, the same way step 5 clears a queue on an event switch.
+
+The release zip carries `google-tables` and `nats-server` beside `rust-reg`. Both are static binaries. `nats-server` listens on `127.0.0.1` only. The subject is `sheets.<watch_id>`. `rust-reg` starts them when `sync_source` is `sheet`, including on startup when the credential file already says so, and stops them when the source changes or the binding is cleared. The tray still starts only `rust-reg`.
+
+The sync thread subscribes as the durable consumer `registration-server`. It does not call kuprin and does not fill the download or upload queue. Local HTTP and printing still pass the gate in [design.md](design.md) before a batch is applied.
+
+| event | event file |
+|---|---|
+| `SNAPSHOT` | replace the visitor rows, in batches of 100 |
+| `ADDED` | insert that uid |
+| `UPDATED` | replace that uid |
+| `DELETED` | remove that uid |
+| `MAPPING` | store the new column list and apply no further row events until `POST /api/sheet/bind` covers every name that already had a binding |
+
+A name with no binding is kept on the stored row and is not a visitor column. The consumer resumes from its JetStream cursor after a restart. The sheet snapshot stays in the google-tables LMDB file.

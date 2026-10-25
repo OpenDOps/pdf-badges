@@ -87,10 +87,37 @@ pub fn prepare_visitor(
     page.contents
         .retain(|entry| entry_shown(if_st(entry), values));
     let index = index_template(&page)?;
+    fill_indexed(&mut page, &index, values, photos, base_dir)?;
+    Ok(page)
+}
+
+/// Fill the holes of an index built when the template was loaded.
+/// A box the visitor's `ifSt` removed is left out. Extra visitor keys are ignored.
+pub fn apply_index(
+    page: &Page,
+    index: &TemplateIndex,
+    values: &HashMap<String, String>,
+    photos: &HashMap<String, Vec<u8>>,
+    base_dir: &Path,
+) -> Result<Page, RenderError> {
+    let mut page = page.clone();
+    page.contents
+        .retain(|entry| entry_shown(if_st(entry), values));
+    fill_indexed(&mut page, index, values, photos, base_dir)?;
+    Ok(page)
+}
+
+fn fill_indexed(
+    page: &mut Page,
+    index: &TemplateIndex,
+    values: &HashMap<String, String>,
+    photos: &HashMap<String, Vec<u8>>,
+    base_dir: &Path,
+) -> Result<(), RenderError> {
     for indexed in &index.boxes {
-        if let Some(text) = text_box_mut(&mut page, &indexed.box_id) {
+        if let Some(text) = text_box_mut(page, &indexed.box_id) {
             text.text.content = Some(fill(indexed, values));
-        } else if let Some(code) = barcode_mut(&mut page, &indexed.box_id) {
+        } else if let Some(code) = barcode_mut(page, &indexed.box_id) {
             code.content = Some(fill_raw(indexed, values));
         }
     }
@@ -99,7 +126,7 @@ pub fn prepare_visitor(
             resolve_photo(photo, values, photos, base_dir)?;
         }
     }
-    Ok(page)
+    Ok(())
 }
 
 pub fn render_visitor(

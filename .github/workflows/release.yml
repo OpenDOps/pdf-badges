@@ -195,6 +195,23 @@ jobs:
           fi
           echo "$RUNNER_TEMP/protoc/bin" >> "$GITHUB_PATH"
           rm protoc.zip
+      - name: Test native print for this system
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$(uname -s)" in
+            Linux|Darwin)
+              echo "native print: CUPS client"
+              ;;
+            MINGW*|MSYS*|CYGWIN*)
+              echo "native print: spooler client"
+              ;;
+            *)
+              echo "native print: unsupported $(uname -s)" >&2
+              exit 1
+              ;;
+          esac
+          cargo test --lib registration_server::native_print
       - uses: actions/download-artifact@v8
         with:
           name: frontend

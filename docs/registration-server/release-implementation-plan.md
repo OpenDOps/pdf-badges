@@ -4,7 +4,7 @@ Build sequence for [porting.md](porting.md) step 11. The desk menu that gains th
 
 Two tracks. The build track compiles a release tag into the binary and publishes the packages. The auto-updater is the registration server and `rust-reg-run`: it reads that compiled tag, asks GitHub if a newer release exists, and swaps the tree after the operator agrees.
 
-The build track is steps 1, 12, and 13. Step 1 is the value the binary carries. Steps 12 and 13 are the pack script and the GitHub Actions run that pass the tag in and upload the assets. The auto-updater is steps 2 through 11. Those steps run on the device. They do not run the workflow. Step 14 is where a release from that workflow is what the updater reads on `https://api.github.com`.
+The build track is steps 1, 12, and 13. Step 1 is the value the binary carries. Steps 12 and 13 are the pack script and the GitHub Actions run that pass the tag in and upload the assets. The auto-updater is steps 2 through 11. Those steps run on the device. They do not run the workflow. Step 14 is where a release from that workflow is what the updater reads on `https://api.github.com`. Step 16 installs that release and runs the swap on a Linux machine and on a Windows machine. The macOS pack was checked in step 12. Linux and Windows assets have been uploaded, and they have not been installed.
 
 A start that never opens the listen socket is rolled back. A start that does open it keeps the previous tree as a dated backup. The updater installs a release only after the operator agrees and the file matches `SHA256SUMS`.
 
@@ -12,9 +12,9 @@ It does not wait on a printer. Printing's queue, routing, and worker can stay un
 
 Each step is one change. The tests named in the step land with it and stay green. A later step keeps the earlier tests passing. Set **Status** to `not started`, `in progress`, or `done`.
 
-Steps 1 through 11 are `cargo test` and `npm test`. Steps 12, 13, and 14 are manual. `cargo test` does not call `api.github.com`. Step 14 is the one check that uses a release the workflow published: an older binary asks `https://api.github.com` and the desk shows that tag.
+Steps 1 through 11 and step 15 are `cargo test` and `npm test`. Steps 12, 13, 14, and 16 are manual. `cargo test` does not call `api.github.com`. Step 14 is the check that uses a release the workflow published: an older binary asks `https://api.github.com` and the desk shows that tag. Step 16 is the same published release installed and updated by hand on Linux and on Windows.
 
-Step 11 of [porting.md](porting.md) is done when steps 1 through 14 are done.
+Step 11 of [porting.md](porting.md) is done when steps 1 through 16 are done. The macOS checks do not accept the Linux or Windows package.
 
 ## Summary
 
@@ -26,7 +26,7 @@ The version is compiled into the binary, then the workflow packs the selected sy
 |---|---|---|
 | [1. Stamp](#step-1-stamp) | `REGISTRATION_RELEASE_TAG` is baked into the binary and written into the package | done |
 | [12. Pack](#step-12-pack) | The deb, the pkg, and the exe from one script, built with that tag | done |
-| [13. Publish](#step-13-publish) | `release-X.Y.Z` packs the selected systems and uploads the assets | in progress |
+| [13. Publish](#step-13-publish) | `release-X.Y.Z` packs the selected systems and uploads the assets | done |
 
 ### Auto-updater
 
@@ -44,15 +44,16 @@ The registration server compares the baked tag with a release, then the desk con
 | [9. Stage](#step-9-stage) | `POST /api/update` writes `staged` and the process exits | done |
 | [10. Supervisor](#step-10-supervisor) | The parent reads the phase and starts the next tree | done |
 | [11. Started](#step-11-started) | The socket marker, the dated backup, seven days | done |
-| [15. Wrapper](#step-15-wrapper) | The version directory carries `rust-reg-run`. After the new version is current, that binary replaces the running wrapper where it was found, when the SHA-256 differs | not started |
+| [15. Wrapper](#step-15-wrapper) | The version directory carries `rust-reg-run`. After the new version is current, that binary replaces the running wrapper where it was found, when the SHA-256 differs | done |
 
 ### Both
 
-Step 14 is the only check that runs the workflow and then the auto-updater against `https://api.github.com`.
+Step 14 reads a published release from `https://api.github.com`. Step 16 installs the older of two published releases on Linux and on Windows, then updates each machine to the newer release.
 
 | Step | What it covers | Status |
 |---|---|---|
 | [14. Live](#step-14-live) | A published release is what an older binary offers | not started |
+| [16. Devices](#step-16-devices) | Install and update by hand on Linux and on Windows | not started |
 
 Shared rules:
 
@@ -477,6 +478,8 @@ Push a tag `release-` plus the `Cargo.toml` version, or run the workflow by hand
 
 These checks have been run, and steps 1 through 12 stay green.
 
+Done. The tag `release-2.0.0-alpha.2` packed every selected system. That Actions run is green, and the pre-release has the Linux deb, the Windows exe, the Apple silicon and Intel pkgs, the four upgrade zips, and `SHA256SUMS`. The first push of that tag committed `Set the package version to 2.0.0-alpha.2.` The rebuild, with `Cargo.toml` already at that version, pushed no version commit. A manual run with only macOS selected built that system. `shasum -a 256 -c SHA256SUMS` matches every file on the release. `RELEASE` and `rust-reg version` are `v2.0.0-alpha.2`. A manual run with version `1.2` failed in `select` before packing. `front`, `build`, and `publish` were skipped, and the release list stayed the two pre-releases.
+
 ## Step 14. Live
 
 [Back to summary](#summary)
@@ -534,3 +537,38 @@ Track: auto-updater. The wrapper is built with the server and travels in the ver
 ### Done when
 
 `cargo test --lib registration_server::update::tests::wrapper` passes, and steps 1 through 14 stay green. `versions/<to>/rust-reg-run version` and, after a copy, the wrapper at the detected path print the same tag.
+
+Done. `scripts/release/pack.sh` puts `rust-reg-run` in the version directory and copies that file to `bin/rust-reg-run` for the first install. Unpack copies it into `versions/<new>/` and does not write the running wrapper. After the phase is `current`, the detected wrapper path is replaced when its SHA-256 differs from `versions/<to>/rust-reg-run`. The same digest, a phase that is still `trying`, a missing path, and a failed copy leave the previous file. `<prefix>/bin/rust-reg-run` is not created as a fallback. `cargo test --lib registration_server::update::tests::wrapper` passes.
+
+## Step 16. Devices
+
+[Back to summary](#summary)
+
+Track: both. The Linux deb and the Windows exe from a published release are installed on those machines, and the running install then takes the newer release's upgrade zip. The workflow upload in step 13 is not this check. The macOS pkg was opened in step 12. This step does not repeat it.
+
+Two tags, both built by the step 13 workflow. Tag A is the older one. Tag B is newer. The file under test is the asset on the GitHub release, not a tree packed on that machine.
+
+### Work
+
+1. On Linux, install `rust-reg_<A>_amd64.deb` with `dpkg -i`. On Windows, run `rust-reg-<A>.exe` with no arguments. The first install is the package. The upgrade zip is not how the first tree is written.
+2. Linux registers `rust-reg.service`. The unit starts `/opt/rust-reg/bin/rust-reg-run --prefix /opt/rust-reg`. Start the unit. `systemctl stop rust-reg` leaves it stopped, and a later `systemctl start rust-reg` brings it back. Windows registers the service `rust-reg` with `start= auto` and `binPath` `"C:\Program Files\rust-reg\bin\rust-reg-run.exe" --prefix "C:\Program Files\rust-reg"`. Start that service. `sc stop rust-reg` leaves it stopped, and a later `sc start rust-reg` brings it back.
+3. On both machines `versions/<A>/` contains `rust-reg` (`rust-reg.exe` on Windows), `rust-reg-run` (`rust-reg-run.exe` on Windows), `admin/`, `form/`, and `RELEASE`. `rust-reg version` and `rust-reg-run version` print `v` plus A, the line in `RELEASE`. `bin/rust-reg-run` matches `versions/<A>/rust-reg-run`. `data/` has no version tree.
+4. With the service running and the listen socket open, `GET /api/update` with the desk cookie returns `version` A and `newer` B. The request host is `api.github.com`.
+5. `POST /api/update` downloads this machine's zip: `rust-reg-<B>-linux.zip` or `rust-reg-<B>-windows.zip`. The digest matches that name in the release's `SHA256SUMS`. `state.yml` is `staged`, `from` A, `to` B. `updates/live` still names A. `data/credentials.yml` is unchanged. The server process exits. The service starts `bin/rust-reg-run` again. The unit file and the Windows `binPath` are the same text as after the first install.
+6. After the new process opens the listen socket, the phase is `current`, `updates/live` is B, and `versions/<B>/rust-reg version` prints `v` plus B. The wrapper that is running matches `versions/<B>/rust-reg-run`, and `rust-reg-run version` prints `v` plus B. `versions/<A>/` is `backup/<A>-<YYYYMMDD>/`. `data/credentials.yml` still has the bytes from before the post.
+
+### Check
+
+Run the same list on Linux and on Windows. A pass on one machine does not cover the other.
+
+| Check | Result |
+|---|---|
+| First install of tag A | The service is registered and running. `bin/rust-reg-run` matches `versions/<A>/rust-reg-run`. Both version commands print `v` plus A. `RELEASE` is that line. `data/` has no version tree. |
+| Stop and start | After a stop the process is down and the phase is unchanged. After a start the listen socket is open again. |
+| `GET /api/update` | `version` is A and `newer` is B. The request host is `api.github.com`. |
+| `POST /api/update` | The zip digest matches `SHA256SUMS`. `state.yml` is `staged` from A to B. The service definition is the text from the first install. `data/credentials.yml` is unchanged. |
+| After the socket opens | The phase is `current`. `updates/live` is B. `versions/<B>/rust-reg version` and the running `rust-reg-run version` print `v` plus B. The wrapper bytes match `versions/<B>/rust-reg-run`. `versions/<A>/` is the dated backup. |
+
+### Done when
+
+The five checks have been run on Linux and the five checks have been run on Windows, and steps 1 through 15 stay green.

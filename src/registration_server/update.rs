@@ -65,7 +65,8 @@ pub fn newer(tag: &str, running: &str) -> Option<String> {
 }
 
 fn version_in_tag(tag: &str) -> Option<&str> {
-    tag.strip_prefix("release-").or_else(|| tag.strip_prefix('v'))
+    tag.strip_prefix("release-")
+        .or_else(|| tag.strip_prefix('v'))
 }
 
 /// Empty or whitespace keeps [`UPDATE_REPO`].
@@ -83,7 +84,9 @@ pub fn update_repo_from_env() -> String {
 /// `1`, `true`, or `yes` lists GitHub releases and keeps pre-releases. Anything else does not.
 pub fn update_prerelease(raw: Option<&str>) -> bool {
     matches!(
-        raw.map(str::trim).map(|value| value.to_ascii_lowercase()).as_deref(),
+        raw.map(str::trim)
+            .map(|value| value.to_ascii_lowercase())
+            .as_deref(),
         Some("1") | Some("true") | Some("yes")
     )
 }
@@ -655,6 +658,15 @@ pub(crate) fn version_binary_name() -> &'static str {
     }
 }
 
+/// `rust-reg-run` inside a version tree, or `rust-reg-run.exe` on Windows.
+pub(crate) fn wrapper_binary_name() -> &'static str {
+    if cfg!(windows) {
+        "rust-reg-run.exe"
+    } else {
+        "rust-reg-run"
+    }
+}
+
 /// The direct parent executable is `rust-reg-run`. A renamed copy, a shell, and a missing parent are not.
 pub(crate) fn parent_is_supervisor() -> bool {
     parent_executable().is_some_and(|path| is_supervisor_path(&path))
@@ -702,7 +714,10 @@ fn parent_executable() -> Option<PathBuf> {
     }
     let end = written as usize;
     let bytes = &buf[..end.min(buf.len())];
-    let end = bytes.iter().position(|byte| *byte == 0).unwrap_or(bytes.len());
+    let end = bytes
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(bytes.len());
     let text = std::str::from_utf8(&bytes[..end]).ok()?;
     if text.is_empty() {
         None
@@ -856,7 +871,10 @@ async fn fetch_asset(
         std::fs::create_dir_all(parent).map_err(|_| DownloadKind::Failed)?;
     }
     let asset_url = release_file_url(base, repo, version, &name);
-    if write_download(client, &asset_url, &path, progress).await.is_err() {
+    if write_download(client, &asset_url, &path, progress)
+        .await
+        .is_err()
+    {
         let _ = std::fs::remove_file(&path);
         return Err(DownloadKind::Failed);
     }
@@ -935,6 +953,7 @@ async fn read_download(client: &reqwest::Client, url: &str) -> Result<String, ()
 }
 
 /// Copies a prepared payload into `versions/<version>.partial`, flushes that directory once, then renames.
+/// An existing `versions/<version>` is removed before the rename.
 /// The payload is the directory `dpkg-deb`, `pkgutil`, or the Windows staging run produces.
 /// A failure removes `.partial`. `data/` and `bin/rust-reg-run` are not touched.
 #[allow(dead_code)]
@@ -960,7 +979,24 @@ fn unpack_with(
         let _ = std::fs::remove_dir_all(&partial);
         return Err(err);
     }
-    if let Err(err) = sync_dir(&partial).and_then(|_| std::fs::rename(&partial, &published)) {
+    if let Err(err) = sync_dir(&partial) {
+        let _ = std::fs::remove_dir_all(&partial);
+        return Err(UnpackError::from(err));
+    }
+    // A previous install of this same version leaves the destination in place.
+    // Rename onto that directory fails, so the old tree goes away first.
+    if published.exists() {
+        let remove = if published.is_dir() {
+            std::fs::remove_dir_all(&published)
+        } else {
+            std::fs::remove_file(&published)
+        };
+        if let Err(err) = remove {
+            let _ = std::fs::remove_dir_all(&partial);
+            return Err(UnpackError::from(err));
+        }
+    }
+    if let Err(err) = std::fs::rename(&partial, &published) {
         let _ = std::fs::remove_dir_all(&partial);
         return Err(UnpackError::from(err));
     }
@@ -986,10 +1022,34 @@ fn copy_payload(
 ) -> Result<(), UnpackError> {
     let mut copied = 0u64;
     let binary = version_binary_name();
-    copy_file(&payload.join(binary), &partial.join(binary), &mut copied, note)?;
-    copy_tree(&payload.join("admin"), &partial.join("admin"), &mut copied, note)?;
-    copy_tree(&payload.join("form"), &partial.join("form"), &mut copied, note)?;
-    copy_file(&payload.join("RELEASE"), &partial.join("RELEASE"), &mut copied, note)?;
+    let binary_path = partial.join(binary);
+    copy_file(&payload.join(binary), &binary_path, &mut copied, note)?;
+    mark_executable(&binary_path)?;
+    copy_tree(
+        &payload.join("admin"),
+        &partial.join("admin"),
+        &mut copied,
+        note,
+    )?;
+    copy_tree(
+        &payload.join("form"),
+        &partial.join("form"),
+        &mut copied,
+        note,
+    )?;
+    copy_file(
+        &payload.join("RELEASE"),
+        &partial.join("RELEASE"),
+        &mut copied,
+        note,
+    )?;
+    let wrapper = wrapper_binary_name();
+    let wrapper_src = payload.join(wrapper);
+    if wrapper_src.is_file() {
+        let wrapper_path = partial.join(wrapper);
+        copy_file(&wrapper_src, &wrapper_path, &mut copied, note)?;
+        mark_executable(&wrapper_path)?;
+    }
     Ok(())
 }
 
@@ -1016,6 +1076,24 @@ fn copy_tree(
 }
 
 #[allow(dead_code)]
+/// The version binary is what the supervisor spawns. A zip entry is written as a normal file.
+fn mark_executable(path: &Path) -> Result<(), UnpackError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(path)
+            .map_err(UnpackError::from)?
+            .permissions();
+        perms.set_mode(perms.mode() | 0o755);
+        std::fs::set_permissions(path, perms).map_err(UnpackError::from)?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+    Ok(())
+}
+
 fn copy_file(
     from: &Path,
     to: &Path,
@@ -1148,7 +1226,9 @@ pub(crate) async fn install(
             };
         }
     };
-    let bytes = std::fs::metadata(&downloaded.path).map(|meta| meta.len()).unwrap_or(0);
+    let bytes = std::fs::metadata(&downloaded.path)
+        .map(|meta| meta.len())
+        .unwrap_or(0);
     eprintln!(
         "registration-server update: downloaded {bytes} bytes {}ms",
         download_started.elapsed().as_millis()
@@ -1283,13 +1363,7 @@ pub(crate) struct Day {
     pub day: u32,
 }
 
-fn write_staged(
-    prefix: &Path,
-    from: &str,
-    to: &str,
-    admin: &Path,
-    form: &Path,
-) -> io::Result<()> {
+fn write_staged(prefix: &Path, from: &str, to: &str, admin: &Path, form: &Path) -> io::Result<()> {
     let mut state = read_state(prefix).unwrap_or(InstallState {
         phase: String::new(),
         from: String::new(),
@@ -1523,13 +1597,7 @@ fn unzip(asset: &Path, dest: &Path, progress: Option<&ReleaseCheck>) -> io::Resu
             out.sync_all()?;
         }
         if let Some(progress) = progress {
-            note_stage(
-                progress,
-                (index as u64) + 1,
-                total as u64,
-                0,
-                EXTRACT_UNITS,
-            );
+            note_stage(progress, (index as u64) + 1, total as u64, 0, EXTRACT_UNITS);
         }
     }
     Ok(())
@@ -1825,17 +1893,25 @@ pub(crate) fn supervise(
         let mut child = match spawn(&path) {
             Ok(child) => child,
             Err(err) => {
+                eprintln!("rust-reg-run: {path:?}: {err}");
                 if roll_back_failed_try(prefix)? {
                     continue;
                 }
                 return Err(err);
             }
         };
+        let mut wrapper_checked = false;
         loop {
             if stop.load(Ordering::Acquire) {
                 let _ = child.kill();
                 let _ = child.wait();
                 return Ok(());
+            }
+            if !wrapper_checked && phase_is(prefix, "current") {
+                wrapper_checked = true;
+                if let Err(err) = replace_wrapper(prefix, own_wrapper_path().as_deref()) {
+                    eprintln!("rust-reg-run: wrapper {err}");
+                }
             }
             match child.try_wait() {
                 Ok(Some(_)) => break,
@@ -2022,7 +2098,10 @@ fn backup_running_executable(prefix: &Path, state: &InstallState, today: Day) ->
             wrote = true;
         }
     }
-    for (name, recorded) in [("admin", state.admin.as_str()), ("form", state.form.as_str())] {
+    for (name, recorded) in [
+        ("admin", state.admin.as_str()),
+        ("form", state.form.as_str()),
+    ] {
         let dest = dest_root.join(name);
         if dest.exists() {
             continue;
@@ -2114,7 +2193,11 @@ fn latest_backup(prefix: &Path, version: &str) -> Option<PathBuf> {
         }
         let day = backup_day(&name)?;
         let ordinal = ymd_to_days(day);
-        if best.as_ref().map(|(have, _)| ordinal >= *have).unwrap_or(true) {
+        if best
+            .as_ref()
+            .map(|(have, _)| ordinal >= *have)
+            .unwrap_or(true)
+        {
             best = Some((ordinal, entry.path()));
         }
     }
@@ -2268,6 +2351,83 @@ fn ymd_to_days(day: Day) -> i64 {
     365 * year + year / 4 - year / 100 + year / 400 + (153 * month - 457) / 5 + day.day as i64 - 306
 }
 
+fn phase_is(prefix: &Path, phase: &str) -> bool {
+    read_state(prefix).is_some_and(|state| state.phase == phase)
+}
+
+/// The running wrapper, when this process is `rust-reg-run`.
+fn own_wrapper_path() -> Option<PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .filter(|path| is_supervisor_path(path))
+}
+
+/// The parent executable, when that file is `rust-reg-run` or `rust-reg-run.exe`.
+fn server_wrapper_path() -> Option<PathBuf> {
+    parent_executable().filter(|path| is_supervisor_path(path))
+}
+
+/// After the phase is `current`, copy `versions/<to>/rust-reg-run` onto `detected` when the
+/// SHA-256 differs. `detected` is the path the wrapper was started from. A missing path does
+/// not fall back to `<prefix>/bin/`. Any other phase leaves that path alone.
+pub(crate) fn replace_wrapper(prefix: &Path, detected: Option<&Path>) -> io::Result<()> {
+    let Some(state) = read_state(prefix) else {
+        return Ok(());
+    };
+    if state.phase != "current" || state.to.is_empty() {
+        return Ok(());
+    }
+    let Some(detected) = detected.filter(|path| !path.as_os_str().is_empty()) else {
+        return Ok(());
+    };
+    let source = version_dir(prefix, &state.to).join(wrapper_binary_name());
+    if !source.is_file() {
+        return Err(io::Error::new(io::ErrorKind::NotFound, "wrapper"));
+    }
+    if !detected.is_file() {
+        return Err(io::Error::new(io::ErrorKind::NotFound, "wrapper"));
+    }
+    let new_bytes = std::fs::read(&source)?;
+    let old_bytes = std::fs::read(detected)?;
+    if sha256_hex(&new_bytes) == sha256_hex(&old_bytes) {
+        return Ok(());
+    }
+    write_replaced(detected, &new_bytes)
+}
+
+/// Write `bytes` beside `dest`, fsync that file, rename it onto `dest`, then fsync the directory.
+fn write_replaced(dest: &Path, bytes: &[u8]) -> io::Result<()> {
+    let parent = match dest.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
+    let name = dest
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "wrapper"))?;
+    let mut tmp_name = name.to_os_string();
+    tmp_name.push(".new");
+    let tmp = parent.join(tmp_name);
+    let write = (|| -> io::Result<()> {
+        let mut file = std::fs::File::create(&tmp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = file.metadata()?.permissions();
+            perms.set_mode(perms.mode() | 0o755);
+            std::fs::set_permissions(&tmp, perms)?;
+        }
+        std::fs::rename(&tmp, dest)?;
+        sync_dir(&parent)?;
+        Ok(())
+    })();
+    if write.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    write
+}
+
 fn note_listening(prefix: &Path) -> io::Result<()> {
     note_listening_on(prefix, local_today())
 }
@@ -2279,6 +2439,9 @@ pub(crate) fn note_listening_on(prefix: &Path, today: Day) -> io::Result<()> {
     write_marker_if_absent(&started_path(prefix), b"\n")?;
     if phase == "trying" {
         settle(prefix, today)?;
+    }
+    if let Err(err) = replace_wrapper(prefix, server_wrapper_path().as_deref()) {
+        eprintln!("registration-server update: wrapper {err}");
     }
     Ok(())
 }
@@ -3640,6 +3803,32 @@ mod tests {
                 "v0.2.0\n"
             );
             assert!(!dir.0.join("versions").join("0.2.0.partial").exists());
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = std::fs::metadata(tree.join(version_binary_name()))
+                    .unwrap()
+                    .permissions()
+                    .mode();
+                assert_ne!(mode & 0o111, 0, "the unpacked server must be executable");
+            }
+        }
+
+        #[test]
+        fn an_existing_tree_is_replaced() {
+            let dir = TempDir::new();
+            let tree = dir.0.join("versions").join("0.2.0");
+            std::fs::create_dir_all(&tree).unwrap();
+            std::fs::write(tree.join("stale.txt"), b"old").unwrap();
+            std::fs::write(tree.join(version_binary_name()), b"old-binary").unwrap();
+            let payload = write_payload(&dir.0, true);
+            unpack(&dir.0, "0.2.0", &payload).unwrap();
+            assert_eq!(
+                std::fs::read(tree.join(version_binary_name())).unwrap(),
+                b"binary"
+            );
+            assert!(!tree.join("stale.txt").exists());
+            assert!(!dir.0.join("versions").join("0.2.0.partial").exists());
         }
 
         #[test]
@@ -3845,6 +4034,10 @@ mod tests {
                 .enqueue(PrintJob {
                     id: "job-1".into(),
                     pages: 1,
+                    zone: None,
+                    name: None,
+                    certificate: None,
+                    category: None,
                 })
                 .unwrap();
             let cookie = operator_cookie(&venue.app);
@@ -4101,10 +4294,7 @@ mod tests {
                 .collect::<Vec<_>>();
             assert!(rejected.iter().any(|version| version == "0.2.0"));
             assert!(rejected.iter().any(|version| version == "0.0.9"));
-            assert_eq!(
-                super::super::failed_upgrade(dir).as_deref(),
-                Some("0.2.0")
-            );
+            assert_eq!(super::super::failed_upgrade(dir).as_deref(), Some("0.2.0"));
         }
 
         #[test]
@@ -4258,10 +4448,7 @@ mod tests {
                     move |path| {
                         seen_child.lock().expect("path").push(path.to_path_buf());
                         if path.ends_with("0.2.0") {
-                            Err(std::io::Error::new(
-                                std::io::ErrorKind::NotFound,
-                                "missing",
-                            ))
+                            Err(std::io::Error::new(std::io::ErrorKind::NotFound, "missing"))
                         } else {
                             idle_child()
                         }
@@ -4279,10 +4466,7 @@ mod tests {
                 if restored {
                     break;
                 }
-                assert!(
-                    Instant::now() < deadline,
-                    "backed up version did not start"
-                );
+                assert!(Instant::now() < deadline, "backed up version did not start");
                 std::thread::sleep(Duration::from_millis(5));
             }
             stop.store(true, Ordering::Release);
@@ -4750,7 +4934,10 @@ mod tests {
                 std::fs::read(saved.path().join("admin").join("index.html")).unwrap(),
                 b"admin"
             );
-            assert_eq!(std::fs::read(saved.path().join(binary)).unwrap(), b"old-bin");
+            assert_eq!(
+                std::fs::read(saved.path().join(binary)).unwrap(),
+                b"old-bin"
+            );
         }
 
         #[test]
@@ -4939,8 +5126,14 @@ mod tests {
             std::fs::write(saved.join("rust-reg"), b"backed-bin").unwrap();
             settle(&dir.0, day()).unwrap();
             assert!(!old.exists());
-            assert_eq!(std::fs::read(saved.join("admin").join("index.html")).unwrap(), b"backed-admin");
-            assert_eq!(std::fs::read(saved.join("rust-reg")).unwrap(), b"backed-bin");
+            assert_eq!(
+                std::fs::read(saved.join("admin").join("index.html")).unwrap(),
+                b"backed-admin"
+            );
+            assert_eq!(
+                std::fs::read(saved.join("rust-reg")).unwrap(),
+                b"backed-bin"
+            );
         }
 
         #[test]
@@ -5026,6 +5219,201 @@ mod tests {
             assert_eq!(std::fs::read(backup.join("marker")).unwrap(), b"backed-up");
             assert_eq!(std::fs::read(&credentials).unwrap(), b"device-id: desk\n");
             assert_eq!(std::fs::read(&started).unwrap(), b"keep\n");
+        }
+    }
+
+    mod wrapper {
+        use std::path::{Path, PathBuf};
+
+        use super::super::{replace_wrapper, unpack, version_binary_name, wrapper_binary_name};
+
+        struct TempDir(PathBuf);
+
+        impl TempDir {
+            fn new() -> Self {
+                use std::sync::atomic::{AtomicU64, Ordering};
+                static NEXT: AtomicU64 = AtomicU64::new(0);
+                let path = std::env::temp_dir().join(format!(
+                    "reg-wrapper-{}-{}",
+                    std::process::id(),
+                    NEXT.fetch_add(1, Ordering::Relaxed)
+                ));
+                std::fs::create_dir_all(&path).unwrap();
+                Self(path)
+            }
+        }
+
+        impl Drop for TempDir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        fn write_phase(dir: &Path, phase: &str, from: &str, to: &str) {
+            std::fs::create_dir_all(dir.join("updates")).unwrap();
+            std::fs::write(
+                dir.join("updates").join("state.yml"),
+                format!("phase: {phase}\nfrom: \"{from}\"\nto: \"{to}\"\nrejected: []\n"),
+            )
+            .unwrap();
+        }
+
+        fn plant_wrapper(dir: &Path, version: &str, bytes: &[u8]) {
+            let tree = dir.join("versions").join(version);
+            std::fs::create_dir_all(&tree).unwrap();
+            std::fs::write(tree.join(wrapper_binary_name()), bytes).unwrap();
+        }
+
+        fn phase_of(dir: &Path) -> String {
+            let text = std::fs::read_to_string(dir.join("updates").join("state.yml")).unwrap();
+            let state: serde_yaml::Value = serde_yaml::from_str(&text).unwrap();
+            state["phase"].as_str().unwrap().to_string()
+        }
+
+        #[test]
+        fn the_version_directory_contains_the_wrapper() {
+            let dir = TempDir::new();
+            let payload = dir.0.join("payload");
+            std::fs::create_dir_all(payload.join("admin")).unwrap();
+            std::fs::create_dir_all(payload.join("form")).unwrap();
+            std::fs::write(payload.join("admin").join("index.html"), b"admin").unwrap();
+            std::fs::write(payload.join("form").join("index.html"), b"form").unwrap();
+            std::fs::write(payload.join(version_binary_name()), b"server").unwrap();
+            std::fs::write(payload.join("RELEASE"), b"v0.2.0\n").unwrap();
+            std::fs::write(payload.join(wrapper_binary_name()), b"wrapper-bytes").unwrap();
+            let running = dir.0.join("opt").join(wrapper_binary_name());
+            std::fs::create_dir_all(running.parent().unwrap()).unwrap();
+            std::fs::write(&running, b"previous").unwrap();
+            unpack(&dir.0, "0.2.0", &payload).unwrap();
+            let installed = dir
+                .0
+                .join("versions")
+                .join("0.2.0")
+                .join(wrapper_binary_name());
+            assert_eq!(std::fs::read(&installed).unwrap(), b"wrapper-bytes");
+            assert_eq!(std::fs::read(&running).unwrap(), b"previous");
+            assert!(!dir.0.join("bin").join(wrapper_binary_name()).exists());
+        }
+
+        #[test]
+        fn current_replaces_the_wrapper() {
+            let dir = TempDir::new();
+            write_phase(&dir.0, "current", "0.1.0", "0.2.0");
+            plant_wrapper(&dir.0, "0.2.0", b"new-wrapper");
+            let detected = dir.0.join("opt").join(wrapper_binary_name());
+            std::fs::create_dir_all(detected.parent().unwrap()).unwrap();
+            std::fs::write(&detected, b"old-wrapper").unwrap();
+            let service = dir.0.join("rust-reg.service");
+            std::fs::write(&service, b"unit\n").unwrap();
+            let credentials = dir.0.join("data").join("credentials.yml");
+            let event = dir.0.join("data").join("EVT").join("db.sqlite");
+            std::fs::create_dir_all(event.parent().unwrap()).unwrap();
+            std::fs::write(&credentials, b"device-id: desk\n").unwrap();
+            std::fs::write(&event, b"sqlite").unwrap();
+            replace_wrapper(&dir.0, Some(&detected)).unwrap();
+            assert_eq!(std::fs::read(&detected).unwrap(), b"new-wrapper");
+            assert_eq!(
+                std::fs::read(
+                    dir.0
+                        .join("versions")
+                        .join("0.2.0")
+                        .join(wrapper_binary_name())
+                )
+                .unwrap(),
+                b"new-wrapper"
+            );
+            assert!(!dir.0.join("bin").join(wrapper_binary_name()).exists());
+            assert_eq!(std::fs::read(&service).unwrap(), b"unit\n");
+            assert_eq!(std::fs::read(&credentials).unwrap(), b"device-id: desk\n");
+            assert_eq!(std::fs::read(&event).unwrap(), b"sqlite");
+            assert_eq!(phase_of(&dir.0), "current");
+        }
+
+        #[test]
+        fn the_same_sha_leaves_the_wrapper() {
+            let dir = TempDir::new();
+            write_phase(&dir.0, "current", "0.1.0", "0.2.0");
+            plant_wrapper(&dir.0, "0.2.0", b"same-wrapper");
+            let detected = dir.0.join("opt").join(wrapper_binary_name());
+            std::fs::create_dir_all(detected.parent().unwrap()).unwrap();
+            std::fs::write(&detected, b"same-wrapper").unwrap();
+            #[cfg(unix)]
+            let inode = {
+                use std::os::unix::fs::MetadataExt;
+                std::fs::metadata(&detected).unwrap().ino()
+            };
+            replace_wrapper(&dir.0, Some(&detected)).unwrap();
+            assert_eq!(std::fs::read(&detected).unwrap(), b"same-wrapper");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                assert_eq!(std::fs::metadata(&detected).unwrap().ino(), inode);
+            }
+            assert!(!dir.0.join("bin").join(wrapper_binary_name()).exists());
+        }
+
+        #[test]
+        fn trying_does_not_replace_the_wrapper() {
+            let dir = TempDir::new();
+            write_phase(&dir.0, "trying", "0.1.0", "0.2.0");
+            plant_wrapper(&dir.0, "0.2.0", b"new-wrapper");
+            let detected = dir.0.join("opt").join(wrapper_binary_name());
+            std::fs::create_dir_all(detected.parent().unwrap()).unwrap();
+            std::fs::write(&detected, b"installed-0.1.0").unwrap();
+            replace_wrapper(&dir.0, Some(&detected)).unwrap();
+            assert_eq!(std::fs::read(&detected).unwrap(), b"installed-0.1.0");
+            assert_eq!(phase_of(&dir.0), "trying");
+            assert!(!dir.0.join("bin").join(wrapper_binary_name()).exists());
+        }
+
+        #[test]
+        fn a_failed_copy_leaves_the_old_wrapper() {
+            let dir = TempDir::new();
+            write_phase(&dir.0, "current", "0.1.0", "0.2.0");
+            plant_wrapper(&dir.0, "0.2.0", b"new-wrapper");
+            let detected = dir.0.join("opt").join(wrapper_binary_name());
+            std::fs::create_dir_all(detected.parent().unwrap()).unwrap();
+            std::fs::write(&detected, b"old-wrapper").unwrap();
+            std::fs::create_dir(
+                detected
+                    .parent()
+                    .unwrap()
+                    .join(format!("{}.new", wrapper_binary_name())),
+            )
+            .unwrap();
+            assert!(replace_wrapper(&dir.0, Some(&detected)).is_err());
+            assert_eq!(std::fs::read(&detected).unwrap(), b"old-wrapper");
+            assert_eq!(
+                std::fs::read(
+                    dir.0
+                        .join("versions")
+                        .join("0.2.0")
+                        .join(wrapper_binary_name())
+                )
+                .unwrap(),
+                b"new-wrapper"
+            );
+            assert_eq!(phase_of(&dir.0), "current");
+        }
+
+        #[test]
+        fn a_missing_wrapper_path_writes_nothing() {
+            let dir = TempDir::new();
+            write_phase(&dir.0, "current", "0.1.0", "0.2.0");
+            plant_wrapper(&dir.0, "0.2.0", b"new-wrapper");
+            replace_wrapper(&dir.0, None).unwrap();
+            assert!(!dir.0.join("bin").join(wrapper_binary_name()).exists());
+            assert_eq!(phase_of(&dir.0), "current");
+            assert_eq!(
+                std::fs::read(
+                    dir.0
+                        .join("versions")
+                        .join("0.2.0")
+                        .join(wrapper_binary_name())
+                )
+                .unwrap(),
+                b"new-wrapper"
+            );
         }
     }
 }

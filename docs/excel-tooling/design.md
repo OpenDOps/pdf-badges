@@ -4,7 +4,7 @@ Reads a spreadsheet, lets the caller choose which sheet and which row are the co
 
 LibreOffice is the engine, not Apache OpenOffice. LibreOffice is the maintained line (current stable is the 25.x series). Apache OpenOffice has had no feature release in years. The package inside the image is LibreOffice Calc.
 
-Google Sheets and Yandex Tables are later openers on this same service. After a source is open, sheet selection, header selection, and `ReadTable` are the same calls.
+Yandex Tables is a later opener on this same service. After that source is open, sheet selection, header selection, and `ReadTable` are the same calls. Google Sheets is watched by [google-tables](../google-tables/design.md), a Rust binary that follows these header and cell-type rules.
 
 ## What the caller does
 
@@ -224,21 +224,25 @@ Calc is not safe for concurrent document use on one process. The server keeps a 
 
 Open loads the document through UNO (`com.sun.star.sheet.SpreadsheetDocument`) with `MacroExecutionMode` 0 and `UpdateDocMode` `NO_UPDATE`, so external links are not refreshed. It then runs `calculateAll()` and builds the sheet list and the default candidates. The compose network is internal, so the container has no route to other hosts. The document stays open on the session. `ReadTable` walks rows from the header in blocks of 2,000 sheet rows. It does not convert the file to CSV. CSV would drop the distinction between int, float, and date.
 
+Header finding, column letters, and cell classification stay in this package. The Sheets watcher reimplements those rules in Rust and checks them against these fixtures. Its layout is [google-tables/design.md](../google-tables/design.md).
+
 ```text
 modules/excel-tooling/
   pyproject.toml
   Dockerfile
   excel_tooling/
     server.py          gRPC handlers, session map
-    workbook.py        UNO open, sheets, candidates, row walk
+    workbook.py        UNO open, the Calc source, row read
     values.py          format type to Value
     columns.py         index to letter A, Z, AA
+    scan.py            candidates, header, data rows
+    password.py
   tests/
     fixtures/          small xlsx files: header on row 1, titles above the header,
                        50-row gap, dates, ints, formulas
 ```
 
-Tests open those fixtures through the same `workbook.py` path. They do not need a golden PDF. A fixture with a formula cell checks that the calculated number comes back, not the formula.
+Tests open those fixtures through the same `workbook.py` path. They do not need a golden PDF. A fixture with a formula cell checks that the calculated number comes back, not the formula. The scan, column, and value tests do not open Calc.
 
 ## Docker
 
@@ -250,9 +254,6 @@ docker compose up excel-tooling
 
 ## Later adapters
 
-The session after open is source-shaped the same way, so the service grows new open methods rather than a new proto for each vendor:
+The session after open is source-shaped the same way, so a later file-like opener can be another open method on this service rather than a new proto. `OpenYandexSpreadsheet` is that opener: a spreadsheet id and credentials in the first message, then the same `SessionView`, header candidates, and `ReadTable`. The adapter maps that product's column position to `excel_id` letters and maps its cell types onto `Value`. It is not part of the first implementation.
 
-- `OpenGoogleSpreadsheet` — spreadsheet id, and credentials carried in the first message (not a file upload)
-- `OpenYandexSpreadsheet` — the same idea for Yandex Tables
-
-Both return `SessionView`. Header candidates and `ReadTable` stay. The adapter maps that product's column position to `excel_id` letters and maps its cell types onto `Value`. Those open methods are not part of the first implementation.
+Google Sheets is a watcher of its own, [google-tables/design.md](../google-tables/design.md). It is a Rust binary. It follows the header scan, column letters, and cell classification in this package, and it also writes a hidden UID column and a fingerprint column, stores the snapshot in LMDB, and emits row changes. Its process and proto stay separate from this one.

@@ -8,12 +8,14 @@
 
 mod admin;
 mod credentials;
+pub mod cups;
 pub mod current;
 pub mod event_db;
 mod gate;
 #[cfg(test)]
 mod grpc;
 mod http;
+pub mod native_print;
 mod net;
 mod pack_overlay;
 mod print;
@@ -87,6 +89,8 @@ pub struct App {
     /// Tests allow an update without `rust-reg-run` as the parent. Production always checks the live parent.
     #[cfg(test)]
     pub(crate) supervised: bool,
+    /// The printer list `POST /api/print` picks from. `serve` installs the live search.
+    pub(crate) search: std::sync::Arc<std::sync::Mutex<Option<cups::Search>>>,
 }
 
 impl App {
@@ -135,6 +139,7 @@ impl App {
                 exit_requested: Arc::new(AtomicBool::new(false)),
                 #[cfg(test)]
                 supervised: true,
+                search: std::sync::Arc::new(std::sync::Mutex::new(None)),
             },
             worker,
         )
@@ -190,9 +195,14 @@ pub async fn serve(
     shutdown: watch::Receiver<bool>,
 ) -> Result<(), ServeError> {
     let http_shutdown = shutdown.clone();
+    let search = cups::Search::start(
+        "http://127.0.0.1:631",
+        std::sync::Arc::new(ipp_tool::MdnsBrowse),
+    );
+    *app.search.lock().expect("search") = Some(search.clone());
     tokio::try_join!(
-        http::serve(http, app, http_shutdown),
-        print_queue::run(worker, shutdown),
+        http::serve(http, app.clone(), http_shutdown),
+        print_queue::run(worker, app.current, search, shutdown),
     )?;
     Ok(())
 }

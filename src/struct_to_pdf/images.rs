@@ -26,11 +26,7 @@ pub fn paint_contents(page: &Page, base_dir: &Path) -> Result<PaintedPage, Rende
         let (red, green, blue) = background.components();
         operations.push(Operation::new(
             "rg",
-            vec![
-                Object::Real(red),
-                Object::Real(green),
-                Object::Real(blue),
-            ],
+            vec![Object::Real(red), Object::Real(green), Object::Real(blue)],
         ));
         operations.push(Operation::new(
             "re",

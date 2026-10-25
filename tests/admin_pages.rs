@@ -1136,7 +1136,11 @@ mod serve_admin {
         std::fs::create_dir_all(&form).unwrap();
         std::fs::write(dist.join("index.html"), INDEX.as_bytes()).unwrap();
         std::fs::write(dist.join("assets/app.js"), b"console.log(1)").unwrap();
-        std::fs::write(form.join("index.html"), b"<!doctype html><h1>operator-key</h1>").unwrap();
+        std::fs::write(
+            form.join("index.html"),
+            b"<!doctype html><h1>operator-key</h1>",
+        )
+        .unwrap();
         let file = CredentialFile::new(scratch.0.join("credentials.yml"));
         file.update(|credentials| {
             credentials.set_device_id("device-1")?;

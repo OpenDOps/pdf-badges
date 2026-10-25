@@ -46,6 +46,8 @@ pub fn router(app: App) -> Router {
             get(registration_list).post(registration_save),
         )
         .route("/api/print", post(registration_print))
+        .route("/api/print/preview", post(print_preview))
+        .route("/api/certificates", post(print_certificates))
         .route(
             "/api/registrations/{id}/photo",
             get(registration_photo).post(registration_photo_post),
@@ -774,7 +776,14 @@ async fn registration_save(State(app): State<App>, body: axum::body::Bytes) -> R
     let mut zone_name = String::new();
     if flags.print_on_save && !noprint {
         zone_name = "desk".to_string();
-        if let Err(err) = app.prints.enqueue(PrintJob { id: uid, pages: 1 }) {
+        if let Err(err) = app.prints.enqueue(PrintJob {
+            id: uid,
+            pages: 1,
+            zone: Some("desk".to_string()),
+            name: None,
+            certificate: None,
+            category: None,
+        }) {
             log::debug!("registration print: {err:?}");
             return api_error(StatusCode::CONFLICT, "no_printer");
         }
@@ -790,27 +799,389 @@ async fn registration_print(State(app): State<App>, body: axum::body::Bytes) -> 
     let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(&body) else {
         return api_error(StatusCode::BAD_REQUEST, "bad_request");
     };
-    let Some(ids) = parsed.get("ids").and_then(|value| value.as_array()) else {
+    print_ids(&app, &parsed, false)
+}
+
+async fn print_certificates(State(app): State<App>, body: axum::body::Bytes) -> Response {
+    let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(&body) else {
         return api_error(StatusCode::BAD_REQUEST, "bad_request");
     };
-    let mut queued = 0;
+    let Some(ids) = id_list(&parsed) else {
+        return api_error(StatusCode::BAD_REQUEST, "bad_request");
+    };
+    let printer_name = body_text(&parsed, "printer");
+    let zone = body_text(&parsed, "zone");
+    let Some(search) = open_search(&app) else {
+        return api_error(StatusCode::CONFLICT, "no_printer");
+    };
+    let mut rows = Vec::new();
     for id in ids {
-        let Some(id) = id.as_str().filter(|id| !id.is_empty()) else {
-            continue;
+        let Some(raw) = stored_row(&app, &id) else {
+            return api_error(StatusCode::NOT_FOUND, "not_found");
         };
-        if let Err(err) = app.prints.enqueue(PrintJob {
-            id: id.to_string(),
-            pages: 1,
-        }) {
-            log::debug!("registration print: {err:?}");
-            return api_error(StatusCode::CONFLICT, "no_printer");
+        let value: serde_json::Value =
+            serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({}));
+        let code = match take_ticket(&app) {
+            Ok(Some(code)) => code,
+            Ok(None) => {
+                rows.push(serde_json::json!({
+                    "name": field_text(&value, &["name"]),
+                    "code": "",
+                    "printer": "",
+                    "zone": zone.clone().unwrap_or_default(),
+                }));
+                continue;
+            }
+            Err(err) => {
+                log::debug!("certificate code: {err}");
+                return api_error(StatusCode::INTERNAL_SERVER_ERROR, "unknown_error");
+            }
+        };
+        if let Some(err) = write_cert_code(&app, &id, &code) {
+            log::debug!("certificate store: {err}");
+            return api_error(StatusCode::INTERNAL_SERVER_ERROR, "unknown_error");
         }
-        queued += 1;
+        let category = field_i64(&value, "category");
+        let internet = json_flag(&value, "internet") || json_flag(&value, "is_internet");
+        let Some(printer) = pick_queue(&search, &printer_name, &zone, true, category, internet)
+        else {
+            return api_error(StatusCode::CONFLICT, "no_printer");
+        };
+        if let Err(response) = enqueue_print_job(
+            &app,
+            &id,
+            printer.name.clone(),
+            zone.clone(),
+            true,
+            Some(category),
+        ) {
+            return response;
+        }
+        rows.push(serde_json::json!({
+            "name": field_text(&value, &["name"]),
+            "code": code,
+            "printer": printer.name,
+            "zone": printer.routing.zone,
+        }));
     }
-    if queued == 0 {
+    if rows.is_empty() {
         return api_error(StatusCode::BAD_REQUEST, "bad_request");
     }
-    api_ok(serde_json::json!({ "zone_name": "" }))
+    api_ok(serde_json::json!({ "rows": rows }))
+}
+
+async fn print_preview(State(app): State<App>, body: axum::body::Bytes) -> Response {
+    let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(&body) else {
+        return api_error(StatusCode::BAD_REQUEST, "bad_request");
+    };
+    let printer_name = body_text(&parsed, "printer");
+    let zone = body_text(&parsed, "zone");
+    let certificate = json_flag(&parsed, "certificate");
+    let Some(search) = open_search(&app) else {
+        return api_error(StatusCode::CONFLICT, "no_printer");
+    };
+    let id = body_text(&parsed, "id");
+    if id.is_none() {
+        let Some(name) = printer_name else {
+            return api_error(StatusCode::BAD_REQUEST, "bad_request");
+        };
+        if pick_queue(&search, &Some(name), &zone, certificate, 0, false).is_none() {
+            return api_error(StatusCode::CONFLICT, "no_printer");
+        }
+        return png_response(test_page_png());
+    }
+    let id = id.unwrap();
+    let Some(raw) = stored_row(&app, &id) else {
+        return api_error(StatusCode::NOT_FOUND, "not_found");
+    };
+    let value: serde_json::Value =
+        serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({}));
+    let category = body_category(&parsed).unwrap_or_else(|| field_i64(&value, "category"));
+    prepare_search(&app, &search, &id, &value);
+    let request = crate::registration_server::cups::PrintRequest {
+        id,
+        category,
+        internet: json_flag(&value, "internet") || json_flag(&value, "is_internet"),
+        zone,
+        name: printer_name,
+        certificate,
+        transliterate: false,
+        double_print: false,
+        rule: None,
+        pixel_cap: None,
+    };
+    match search.preview(&request) {
+        Ok(bytes) => png_response(bytes),
+        Err(err) if err.to_string() == "no queue" => api_error(StatusCode::CONFLICT, "no_printer"),
+        Err(err) => {
+            log::debug!("print preview: {err}");
+            api_error(StatusCode::INTERNAL_SERVER_ERROR, "unknown_error")
+        }
+    }
+}
+
+fn print_ids(app: &App, parsed: &serde_json::Value, certificate: bool) -> Response {
+    let Some(ids) = id_list(parsed) else {
+        return api_error(StatusCode::BAD_REQUEST, "bad_request");
+    };
+    let printer_name = body_text(parsed, "printer");
+    let zone = body_text(parsed, "zone");
+    let certificate = certificate || json_flag(parsed, "certificate");
+    let noprint = json_flag(parsed, "noprint");
+    let check = json_flag(parsed, "check");
+    let category_override = body_category(parsed);
+    let mut jobs = Vec::new();
+    let mut skipped = Vec::new();
+    let mut pending = Vec::new();
+    for id in ids {
+        let Some(raw) = stored_row(app, &id) else {
+            if check {
+                skipped.push(serde_json::Value::String(id));
+                continue;
+            }
+            return api_error(StatusCode::NOT_FOUND, "not_found");
+        };
+        pending.push((id, raw));
+    }
+    if pending.is_empty() {
+        if skipped.is_empty() {
+            return api_error(StatusCode::BAD_REQUEST, "bad_request");
+        }
+        return api_ok(serde_json::json!({ "jobs": jobs, "skipped": skipped }));
+    }
+    let Some(search) = open_search(app) else {
+        return api_error(StatusCode::CONFLICT, "no_printer");
+    };
+    for (id, raw) in pending {
+        let value: serde_json::Value =
+            serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({}));
+        let category = category_override.unwrap_or_else(|| field_i64(&value, "category"));
+        let internet = json_flag(&value, "internet") || json_flag(&value, "is_internet");
+        let Some(printer) = pick_queue(
+            &search,
+            &printer_name,
+            &zone,
+            certificate,
+            category,
+            internet,
+        ) else {
+            return api_error(StatusCode::CONFLICT, "no_printer");
+        };
+        if !noprint {
+            if let Err(response) = enqueue_print_job(
+                app,
+                &id,
+                printer.name.clone(),
+                zone.clone(),
+                certificate,
+                Some(category),
+            ) {
+                return response;
+            }
+        } else if let Err(err) = record_now(app, &id) {
+            log::debug!("print row: {err}");
+            return api_error(StatusCode::INTERNAL_SERVER_ERROR, "unknown_error");
+        }
+        jobs.push(serde_json::json!({
+            "printer": printer.name,
+            "zone": printer.routing.zone,
+            "certificate": certificate,
+            "zone_name": printer.routing.sector_name,
+        }));
+    }
+    if jobs.is_empty() && skipped.is_empty() {
+        return api_error(StatusCode::BAD_REQUEST, "bad_request");
+    }
+    api_ok(serde_json::json!({ "jobs": jobs, "skipped": skipped }))
+}
+
+fn enqueue_print_job(
+    app: &App,
+    id: &str,
+    name: String,
+    zone: Option<String>,
+    certificate: bool,
+    category: Option<i64>,
+) -> Result<(), Response> {
+    app.prints
+        .enqueue(PrintJob {
+            id: id.to_string(),
+            pages: 1,
+            zone,
+            name: Some(name),
+            certificate: Some(certificate),
+            category,
+        })
+        .map_err(|err| {
+            log::debug!("registration print: {err:?}");
+            match err {
+                EnqueueError::Full | EnqueueError::Closed => {
+                    api_error(StatusCode::SERVICE_UNAVAILABLE, "unavailable")
+                }
+                EnqueueError::EmptyId | EnqueueError::NoPages => {
+                    api_error(StatusCode::BAD_REQUEST, "bad_request")
+                }
+            }
+        })
+}
+
+fn pick_queue(
+    search: &crate::registration_server::cups::Search,
+    printer: &Option<String>,
+    zone: &Option<String>,
+    certificate: bool,
+    category: i64,
+    internet: bool,
+) -> Option<crate::registration_server::cups::Printer> {
+    let job = crate::registration_server::cups::Job {
+        name: printer.clone(),
+        category: Some(category.to_string()),
+        internet,
+        certificate,
+        zone: zone.clone(),
+        rule: None,
+    };
+    match search.pick(&job) {
+        Ok(printer) => Some(printer),
+        Err(err) => {
+            log::debug!("print pick: {err}");
+            None
+        }
+    }
+}
+
+fn prepare_search(
+    app: &App,
+    search: &crate::registration_server::cups::Search,
+    id: &str,
+    value: &serde_json::Value,
+) {
+    let current = CurrentEvent::lock(&app.current);
+    if let Some(event_id) = current.event_id() {
+        search.set_files(&current.base_dir(), &event_id);
+    }
+    search.set_badges(current.badges());
+    drop(current);
+    search.set_visitor(id, visitor_fields(value));
+}
+
+fn stored_row(app: &App, id: &str) -> Option<String> {
+    let current = CurrentEvent::lock(&app.current);
+    let event_id = current.event_id()?;
+    current.full_row(&event_id, id).ok()?.value
+}
+
+fn open_search(app: &App) -> Option<crate::registration_server::cups::Search> {
+    app.search.lock().expect("search").clone()
+}
+
+fn record_now(app: &App, id: &str) -> Result<(), String> {
+    let current = CurrentEvent::lock(&app.current);
+    let event_id = current.event_id().ok_or_else(|| "no event".to_string())?;
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or(0);
+    current
+        .record_print(&event_id, id, ts)
+        .map_err(|err| err.to_string())
+}
+
+fn write_cert_code(app: &App, id: &str, code: &str) -> Option<String> {
+    match CurrentEvent::lock(&app.current).with_db(|db| {
+        db.file().execute(
+            "UPDATE mem_u SET cert_code = ?1 WHERE uid = ?2",
+            rusqlite::params![code, id],
+        )
+    }) {
+        Some(Ok(_)) => None,
+        Some(Err(err)) => Some(err.to_string()),
+        None => Some("no event".to_string()),
+    }
+}
+
+fn png_response(bytes: Vec<u8>) -> Response {
+    (
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "image/png")],
+        bytes,
+    )
+        .into_response()
+}
+
+fn test_page_png() -> Vec<u8> {
+    use image::ImageEncoder;
+    let image = image::RgbaImage::from_pixel(8, 8, image::Rgba([255, 255, 255, 255]));
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    image::codecs::png::PngEncoder::new(&mut bytes)
+        .write_image(
+            image.as_raw(),
+            image.width(),
+            image.height(),
+            image::ExtendedColorType::Rgba8,
+        )
+        .expect("test page png");
+    bytes.into_inner()
+}
+
+fn id_list(parsed: &serde_json::Value) -> Option<Vec<String>> {
+    let ids = parsed.get("ids")?.as_array()?;
+    let ids: Vec<String> = ids
+        .iter()
+        .filter_map(|item| item.as_str())
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+        .collect();
+    if ids.is_empty() {
+        None
+    } else {
+        Some(ids)
+    }
+}
+
+fn body_text(parsed: &serde_json::Value, key: &str) -> Option<String> {
+    parsed
+        .get(key)
+        .and_then(|item| item.as_str())
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string)
+}
+
+fn body_category(parsed: &serde_json::Value) -> Option<i64> {
+    parsed.get("category").and_then(|item| {
+        item.as_i64()
+            .or_else(|| item.as_str().and_then(|text| text.parse().ok()))
+    })
+}
+
+fn json_flag(value: &serde_json::Value, key: &str) -> bool {
+    match value.get(key) {
+        Some(serde_json::Value::Bool(flag)) => *flag,
+        Some(serde_json::Value::Number(number)) => number.as_i64() == Some(1),
+        Some(serde_json::Value::String(text)) => text == "1" || text.eq_ignore_ascii_case("true"),
+        _ => false,
+    }
+}
+
+fn visitor_fields(value: &serde_json::Value) -> std::collections::HashMap<String, String> {
+    let Some(object) = value.as_object() else {
+        return std::collections::HashMap::new();
+    };
+    let mut fields = std::collections::HashMap::new();
+    for (key, item) in object {
+        let Some(text) = (match item {
+            serde_json::Value::String(text) => Some(text.clone()),
+            serde_json::Value::Number(number) => Some(number.to_string()),
+            serde_json::Value::Bool(flag) => Some(flag.to_string()),
+            _ => None,
+        }) else {
+            continue;
+        };
+        fields.insert(key.clone(), text);
+    }
+    fields
 }
 
 async fn registration_patch(
@@ -1750,13 +2121,10 @@ mod tests {
         #[tokio::test]
         async fn print_enqueues_the_visitor() {
             let mut venue = open_event("EVT");
-            let (status, body) =
+            let (status, _) =
                 post(&venue.app, "/api/print", br#"{"ids":["5"],"printer":"HP"}"#).await;
-            assert_eq!(status, StatusCode::OK);
-            assert_eq!(json_body(&body)["ok"], true);
-            let job = venue.worker.try_recv().expect("queued");
-            assert_eq!(job.id, "5");
-            assert_eq!(job.pages, 1);
+            assert_eq!(status, StatusCode::NOT_FOUND);
+            assert!(venue.worker.try_recv().is_none());
         }
 
         #[tokio::test]
@@ -1770,6 +2138,451 @@ mod tests {
             assert_eq!(body, bytes);
             let (status, _) = call(&venue.app, "/api/registrations/missing/photo").await;
             assert_eq!(status, StatusCode::NOT_FOUND);
+        }
+    }
+
+    mod print {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{Arc, Mutex};
+        use std::thread;
+        use std::time::Duration;
+
+        use image::RgbaImage;
+        use ticket_render::Layout;
+        use tower::ServiceExt;
+
+        use super::super::router;
+        use super::{json_body, open_event};
+        use crate::registration_server::cups::{self, Search};
+        use crate::registration_server::current::CurrentEvent;
+        use crate::registration_server::native_print::Kind;
+        use crate::registration_server::print::{Badges, PreparedLayout};
+        use crate::registration_server::App;
+
+        struct Stand {
+            port: u16,
+            ops: Arc<Mutex<Vec<u16>>>,
+            stop: Arc<AtomicBool>,
+            handle: Option<thread::JoinHandle<()>>,
+        }
+
+        impl Stand {
+            fn open() -> Self {
+                let ops = Arc::new(Mutex::new(Vec::new()));
+                let recorded = Arc::clone(&ops);
+                let stop = Arc::new(AtomicBool::new(false));
+                let flag = Arc::clone(&stop);
+                let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+                listener.set_nonblocking(true).unwrap();
+                let port = listener.local_addr().unwrap().port();
+                let handle = thread::spawn(move || {
+                    while !flag.load(Ordering::SeqCst) {
+                        let mut sock = match listener.accept() {
+                            Ok((sock, _)) => sock,
+                            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                                thread::sleep(Duration::from_millis(10));
+                                continue;
+                            }
+                            Err(_) => break,
+                        };
+                        sock.set_nonblocking(false).unwrap();
+                        sock.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+                        let body = read_http(&mut sock);
+                        if body.len() >= 4 {
+                            recorded
+                                .lock()
+                                .unwrap()
+                                .push(u16::from_be_bytes([body[2], body[3]]));
+                        }
+                        let payload = job_status(1, 9);
+                        let head = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/ipp\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            payload.len()
+                        );
+                        let _ = sock.write_all(head.as_bytes());
+                        let _ = sock.write_all(&payload);
+                    }
+                });
+                Self {
+                    port,
+                    ops,
+                    stop,
+                    handle: Some(handle),
+                }
+            }
+
+            fn uri(&self) -> String {
+                format!("ipp://127.0.0.1:{}/ipp/print", self.port)
+            }
+        }
+
+        impl Drop for Stand {
+            fn drop(&mut self) {
+                self.stop.store(true, Ordering::SeqCst);
+                if let Some(handle) = self.handle.take() {
+                    let _ = handle.join();
+                }
+            }
+        }
+
+        fn read_http(sock: &mut impl Read) -> Vec<u8> {
+            let mut buf = Vec::new();
+            let mut tmp = [0u8; 4096];
+            loop {
+                if let Some(body) = http_body(&buf) {
+                    return body;
+                }
+                match sock.read(&mut tmp) {
+                    Ok(0) | Err(_) => return buf,
+                    Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                }
+            }
+        }
+
+        fn http_body(buf: &[u8]) -> Option<Vec<u8>> {
+            let end = buf.windows(4).position(|window| window == b"\r\n\r\n")?;
+            let head = std::str::from_utf8(&buf[..end]).ok()?;
+            let length = head.lines().find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                if name.eq_ignore_ascii_case("content-length") {
+                    value.trim().parse::<usize>().ok()
+                } else {
+                    None
+                }
+            })?;
+            let start = end + 4;
+            if buf.len() < start + length {
+                return None;
+            }
+            Some(buf[start..start + length].to_vec())
+        }
+
+        fn job_status(id: i32, state: i32) -> Vec<u8> {
+            let mut out = vec![0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x01];
+            write_text(&mut out, 0x47, "attributes-charset", "utf-8");
+            write_text(&mut out, 0x48, "attributes-natural-language", "en");
+            out.push(0x02);
+            write_int(&mut out, "job-id", id);
+            write_enum(&mut out, "job-state", state);
+            out.push(0x03);
+            out
+        }
+
+        fn write_text(out: &mut Vec<u8>, tag: u8, name: &str, value: &str) {
+            out.push(tag);
+            counted(out, name.as_bytes());
+            counted(out, value.as_bytes());
+        }
+
+        fn write_int(out: &mut Vec<u8>, name: &str, value: i32) {
+            out.push(0x21);
+            counted(out, name.as_bytes());
+            out.extend_from_slice(&4u16.to_be_bytes());
+            out.extend_from_slice(&value.to_be_bytes());
+        }
+
+        fn write_enum(out: &mut Vec<u8>, name: &str, value: i32) {
+            out.push(0x23);
+            counted(out, name.as_bytes());
+            out.extend_from_slice(&4u16.to_be_bytes());
+            out.extend_from_slice(&value.to_be_bytes());
+        }
+
+        fn counted(out: &mut Vec<u8>, bytes: &[u8]) {
+            out.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
+            out.extend_from_slice(bytes);
+        }
+
+        fn printer(name: &str, uri: &str, zone: &str, certificate: bool) -> cups::Printer {
+            cups::Printer {
+                name: name.to_string(),
+                device_uri: uri.to_string(),
+                make_model: "HP LaserJet".to_string(),
+                state: "idle".to_string(),
+                accepting: true,
+                host: "127.0.0.1".to_string(),
+                kind: Kind::Raster,
+                dpi: 300,
+                width_in: Some(4.0),
+                choices: Vec::new(),
+                installed: true,
+                connected: true,
+                class: "ipp".to_string(),
+                values: cups::Values::default(),
+                routing: cups::Routing {
+                    zone: zone.to_string(),
+                    print_cert: certificate,
+                    sector_name: "Desk".to_string(),
+                    ..cups::Routing::default()
+                },
+                last_print: 0,
+                formats: ipp_tool::Formats {
+                    supported: vec!["image/png".to_string()],
+                    default: Some("image/png".to_string()),
+                    preferred: None,
+                },
+                settings: ipp_tool::Settings::default(),
+                toner: ipp_tool::Toner::default(),
+            }
+        }
+
+        fn layout() -> PreparedLayout {
+            PreparedLayout::memory(
+                Layout {
+                    width: 144,
+                    height: 72,
+                    dots_per_point: 1.0,
+                    areas: Vec::new(),
+                },
+                RgbaImage::from_pixel(4, 4, image::Rgba([255, 255, 255, 255])),
+            )
+        }
+
+        fn plant(app: &App, search: &Search, printers: Vec<cups::Printer>) {
+            for printer in printers {
+                search.testing_insert(printer);
+            }
+            let mut badges = Badges::default();
+            badges.replace_layout(7, Some(Ok(layout())));
+            badges.replace_layout(999, Some(Ok(layout())));
+            CurrentEvent::lock(&app.current).testing_badges(badges);
+            let visitor = crate::registration_server::event_db::VisitorWrite {
+                uid: "5".to_string(),
+                data: r#"{"uid":"5","name":"Ann","category":7}"#.to_string(),
+                name: "Ann".to_string(),
+                surname: String::new(),
+                c_name: String::new(),
+                category: 7,
+                ticket_status: 0,
+                gotsome: 0,
+                give_packet: 0,
+                added_ts: 1,
+                org_id: None,
+                email: String::new(),
+            };
+            CurrentEvent::lock(&app.current)
+                .write("EVT", &visitor)
+                .unwrap();
+            *app.search.lock().unwrap() = Some(search.clone());
+        }
+
+        async fn post(app: &App, uri: &str, body: &[u8]) -> (axum::http::StatusCode, Vec<u8>) {
+            let response = router(app.clone())
+                .oneshot(
+                    axum::extract::Request::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .header("content-type", "application/json")
+                        .body(axum::body::Body::from(body.to_vec()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = response.status();
+            let bytes = axum::body::to_bytes(response.into_body(), 2 * 1024 * 1024)
+                .await
+                .unwrap();
+            (status, bytes.to_vec())
+        }
+
+        fn spawn_worker(
+            venue: &mut super::Venue,
+            search: Search,
+        ) -> tokio::sync::watch::Sender<bool> {
+            let current = Arc::clone(&venue.app.current);
+            let (tx, rx) = tokio::sync::watch::channel(false);
+            let worker = std::mem::replace(
+                &mut venue.worker,
+                crate::registration_server::PrintQueue::pair(Arc::clone(&venue.app.gate)).1,
+            );
+            tokio::spawn(async move {
+                let _ =
+                    crate::registration_server::print_queue::run(worker, current, search, rx).await;
+            });
+            tx
+        }
+
+        async fn wait_jobs(ops: &Mutex<Vec<u16>>, count: usize) {
+            let start = std::time::Instant::now();
+            loop {
+                let seen = ops
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|op| **op == 0x0002)
+                    .count();
+                if seen >= count {
+                    return;
+                }
+                if start.elapsed() > Duration::from_secs(5) {
+                    panic!("Print-Job count {seen}, want {count}");
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
+
+        #[tokio::test]
+        async fn print_uses_the_chosen_printer() {
+            let mut venue = open_event("EVT");
+            let stand = Stand::open();
+            let search = Search::parked("http://127.0.0.1:9");
+            plant(
+                &venue.app,
+                &search,
+                vec![printer("HP", &stand.uri(), "", false)],
+            );
+            let stop = spawn_worker(&mut venue, search);
+            let (status, _) = post(
+                &venue.app,
+                "/api/print",
+                br#"{"ids":["5"],"printer":"HP","noprint":true}"#,
+            )
+            .await;
+            assert_eq!(status, axum::http::StatusCode::OK);
+            assert!(stand.ops.lock().unwrap().is_empty());
+            let printed = CurrentEvent::lock(&venue.app.current)
+                .with_db(|db| {
+                    db.file()
+                        .query_row("SELECT COUNT(*) FROM prints WHERE uid = '5'", [], |row| {
+                            row.get::<_, i64>(0)
+                        })
+                        .unwrap()
+                })
+                .unwrap();
+            assert_eq!(printed, 1);
+            let (status, body) =
+                post(&venue.app, "/api/print", br#"{"ids":["5"],"printer":"HP"}"#).await;
+            assert_eq!(status, axum::http::StatusCode::OK);
+            assert_eq!(json_body(&body)["data"]["jobs"][0]["printer"], "HP");
+            wait_jobs(&stand.ops, 1).await;
+            drop(stop);
+        }
+
+        #[tokio::test]
+        async fn zone_and_certificate_choose_the_queue() {
+            let mut venue = open_event("EVT");
+            let stand = Stand::open();
+            let search = Search::parked("http://127.0.0.1:9");
+            let uri = stand.uri();
+            plant(
+                &venue.app,
+                &search,
+                vec![
+                    printer("hall-a", &uri, "hall", false),
+                    printer("hall-cert", &uri, "hall", true),
+                ],
+            );
+            let stop = spawn_worker(&mut venue, search);
+            let (status, body) =
+                post(&venue.app, "/api/print", br#"{"ids":["5"],"zone":"hall"}"#).await;
+            assert_eq!(status, axum::http::StatusCode::OK);
+            let job = &json_body(&body)["data"]["jobs"][0];
+            assert_eq!(job["printer"], "hall-a");
+            assert_eq!(job["zone"], "hall");
+            assert_eq!(job["certificate"], false);
+            let (status, body) = post(
+                &venue.app,
+                "/api/print",
+                br#"{"ids":["5"],"zone":"hall","certificate":true}"#,
+            )
+            .await;
+            assert_eq!(status, axum::http::StatusCode::OK);
+            let job = &json_body(&body)["data"]["jobs"][0];
+            assert_eq!(job["printer"], "hall-cert");
+            assert_eq!(job["zone"], "hall");
+            assert_eq!(job["certificate"], true);
+            wait_jobs(&stand.ops, 2).await;
+            drop(stop);
+        }
+
+        #[tokio::test]
+        async fn no_printer_is_conflict() {
+            let venue = open_event("EVT");
+            let search = Search::parked("http://127.0.0.1:9");
+            plant(&venue.app, &search, Vec::new());
+            let (status, body) =
+                post(&venue.app, "/api/print", br#"{"ids":["5"],"printer":"HP"}"#).await;
+            assert_eq!(status, axum::http::StatusCode::CONFLICT);
+            assert_eq!(json_body(&body)["error"]["code"], "no_printer");
+        }
+
+        #[tokio::test]
+        async fn preview_is_png() {
+            let venue = open_event("EVT");
+            let stand = Stand::open();
+            let search = Search::parked("http://127.0.0.1:9");
+            plant(
+                &venue.app,
+                &search,
+                vec![printer("HP", &stand.uri(), "", false)],
+            );
+            let (status, body) = post(
+                &venue.app,
+                "/api/print/preview",
+                br#"{"id":"5","printer":"HP"}"#,
+            )
+            .await;
+            assert_eq!(status, axum::http::StatusCode::OK);
+            assert!(body.starts_with(b"\x89PNG"));
+            let (status, body) =
+                post(&venue.app, "/api/print/preview", br#"{"printer":"HP"}"#).await;
+            assert_eq!(status, axum::http::StatusCode::OK);
+            assert!(body.starts_with(b"\x89PNG"));
+            assert!(stand.ops.lock().unwrap().is_empty());
+        }
+
+        #[tokio::test]
+        async fn certificate_reserves_a_code() {
+            let mut venue = open_event("EVT");
+            let stand = Stand::open();
+            let search = Search::parked("http://127.0.0.1:9");
+            plant(
+                &venue.app,
+                &search,
+                vec![printer("hall-cert", &stand.uri(), "hall", true)],
+            );
+            CurrentEvent::lock(&venue.app.current).with_db(|db| {
+                db.file()
+                    .execute(
+                        "INSERT INTO ticketbarcodes (barcode, formId) VALUES ('CERT1', 1)",
+                        [],
+                    )
+                    .unwrap();
+            });
+            let stop = spawn_worker(&mut venue, search);
+            let (status, body) = post(
+                &venue.app,
+                "/api/certificates",
+                br#"{"ids":["5"],"zone":"hall"}"#,
+            )
+            .await;
+            assert_eq!(status, axum::http::StatusCode::OK);
+            let row = &json_body(&body)["data"]["rows"][0];
+            assert_eq!(row["name"], "Ann");
+            assert_eq!(row["code"], "CERT1");
+            assert_eq!(row["printer"], "hall-cert");
+            assert_eq!(row["zone"], "hall");
+            wait_jobs(&stand.ops, 1).await;
+            let (status, body) = post(
+                &venue.app,
+                "/api/certificates",
+                br#"{"ids":["5"],"zone":"hall"}"#,
+            )
+            .await;
+            assert_eq!(status, axum::http::StatusCode::OK);
+            assert_eq!(json_body(&body)["data"]["rows"][0]["code"], "");
+            tokio::time::sleep(Duration::from_millis(80)).await;
+            let sent = stand
+                .ops
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|op| **op == 0x0002)
+                .count();
+            assert_eq!(sent, 1);
+            drop(stop);
         }
     }
 

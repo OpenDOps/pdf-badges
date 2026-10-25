@@ -6,7 +6,7 @@ This is the last server step. It replaces `RegApp.scala`. Every old route is lis
 
 Each step is one change. The tests named in the step land with it and stay green. A later step keeps the earlier tests passing. Set **Status** to `not started`, `in progress`, or `done`.
 
-Step 9 is done when steps 1 through 8 are done.
+Step 9 is done when steps 1 through 6 are done. The scan API and the leadgen API are deprecated. They are not ported.
 
 ## Summary
 
@@ -15,16 +15,14 @@ Step 9 is done when steps 1 through 8 are done.
 | [1. Liveness](#step-1-liveness) | The device is up, and which event is open | done |
 | [2. Forms](#step-2-forms) | Config, enums, backgrounds, categories, tickets | done |
 | [3. Visitors](#step-3-visitors) | Search, one row, save, photo, counts | done |
-| [4. Print](#step-4-print) | Print a list, a certificate, a preview | not started |
-| [5. Scans](#step-5-scans) | Zones, posted scans, a local visitor pull | not started |
-| [6. Desk](#step-6-desk) | Keys, printers, the registration flags | done |
-| [7. Leadgen](#step-7-leadgen) | Org login, manager download, attachments | not started |
-| [8. Sync status](#step-8-sync-status) | How many rows are waiting, and a manual wake | done |
+| [4. Print](#step-4-print) | Chosen printer, zone, certificate, and a setup preview | done |
+| [5. Desk](#step-5-desk) | Keys, printers, the registration flags | done |
+| [6. Sync status](#step-6-sync-status) | How many rows are waiting, and a manual wake | done |
 
 Shared rules:
 
 - Routes live in `src/registration_server/http.rs`. Success is `{ "ok": true, "data": ... }`. Failure is `{ "ok": false, "error": { "code": "..." } }`. That is the envelope step 3 already uses.
-- Floor routes do not require the operator cookie. They read and write the open event. Operator routes require that cookie. An admin-only route also requires the desk key from step 6 to be an admin key, except the routes step 3 already guards with the operator cookie alone (`/api/keys` create stays the operator cookie, as the admin plan specifies).
+- Floor routes do not require the operator cookie. They read and write the open event. Operator routes require that cookie. An admin-only route also requires the desk key from step 5 to be an admin key, except the routes step 3 already guards with the operator cookie alone (`/api/keys` create stays the operator cookie, as the admin plan specifies).
 - A handler does its work and returns. It does not parse a remote payload and it does not render a badge inline. A print enqueues on the step 8 worker and returns the job id. Search uses the memory database from the db plan.
 - The skeleton `GET /registrations/{id}` and `POST /print` are removed when the routes below replace them. `GET /health` stays. `GET /ws` stays the idle lookup socket from [design.md](design.md). `GET /`, `GET /events`, and the `/api/login` family stay as step 3 built them.
 - Tests use a temp event directory and `CurrentEvent`. They do not call kuprin.su and they do not start cupsd. A print test uses the IPP stand-in from the printing plan.
@@ -53,9 +51,6 @@ Shared rules:
 | `POST /askforcert` | `POST /api/certificates` | Reserve a certificate code and enqueue that layout. |
 | `POST /setgotsome` | `PATCH /api/registrations/{id}` | Set `gotsome`. |
 | `GET /setpayed` | `PATCH /api/registrations/{id}` | Set the ticket status paid. |
-| `POST /scannedbc` | `POST /api/scans` | Store scan lines from a phone. |
-| `GET /control_zones` | `GET /api/zones` | Zones, the phone's scanner number, the open event, the time shift. |
-| `GET /possible_tickets` | `GET /api/tickets` | Barcode pools for the forms the caller names. |
 | `GET /regapp/vars` | `GET /api/forms/vars` | The form variable map sync stored. |
 | `GET /regapp/user_struct` | `GET /api/forms/{id}/struct` | The field structure for that form. |
 | `GET /regapp/user_model` | `GET /api/forms/{id}/model` | The model for that form. |
@@ -66,10 +61,6 @@ Shared rules:
 | `GET /qrlink` | `GET /api/qr?text=` | PNG bytes from `ticket-render` `render_qr`. |
 | `GET /regapp/lottery_wins` | `GET /api/lottery` | Lottery rows for the form. |
 | `GET /dbenum/:loc/:enumname` | `GET /api/enums/{locale}/{name}` | The enum file sync stored. |
-| `POST /tracked` | `GET /api/tracked` | Local visitors changed since `from_time`, for the open event. |
-| `POST /leadgen/download` | `GET /api/leadgen/managers` | Managers changed since `from_time`. |
-| `POST /leadgen/upload` | `POST /api/leadgen/attachments` | Attach a manager to a barcode. |
-| `POST /locallogin/getzones` | `POST /api/org/login` | An org user login against the local org file. |
 
 ### Desk
 
@@ -86,8 +77,8 @@ These require the operator cookie. The old `protect(AdminKey)` routes also requi
 | `GET /get_printers` | `GET /api/printers` | Connected printers, choices, values, routing. |
 | `GET /printers/all` | `GET /api/printers` | Names are a field on that list. `GET /printers/all2` is the same list with make and model. |
 | `GET /update_printers` | `POST /api/printers/search` | Run the step 8 search and return the new list. |
-| `POST /set_printer_params` | `PATCH /api/printers/{name}` | Save `values` to `base/printer_conf/{name}.json`. `GET /set_printer_params` is the same body and is not a second route. |
-| `POST /set_printer_routings` | `PATCH /api/printers/{name}/routing` | Save the routing record for the open event. |
+| `POST /set_printer_params` | `PATCH /api/printers/{name}` | Save `values` to `base/printer_conf/{name}.yml`. `GET /set_printer_params` is the same body and is not a second route. |
+| `POST /set_printer_routings` | `PATCH /api/printers/{name}/routing` | Save `used`, `zone`, `category`, `is_internet`, `print_cert`, `sector_name`, `second_name`, `auto_print`, `no_postscript`, and `rule` for the open event. |
 | `GET /test_printer` | `POST /api/printers/{name}/test` | Enqueue the test badge from the printing plan. |
 | `GET /printers/jobs/cancel-all` | `POST /api/printers/cancel` | `Cancel-Job` for jobs this process submitted, and drop the waiting print channel. |
 | `POST /show_ticket_status` | `PATCH /api/settings` | The registration flags, one object. |
@@ -121,7 +112,8 @@ These require the operator cookie. The old `protect(AdminKey)` routes also requi
 | Old route | Why it stays out |
 |---|---|
 | `GET /updatecheck`, `GET /version`, `GET /update`, `GET /need_update` | [porting.md](porting.md) step 11. These four paths stay unserved. The desk uses `GET /api/update` and `POST /api/update`. |
-| `GET /was_scanned` | Holds the request until the desktop keyboard wedge fires. Phones post `POST /api/scans`. |
+| `POST /scannedbc`, `GET /control_zones`, `GET /possible_tickets`, `POST /tracked`, `GET /was_scanned` | The scan API is deprecated. |
+| `POST /leadgen/download`, `POST /leadgen/upload`, `POST /locallogin/getzones` | The leadgen API is deprecated. |
 | `GET /cameraCap`, `POST /uploadphototest` | The local camera test page. A photo the floor already took is `POST /api/registrations/{id}/photo`. |
 | `GET /uploadbarcodes`, `POST /uploadbarcodes`, `GET /uploadvisitcodes`, `POST /uploadvisitcodes` | A hand upload of barcode files. Sync already downloads `boxapi/barcodes`. |
 | `POST /uploadcsv`, `POST /set_separator`, `POST /csv_setup`, `POST /remove_last_csv` | The CSV importer behind a mustache page. |
@@ -155,21 +147,15 @@ An email plus a phone that hit different rows is 409 `invalid_phone_email_combo`
 
 ### Print
 
-`POST /api/print` replaces the skeleton body. The body is `{ "ids", "zone", "printer", "category", "noprint", "check" }`. `ids` are the uids. `printer` is a queue name or a printer number, the same two ways `/printfromlist` accepted `printer_name` and `printer_numid`. The handler loads each row, picks a queue with the step 8 pick, and enqueues. `noprint` writes the print row and does not enqueue. `check` is the `doCheck` flag: a uid that fails the check is listed in the response and is not printed. The data is `{ "zone_name" }` per queue that received a job, which is the string the old client put in `zoneName.ru`. A pick that matches nothing is 409 `no_printer`.
+`POST /api/print` replaces the skeleton body. The body is `{ "ids", "printer", "zone", "certificate", "category", "noprint", "check" }`. `ids` are the uids. The handler loads each row and passes `printer`, `zone`, and `certificate` to the step 8 pick, then enqueues.
 
-`POST /api/certificates` takes the same `ids`. It reserves a certificate code the way `askForCerts` did and enqueues with `print_cert`. The data is `{ "name", "code" }` per id. No code left uses the code string the old handler returned when the pool was empty, under `code`, and does not enqueue.
+`printer` is the chosen queue name. When it is set, the pick returns that queue. `zone` is the routing zone. When `printer` is empty and `zone` is set, the pick keeps queues whose routing `zone` matches. `certificate` is true when the job is a certificate. The pick then keeps queues whose routing `print_cert` is set and draws the certificate layout. A false or absent `certificate` uses the category printer. `category` on the body overrides the category on the stored row. The internet flag is the flag on that row. The body does not send a zone rule. A missing `rule` on the queue is `round_robin`.
 
-`POST /api/print/preview` is the preview from the printing plan. It returns PNG bytes and does not submit a job.
+`noprint` writes the print row and does not enqueue. `check` is the `doCheck` flag: a uid that fails the check is listed in the response and is not printed. The data is one object per queue that received a job: `{ "printer", "zone", "certificate", "zone_name" }`. `printer` is the queue the pick chose. `zone` is that queue's routing zone. `certificate` is the flag the job carried. `zone_name` is the sector name, the string the old client put in `zoneName.ru`. A pick that matches nothing is 409 `no_printer`.
 
-### Scans
+`POST /api/certificates` takes `ids`, `printer`, and `zone`. It reserves a certificate code the way `askForCerts` did and enqueues the same pick with `certificate` true. The data is `{ "name", "code", "printer", "zone" }` per id. No code left uses the code string the old handler returned when the pool was empty, under `code`, and does not enqueue.
 
-`GET /api/zones` takes `phone_id`. It assigns the scanner number the way `getScannerNumId` did, and returns `{ "phone_num", "event_id", "time_shift", "zones" }`. Each zone is `{ "id", "name", "categories" }`. A missing `phone_id` is 400 `bad_request`.
-
-`POST /api/scans` takes `event_id`, `phone_id`, and `scans`. Each scan is `zone_id`, `entrance`, `barcode`, and two timestamps, which is the tab-separated line `/scannedbc` split on. The event id must be the open id. A mismatch is 409 `invalid_event`. A missing phone id is 400 `bad_request`. The rows are written for `boxapi/uploadscans`. The data is `{ "status": "ok" }`.
-
-`GET /api/tracked` takes `from_time` and `limit` (default 30). The event id in the query must be the open id. The data is `{ "visitors" }` changed since that time. This is the local pull a phone made with `POST /tracked`. It does not call kuprin.
-
-`GET /api/tickets` takes the caller's form ids and the clean number it already has. A form whose clean number is unchanged returns an empty barcode list. The others return the next pool page from the event file.
+`POST /api/print/preview` takes `{ "id", "printer", "zone", "certificate" }`. It picks with those fields, returns the PNG for that queue, and does not submit a job. A visitor preview sends the id. Printers setup sends `printer` and no id. That call returns the test-page PNG for the named queue and does not enqueue. `POST /api/printers/{name}/test` still enqueues the test badge.
 
 ### Desk
 
@@ -177,7 +163,7 @@ An email plus a phone that hit different rows is 409 `invalid_phone_email_combo`
 
 `GET /api/keys` returns `{ "id", "key", "comment", "is_admin" }`. `POST /api/keys` inserts an operator key and returns `{ "id", "key" }`. `PATCH` and `DELETE` take the id. `POST /api/keys/print` enqueues one test-shaped badge per key, with the key text as the name and the comment as the company. The two default rows from step 4 are the rows an empty table already has.
 
-`GET /api/printers` is the in-memory printer list from step 8, including a queue with `connected` false so the screen can show it. `POST /api/printers/search` runs search and then returns that list. `PATCH /api/printers/{name}` writes `values`. `PATCH /api/printers/{name}/routing` writes the routing record. `POST /api/printers/{name}/test` enqueues the test page. `POST /api/printers/cancel` cancels submitted IPP jobs and drops jobs still waiting on the print channel.
+`GET /api/printers` is the in-memory printer list from step 8, including a queue with `connected` false so the screen can show it. Each queue includes its routing record. `POST /api/printers/search` runs search and then returns that list. `PATCH /api/printers/{name}` writes `values`. `PATCH /api/printers/{name}/routing` writes `used`, `zone`, `category`, `is_internet`, `print_cert`, `sector_name`, `second_name`, `auto_print`, `no_postscript`, and `rule`. A field the body omits stays as stored. `rule` is `round_robin` or `fewest_jobs`. A missing rule is `round_robin`. The pick reads `used`, `zone`, `category`, `is_internet`, `print_cert`, and `rule` from that record. `POST /api/printers/{name}/test` enqueues the test page. `POST /api/printers/cancel` cancels submitted IPP jobs and drops jobs still waiting on the print channel.
 
 `GET /api/settings` returns one object: `show_ticket_status`, `show_gotsome`, `print_on_save`, `capitalize_names`, `transliterate`, `double_print`, `load_barcodes`. `PATCH` writes the fields it is given and leaves the others. The file is `base/{event_id}/settings.json`. The print worker reads `transliterate` and `double_print` when it decides on a second page.
 
@@ -186,12 +172,6 @@ An email plus a phone that hit different rows is 409 `invalid_phone_email_combo`
 `GET /api/packets` lists give-packet rows. `POST /api/packets` marks one given.
 
 `GET /api/prints/summary` returns counts of printed rows. The query `which` is `current`, `old`, or `bad`, matching the three old pages.
-
-### Leadgen
-
-`POST /api/org/login` takes `email`, `password`, and `org_id`. The org id must be the open event's org id. A mismatch is 409 `invalid_org`. A bad password is 401 `invalid_cred`. Success returns the zone list `getLoginInfoZone` returned.
-
-`GET /api/leadgen/managers` takes `from_time` and the open event id. The data is `{ "users" }`. `POST /api/leadgen/attachments` takes the manager, barcode, short code, comment, and zone, writes the attachment, and returns the rows `attachManagers` returned. Those rows wait for `leadgenapi/upload`.
 
 ### Sync status
 
@@ -272,52 +252,29 @@ Search, one row, save, photo, and the email and phone counts.
 
 [Back to summary](#summary)
 
-Printing a list uses the step 8 worker.
+Printing a list uses the step 8 worker. The job carries the chosen printer, the zone, and whether it is a certificate. Printers setup previews one named queue.
 
 ### Work
 
-1. `POST /api/print` loads the ids, picks a queue, and enqueues.
-2. `POST /api/certificates` reserves a code and enqueues with the certificate layout.
-3. Preview returns PNG and does not submit.
+1. `POST /api/print` loads the ids and passes `printer`, `zone`, and `certificate` to the pick, then enqueues. The response names the queue that received the job, its zone, and the certificate flag.
+2. `POST /api/certificates` reserves a code and enqueues with `certificate` true and the same `printer` and `zone`.
+3. `POST /api/print/preview` returns the PNG for that pick and does not submit. A body with `printer` and no id is the printers-setup preview.
 
 ### Test scenarios
 
 | Scenario | Assert |
 |---|---|
-| `print_enqueues_the_ids` | Two ids and a matching queue produce one accepted response and one `Print-Job` on the stand-in. `noprint` produces no `Print-Job` and still returns 200. |
+| `print_uses_the_chosen_printer` | `printer` "HP" produces one `Print-Job` on that queue. The data `printer` is "HP". `noprint` produces no `Print-Job` and still returns 200. |
+| `zone_and_certificate_choose_the_queue` | An empty `printer` and `zone` "hall" sends the job to a queue in that zone. `certificate` true sends it to the certificate printer in that zone. The data reports that printer, that zone, and `certificate` true. |
 | `no_printer_is_conflict` | No connected queue is 409 `no_printer`. |
-| `preview_is_png` | The preview route returns PNG bytes. The stand-in sees no `Print-Job`. |
+| `preview_is_png` | A visitor preview and a printers-setup preview (`printer` set, no id) each return PNG bytes. The stand-in sees no `Print-Job`. |
+| `certificate_reserves_a_code` | One ticket barcode is returned as `code`, and the job goes to the certificate printer. An empty pool returns an empty `code` and does not enqueue. |
 
 ### Done when
 
 `cargo test --lib registration_server::http::tests::print` passes, and step 3 stays green.
 
-## Step 5. Scans
-
-[Back to summary](#summary)
-
-A phone reads zones and posts scans. A local pull reads visitors changed since a time.
-
-### Work
-
-1. `GET /api/zones` assigns a scanner number and returns the stored zones.
-2. `POST /api/scans` writes scan rows for the open event only.
-3. `GET /api/tracked` returns visitors with `from_time`.
-4. `GET /api/tickets` skips a form whose clean number matches.
-
-### Test scenarios
-
-| Scenario | Assert |
-|---|---|
-| `zones_for_a_phone` | The same `phone_id` gets the same `phone_num`. The zones are the rows in the event file. |
-| `scans_reject_another_event` | A body with a different event id is 409 `invalid_event` and writes no scan. The open id writes one row. |
-| `tracked_is_local` | `from_time` after the only row returns an empty list. No remote socket is opened. |
-
-### Done when
-
-`cargo test --lib registration_server::http::tests::scans` passes, and step 4 stays green.
-
-## Step 6. Desk
+## Step 5. Desk
 
 [Back to summary](#summary)
 
@@ -327,7 +284,7 @@ Keys, printers, and the registration flags. The operator cookie is required.
 
 1. Replace the step 3 key stubs with the table reads and writes.
 2. Desk auth sets the desk cookie. Admin-only printer and settings routes check it.
-3. Printer routes call the step 8 records. Settings are one JSON file.
+3. Printer routes call the step 8 records. Settings are one YAML file, with `class` `native` or `ipp`.
 
 ### Test scenarios
 
@@ -335,35 +292,13 @@ Keys, printers, and the registration flags. The operator cookie is required.
 |---|---|
 | `keys_roundtrip` | `POST /api/keys` then `GET /api/keys` includes the new operator key. `DELETE` removes it. The two default rows remain. |
 | `desk_key_required` | `PATCH /api/settings` without a desk cookie is 401. With an admin key it stores `double_print` true, and a following GET returns it. |
-| `printer_patch_writes_the_file` | `PATCH /api/printers/{name}` writes `base/printer_conf/{name}.json`. Search is not sent to cupsd by the PATCH. |
+| `printer_patch_writes_the_file` | `PATCH /api/printers/{name}` writes `base/printer_conf/{name}.yml`, including `class`. Search is not sent to cupsd by the PATCH. |
 
 ### Done when
 
-`cargo test --lib registration_server::http::tests::desk` passes, `cargo test --test admin_pages` stays green, and step 5 stays green.
+`cargo test --lib registration_server::http::tests::desk` passes, `cargo test --test admin_pages` stays green, and step 4 stays green.
 
-## Step 7. Leadgen
-
-[Back to summary](#summary)
-
-Org login and manager attachments stay on the device.
-
-### Work
-
-1. `POST /api/org/login` checks the local org user.
-2. Manager download and attachment upload read and write the org tables.
-
-### Test scenarios
-
-| Scenario | Assert |
-|---|---|
-| `org_login_checks_the_local_row` | A matching email and password returns the zone list. A wrong password is 401 `invalid_cred`. A different org id is 409 `invalid_org`. |
-| `attachment_is_stored` | `POST /api/leadgen/attachments` writes a row `GET /api/leadgen/managers` returns after that row's time. |
-
-### Done when
-
-`cargo test --lib registration_server::http::tests::leadgen` passes, and step 6 stays green.
-
-## Step 8. Sync status
+## Step 6. Sync status
 
 [Back to summary](#summary)
 
@@ -383,4 +318,4 @@ The desk can see the outbox and ask for one wake.
 
 ### Done when
 
-`cargo test --lib registration_server::http::tests::sync_status` passes, `cargo test --lib registration_server::sync::tests::queue` stays green, and steps 1 through 7 stay green.
+`cargo test --lib registration_server::http::tests::sync_status` passes, `cargo test --lib registration_server::sync::tests::queue` stays green, and steps 1 through 5 stay green.

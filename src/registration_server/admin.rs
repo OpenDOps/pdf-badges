@@ -737,6 +737,10 @@ async fn print_keys(State(state): State<OperatorState>, headers: HeaderMap) -> R
         if let Err(err) = prints.enqueue(crate::registration_server::PrintJob {
             id: key.to_string(),
             pages: 1,
+            zone: None,
+            name: None,
+            certificate: None,
+            category: None,
         }) {
             log::debug!("print keys: {err:?}");
             return api_error(StatusCode::CONFLICT, "no_printer");

@@ -121,11 +121,19 @@ The CUPS queue is the right place to send a job. The way the Scala client finds 
 
 ### Finding
 
-Search runs at startup and when the operator asks to refresh. It asks the local cupsd over IPP. `CUPS-Get-Printers` returns every queue: name, device URI, make and model, state, and whether the queue accepts jobs. `CUPS-Get-Devices` returns USB and IPP devices cupsd can see right now. The two lists meet on the device URI string. Both operations return that URI, so the match is exact. The English and Russian `lpstat` lines, the `ippusb` rewrite, and the `Series_` trim go away with the shell commands.
+Search runs at startup and when the operator asks to refresh. The native library and the IPP tool each run on their own, and each sends a printer on a channel as soon as that printer is found, then one event when its listing is finished. The aggregator does not wait for both listings before it shows a new printer.
 
-A queue whose URI is in the device list is connected. A queue whose device is absent stays in the list with `connected` false, so its routing file is still there when the cable comes back. A pick skips it.
+The aggregator keeps two lists. The searching list is the live merge of those events. It stays inside the aggregator. The current list is the list a pick reads and the list a viewer is shown. A websocket UI subscribes to changes in the current list: a printer added, a printer updated, a printer removed. It does not subscribe to the searching list.
 
-A device with no queue is installed once, with `CUPS-Add-Modify-Printer`, using a PPD name `CUPS-Get-PPDs` already lists for that make and model. Zebra still prefers the PPD shipped with the device image. Evolis still prefers its shipped PPD. The new queue's name is the Scala name: make, model, and the USB serial, spaces turned into `_`, serial cut at `&`. An existing queue keeps the name cupsd already has. Routing files are keyed by that name, so a printer the old client installed still finds `pr_{name}.json`.
+The current devices list is the set of devices this search has accepted. A queue is added when its device enters that list and removed when that device leaves it. A device that is not in the list is added as soon as this search finds it, and its queue is added in that same step. A device that is already in the list stays until both tools have sent their finished event. At that moment every device this search did not find leaves the list, and its queue is removed in that same step. The devices that remain take the attributes gathered on the searching list, and their queues take those attributes too. A listing that fails does not clear the current devices list, so it does not remove queues.
+
+An `ipp://` or `ipps://` queue from the native tool is looked up in the aggregator's IPP cache, keyed by address. A hit keeps the formats, settings, and toner already stored, and the address is not queried again. A miss asks the IPP tool for that URI. That request is `Get-Printer-Attributes` from the IPP tool to the printer. The native tool is not asked to speak to the printer. USB and other non-IPP queues are not passed to the IPP tool. A browse result with no native queue is its own record. Formats, settings, toner, and a direct job are [ipp.md](ipp.md) and [ipp-tool.md](ipp-tool.md).
+
+`CUPS-Get-Printers` returns every queue: name, device URI, make and model, state, and whether the queue accepts jobs. On Linux and macOS the native tool also sends each `CUPS-Get-Devices` result as soon as that device is read, then one finished event. Those events enter the same aggregator. The queue and the device meet on the device URI string. Both operations return that URI, so the match is exact. The English and Russian `lpstat` lines, the `ippusb` rewrite, and the `Series_` trim go away with the shell commands.
+
+A device event whose URI matches a queue sets that queue `connected` as soon as the event arrives. The subscriber is told. A queue that is still unmatched when the device listing finishes stays on the current devices list with `connected` false, so its routing file is still there when the cable comes back. The device listing does not remove the queue. A pick skips it. An `ipp://` or `ipps://` queue keeps the `connected` value from its IPP attributes.
+
+A device with no queue enters the current devices list immediately. One `CUPS-Add-Modify-Printer` installs it, using a PPD name `CUPS-Get-PPDs` lists for that make and model. Zebra still prefers the PPD shipped with the device image. Evolis still prefers its shipped PPD. The new queue's name is the Scala name: make, model, and the USB serial, spaces turned into `_`, serial cut at `&`. That queue is added with the device. A later watch sees the queue and does not install it again. An existing queue keeps the name cupsd already has. Routing files are keyed by that name, so a printer the old client installed still finds `pr_{name}.yml`.
 
 The process does not download a filter tarball, does not symlink into the CUPS filter directory, and does not fetch a PPD from OpenPrinting. Filters belong to the device image. A make with no PPD on the device stays a device with `installed` false. The operator sees it. A pick skips it.
 
@@ -138,21 +146,22 @@ Finding builds one `Printer` per queue, plus one for each device that could not 
 | field | source | kept |
 |---|---|---|
 | `name` | queue name | the id. Routing and settings files use it |
+| `class` | where the printer lives | `native` for an operating-system queue, including one whose URI is `ipp://` or `ipps://`. `ipp` for a printer with no operating-system queue |
 | `device_uri` | queue, or the device when there is no queue | refreshed on each search |
 | `make`, `model` | `printer-make-and-model`, or the `usb://` URI for a new device | refreshed on each search |
 | `state`, `accepting` | queue attributes | refreshed on each search |
-| `connected` | the device URI was in `CUPS-Get-Devices` | refreshed on each search |
+| `connected` | a device event matched this queue, or IPP attributes arrived for an `ipp://` queue | set when that event arrives. A queue with no device stays, with `connected` false |
 | `installed` | the queue exists | false only for a device with no PPD |
 | `kind` | make | `zpl` for Zebra and TSC, `raster` otherwise |
 | `dpi` | make and model | 300 for `ztc gx430t` and Evolis, 203 for other ZPL, 300 for every other raster queue |
 | `width_in` | kind | 4.1 for ZPL, 2.125 for Evolis. A raster queue takes the layout width when the job is built |
 | `choices` | PPD option list | name to allowed values. `PageSize` is left out. Media size comes from the layout on the job |
-| `values` | `base/printer_conf/{name}.json` | the operator's saved options. Written when the operator saves. Applied as IPP options on the job |
-| `routing` | `base/{event_id}/pr_{name}.json` | this event only. See below |
+| `values` | `base/printer_conf/{name}.yml` | the operator's saved options. Written when the operator saves. Applied as IPP options on the job |
+| `routing` | `base/{event_id}/pr_{name}.yml` | this event only. See below |
 
-`values` survive an event switch. They describe the printer on this device. `routing` does not. It describes how this event uses that printer. Search loads both after the IPP lists return. It replaces the in-memory map as a whole, so a pick never observes a map that was cleared and not yet refilled. `getPrintersData` in the Scala client clears that map on every call.
+`values` survive an event switch. They describe the printer on this device. `routing` does not. It describes how this event uses that printer. A pick reads the current list. That list gains a printer when a search finds a device it did not already have, and it loses a printer only after both tools finish a search that did not find it. The list is not cleared and refilled as a whole, so a pick never observes a map that was emptied and not yet rebuilt. `getPrintersData` in the Scala client clears that map on every call.
 
-ZPL `values` are `zeMediaTracking`, `MediaType`, `zePrintMode`, `Speed`, `Darkness`, `zpl_label_shift`, `zpl_label_top`, `zpl_tear_off`. The first three also go out as IPP options. All seven are written into the `^XA` block by the registration server. Evolis stores `InkType`. A raster queue stores the PPD options the operator changed. A missing settings file is written on the first search, from the PPD defaults, the same way `initPrint` writes `{name}.json` when the file is absent.
+ZPL `values` are `zeMediaTracking`, `MediaType`, `zePrintMode`, `Speed`, `Darkness`, `zpl_label_shift`, `zpl_label_top`, `zpl_tear_off`. The first three also go out as IPP options. All seven are written into the `^XA` block by the registration server. Evolis stores `InkType`. A raster queue stores the PPD options the operator changed. A missing settings file is written on the first search, from the PPD defaults, the same way `initPrint` writes `{name}.yml` when the file is absent. Both files carry `class`.
 
 `choices` are the allowed set the operator UI shows. They are not a class hierarchy. `Printer`, `ZPLPrinter`, `ZebraPrinter`, `DefaultPrinter`, and `EvolisPrinter` were that hierarchy. `kind` plus `values` replaces them.
 
@@ -160,7 +169,7 @@ ZPL `values` are `zeMediaTracking`, `MediaType`, `zePrintMode`, `Speed`, `Darkne
 
 `lpoptions` writes the queue default, and `DefaultPrinter.setOptions` rewrites `/etc/cups/ppd/{name}.ppd` in place. Two badges that need different page sizes fight over that file. Step 8 leaves the PPD untouched. Media size, resolution, Zebra `zeMediaTracking`, `MediaType`, `zePrintMode`, and Evolis `InkType` are IPP options on that `Print-Job`. The layout's inch width and height are the media size for that job.
 
-Saved settings stay `base/printer_conf/{name}.json`, one file per queue, shared by every event. Search reads the file into `values`. The job sends those values. Search does not push them into cupsd.
+Saved settings stay `base/printer_conf/{name}.yml`, one file per queue, shared by every event. Search reads the file into `values`. The job sends those values. Search does not push them into cupsd.
 
 ### Two kinds of job, one sender
 
@@ -171,7 +180,7 @@ The class tree (`Printer`, `ZPLPrinter`, `ZebraPrinter`, `DefaultPrinter`, `Evol
 | ZPL | Zebra, TSC | `^XA`, the saved Zebra settings, the graphic from ticket-render, `^XZ` | raw |
 | raster | Evolis, every other installed queue | PNG from ticket-render | `image/png` |
 
-CUPS filters the PNG with the queue's PPD. The registration process does not write PostScript, does not write BMP, and does not run `convert.sh`. `no_postscript` was the switch that forced a raw raster into a filter. A PNG job uses the filter the PPD already declares, so that flag is not a second rendering path. It remains on the routing record so an old `pr_{name}.json` still loads. The sender ignores it.
+CUPS filters the PNG with the queue's PPD. The registration process does not write PostScript, does not write BMP, and does not run `convert.sh`. `no_postscript` was the switch that forced a raw raster into a filter. A PNG job uses the filter the PPD already declares, so that flag is not a second rendering path. It remains on the routing record so an old `pr_{name}.yml` still loads. The sender ignores it.
 
 Evolis is the raster kind plus its card media and `InkType=Black`. It does not need its own type. Godex and the Windows printer are not constructed.
 
@@ -185,9 +194,67 @@ Submit is IPP `Print-Job` to that queue. Completion is `Get-Job-Attributes`: `jo
 
 A send that still fails is an error on the HTTP response. The client does not write a PNG into `genbadges/` and return success. A preview PNG is a separate call that asks ticket-render for PNG bytes and does not open a socket to cupsd.
 
+### Request path
+
+The queue chosen by routing selects the bytes. Zebra and TSC render ZPL, a raster queue renders PNG, and a PDF page renders one PDF page for that queue's dpi. The tools see the page only after that choice.
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Worker as Worker (step 18)
+    participant Route as Routing (step 15)
+    participant List as Aggregator current list
+    participant Draw as Renderer
+    participant Window as PDF window (step 19)
+    participant Tool as Native print or IPP tool
+
+    Client->>Worker: POST /print
+    Worker->>Route: category, internet, certificate, zone, name
+    Route->>List: connected, installed, used
+    List-->>Route: one queue, or none
+    alt no queue
+        Route-->>Worker: no queue
+        Worker->>Draw: PNG and a one-page PDF at 720 dpi
+        Worker->>Worker: write genbadges png and pdf
+    else queue
+        Route-->>Worker: queue, kind, dpi, width
+        alt kind zpl
+            Worker->>Draw: ZPL at that dpi and width
+            Draw-->>Worker: ZPL page
+            Worker->>Tool: Print-Job now, raw
+        else kind raster
+            Worker->>Draw: PNG at that dpi
+            Draw-->>Worker: PNG page
+            Worker->>Tool: Print-Job now, image/png
+        else PDF page
+            Worker->>Draw: one PDF page at that dpi
+            Draw-->>Worker: PDF page
+            alt no zone
+                Worker->>Window: append to that printer's window
+                Note over Window: quiet for 500 ms
+                Window->>Tool: one multipage PDF to the same printer
+            else zone
+                Worker->>Window: append to the zone window
+                Note over Window: quiet for 500 ms
+                Window->>Route: zone rule again
+                Route->>List: printers in that zone
+                Window->>Tool: one multipage PDF to the printer chosen at flush
+            end
+        end
+    end
+```
+
+Pick still runs first. The returned queue carries `kind`, dpi, and width, and `print_cert` selects the certificate layout. The worker then draws only the format that queue takes.
+
+A Zebra or TSC queue is `zpl`. The draw is the 1-bit graphic wrapped as `^XA` … `^XZ`, using that queue's dpi, its 4.1 inch width, and its saved Zebra settings. The native library or the IPP tool gets one raw `Print-Job` immediately.
+
+Any other badge queue is `raster`, including Evolis. The draw is a PNG at that queue's dpi. Evolis also sends `InkType` and the card size. That `Print-Job` goes out immediately as `image/png`.
+
+A PDF page is the third format, still drawn for the queue that pick just returned, at that queue's dpi. ZPL and PNG never enter the window. The PDF page does. Outside a zone, every page in the window was drawn for that same printer, and the flush sends one PDF back to it. Inside a zone, each page was drawn for the printer pick chose when the page arrived, the pages share one window, and the flush may hand the finished PDF to another printer in that zone.
+
 ### Routing
 
-Routing is a field on `Printer`, stored in `base/{event_id}/pr_{name}.json`. A missing file loads as used, with an empty sector name and no zone, category, internet flag, or second name. `print_cert` and `auto_print` load false. `no_postscript` loads false and stays on the record so an old file still parses. The sender ignores it.
+How a job chooses a device is [printing-routing.md](printing-routing.md). Step 15 of [printing-implementation-plan.md](printing-implementation-plan.md) implements that choice. The record is a field on `Printer`, stored in `base/{event_id}/pr_{name}.yml`. A missing file loads as used, with an empty sector name and no zone, category, internet flag, or second name. `print_cert` and `auto_print` load false. `no_postscript` loads false and stays on the record so an old file still parses. The sender ignores it. `class` on that file is the same `native` or `ipp` as the settings file.
 
 | field | meaning |
 |---|---|
@@ -197,22 +264,15 @@ Routing is a field on `Printer`, stored in `base/{event_id}/pr_{name}.json`. A m
 | `category` | set when the queue prints one category |
 | `is_internet` | set when the queue is only for internet registrations, or only for ones that are not |
 | `second_name` | name shown to the operator |
-| `print_cert` | this queue prints the certificate layout, category id plus 1000 |
+| `print_cert` | this queue is a certificate printer. The layout is category id plus 1000 |
 | `auto_print` | the registration flow may enqueue without an extra confirm |
 | `last_print` | milliseconds of the last successful pick. Memory only. A restart leaves every queue at 0 |
 
 `PrinterRouting.toMap` drops `print_cert`, `auto_print`, and `no_postscript` when `second_name` is empty, because the last `getOrElse` returns an earlier map. The file always contains the whole record.
 
-A pick reads the in-memory printers for the open event. It considers a queue only when `connected` and `installed` are both true.
+A pick reads the in-memory printers for the open event and follows [printing-routing.md](printing-routing.md). It considers a queue only when `connected` and `installed` are both true. An empty candidate list is an error on the print response. The Scala client then calls `getAnyPrinter` and prints on whichever connected queue comes first, including a queue with `used` false. A successful pick stores `last_print` on that queue.
 
-1. An explicit queue name returns that queue.
-2. Otherwise the candidates are queues with `used`. A queue with a category stays only when the category equals the visitor's. A queue with no category stays only when no used queue has that category. The internet flag works the same way: a set flag must equal the visitor's, and an empty flag stays only when no used queue has that flag.
-3. When the caller passes a zone, a candidate whose zone is set and different is dropped. Among what remains, a queue with a zone is preferred to a queue with none. The oldest `last_print` wins a tie.
-4. When the caller passes no zone, the oldest `last_print` among the candidates wins.
-
-An empty candidate list is an error on the print response. The Scala client then calls `getAnyPrinter` and prints on whichever connected queue comes first, including a queue with `used` false. A successful pick stores `last_print` on that queue.
-
-`print_cert` selects the layout after the queue is chosen. The layout id is the visitor category plus 1000. A missing certificate layout uses category 999, then category `-1`, then the smallest non-negative loaded category. `auto_print` is for the caller that enqueues. The pick does not read it.
+The certificate layout id is the visitor category plus 1000. A missing certificate layout uses category 999, then category `-1`, then the smallest non-negative loaded category. `auto_print` is for the caller that enqueues. The pick does not read it.
 
 ### Where the code lives
 

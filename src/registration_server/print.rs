@@ -1,15 +1,16 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 use image::RgbaImage;
 use ticket_render::{AreaKind, Layout, PreparedFace};
 
 use crate::struct_to_pdf::{
-    index_template, load_page, prepare_visitor, render_pixels, render_visitor, FaceSet, Page,
+    apply_index, index_template, load_page, render_page, render_pixels, FaceSet, Page,
     TemplateIndex,
 };
 #[cfg(test)]
-use crate::struct_to_pdf::{render as render_raster, Raster};
+use crate::struct_to_pdf::{prepare_visitor, render as render_raster, render_visitor, Raster};
 
 #[derive(Debug)]
 pub struct PageFileError {
@@ -48,7 +49,7 @@ pub fn render(
     render_raster(&page, dpi, category_dir).map_err(page_error)
 }
 
-/// The Zebra values from `base/printer_conf/{name}.json` that become `^XA` lines.
+/// The Zebra values from `base/printer_conf/{name}.yml` that become `^XA` lines.
 #[cfg(test)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct ZebraSettings {
@@ -129,21 +130,22 @@ pub fn wrap_zpl(
 }
 
 /// One open event. The key is the category directory name: the badge category, or that category plus 1000 for a certificate.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Badges {
     categories: BTreeMap<i64, CategoryEntry>,
 }
 
+#[derive(Clone)]
 pub struct CategoryEntry {
-    pub layout: Option<Result<PreparedLayout, String>>,
-    pub page: Option<Result<PreparedPage, String>>,
+    pub layout: Option<Result<Arc<PreparedLayout>, String>>,
+    pub page: Option<Result<Arc<PreparedPage>, String>>,
 }
 
 pub struct PreparedLayout {
     pub layout: Layout,
     pub background: RgbaImage,
     pub faces: Vec<PreparedFace>,
-    scaled: HashMap<i32, RgbaImage>,
+    scaled: Mutex<HashMap<i32, RgbaImage>>,
 }
 
 pub struct PreparedPage {
@@ -153,12 +155,39 @@ pub struct PreparedPage {
 }
 
 impl PreparedLayout {
+    /// A layout kept in memory. 203 and 300 are scaled when the layout is prepared.
+    /// Another dpi is scaled on the first draw and kept.
+    #[cfg(test)]
+    pub(crate) fn memory(layout: Layout, background: RgbaImage) -> Self {
+        Self {
+            layout,
+            background,
+            faces: Vec::new(),
+            scaled: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn background_at(&self, dpi: i32) -> Result<RgbaImage, PageFileError> {
+        let mut scaled = self.scaled.lock().expect("scaled background");
+        if let Some(image) = scaled.get(&dpi) {
+            return Ok(image.clone());
+        }
+        let image = ticket_render::scale_background(&self.layout, &self.background, dpi).map_err(
+            |error| PageFileError {
+                message: error.to_string(),
+            },
+        )?;
+        scaled.insert(dpi, image.clone());
+        Ok(image)
+    }
+
     pub fn png(
         &self,
         values: &HashMap<String, String>,
         dpi: i32,
         photo: Option<&[u8]>,
     ) -> Result<Vec<u8>, PageFileError> {
+        let scaled = self.background_at(dpi)?;
         ticket_render::render_png_prepared(
             &self.layout,
             values,
@@ -166,7 +195,7 @@ impl PreparedLayout {
             &self.background,
             photo,
             &self.faces,
-            self.scaled.get(&dpi),
+            Some(&scaled),
         )
         .map_err(|error| PageFileError {
             message: error.to_string(),
@@ -178,13 +207,14 @@ impl PreparedLayout {
         values: &HashMap<String, String>,
         dpi: i32,
     ) -> Result<Vec<u8>, PageFileError> {
+        let scaled = self.background_at(dpi)?;
         ticket_render::render_graphic_prepared(
             &self.layout,
             values,
             dpi,
             &self.background,
             &self.faces,
-            self.scaled.get(&dpi),
+            Some(&scaled),
         )
         .map_err(|error| PageFileError {
             message: error.to_string(),
@@ -193,12 +223,21 @@ impl PreparedLayout {
 }
 
 impl PreparedPage {
+    /// The stored page with this visitor's holes filled. The template is not parsed again.
+    pub fn filled(
+        &self,
+        values: &HashMap<String, String>,
+        photos: &HashMap<String, Vec<u8>>,
+    ) -> Result<Page, PageFileError> {
+        apply_index(&self.page, &self.index, values, photos, Path::new(".")).map_err(page_error)
+    }
+
     pub fn pdf(
         &self,
         values: &HashMap<String, String>,
         photos: &HashMap<String, Vec<u8>>,
     ) -> Result<Vec<u8>, PageFileError> {
-        render_visitor(&self.page, values, photos, Path::new(".")).map_err(page_error)
+        render_page(&self.filled(values, photos)?, Path::new(".")).map_err(page_error)
     }
 
     fn pixels(
@@ -207,8 +246,7 @@ impl PreparedPage {
         photos: &HashMap<String, Vec<u8>>,
         dpi: f64,
     ) -> Result<RgbaImage, PageFileError> {
-        let page =
-            prepare_visitor(&self.page, values, photos, Path::new(".")).map_err(page_error)?;
+        let page = self.filled(values, photos)?;
         render_pixels(&page, dpi, Path::new("."), &self.faces).map_err(page_error)
     }
 
@@ -245,6 +283,33 @@ impl PreparedPage {
 }
 
 impl Badges {
+    /// A prepared layout, or the error kept for that directory.
+    pub fn layout_entry(&self, category: i64) -> Option<Result<&PreparedLayout, &str>> {
+        let entry = self.categories.get(&category)?;
+        Some(match entry.layout.as_ref()? {
+            Ok(layout) => Ok(layout.as_ref()),
+            Err(message) => Err(message.as_str()),
+        })
+    }
+
+    /// A prepared page, or the error kept for that directory.
+    pub fn page_entry(&self, category: i64) -> Option<Result<&PreparedPage, &str>> {
+        let entry = self.categories.get(&category)?;
+        Some(match entry.page.as_ref()? {
+            Ok(page) => Ok(page.as_ref()),
+            Err(message) => Err(message.as_str()),
+        })
+    }
+
+    /// Categories whose layout decoded.
+    pub fn layout_ids(&self) -> Vec<i64> {
+        self.categories
+            .iter()
+            .filter(|(_, entry)| matches!(entry.layout, Some(Ok(_))))
+            .map(|(category, _)| *category)
+            .collect()
+    }
+
     pub fn layout_size(&self, category: i64) -> Option<Result<(i32, i32), String>> {
         let entry = self.categories.get(&category)?;
         Some(match entry.layout.as_ref()? {
@@ -330,7 +395,7 @@ impl Badges {
             layout: None,
             page: None,
         });
-        entry.layout = layout;
+        entry.layout = layout.map(|result| result.map(Arc::new));
     }
 
     pub(crate) fn replace_page(
@@ -342,7 +407,7 @@ impl Badges {
             layout: None,
             page: None,
         });
-        entry.page = page;
+        entry.page = page.map(|result| result.map(Arc::new));
     }
 }
 
@@ -368,9 +433,13 @@ pub fn prepare_event(event_dir: &Path) -> Badges {
         if layout.is_none() && page.is_none() {
             continue;
         }
-        badges
-            .categories
-            .insert(category, CategoryEntry { layout, page });
+        badges.categories.insert(
+            category,
+            CategoryEntry {
+                layout: layout.map(|item| item.map(Arc::new)),
+                page: page.map(|item| item.map(Arc::new)),
+            },
+        );
     }
     badges
 }
@@ -431,7 +500,7 @@ pub fn prepare_layout(dir: &Path) -> Option<Result<PreparedLayout, String>> {
         layout,
         background,
         faces,
-        scaled,
+        scaled: Mutex::new(scaled),
     }))
 }
 
@@ -514,6 +583,24 @@ mod tests {
     use image::{DynamicImage, ImageFormat, Rgba, RgbaImage};
     use lopdf::Document;
     use std::io::Cursor;
+
+    #[test]
+    fn another_dpi_is_scaled_once() {
+        let mut prepared = PreparedLayout::memory(
+            Layout {
+                width: 8,
+                height: 8,
+                dots_per_point: 1.0,
+                areas: Vec::new(),
+            },
+            RgbaImage::from_pixel(4, 4, Rgba([10, 20, 30, 255])),
+        );
+        let first = prepared.png(&HashMap::new(), 600, None).unwrap();
+        prepared.background = RgbaImage::from_pixel(4, 4, Rgba([200, 0, 0, 255]));
+        let second = prepared.png(&HashMap::new(), 600, None).unwrap();
+        assert_eq!(first, second);
+        assert!(prepared.scaled.lock().expect("scaled").contains_key(&600));
+    }
 
     mod page_file {
         use super::*;
@@ -1025,7 +1112,9 @@ contents:
             let raster = render(&dir, &shown, &HashMap::new(), 100.0).unwrap();
             let image = decode_png(&raster.png);
             let rows: Vec<u32> = (0..image.height())
-                .filter(|&y| (0..image.width()).any(|x| image.get_pixel(x, y).0 != [255, 255, 255, 255]))
+                .filter(|&y| {
+                    (0..image.width()).any(|x| image.get_pixel(x, y).0 != [255, 255, 255, 255])
+                })
                 .collect();
             assert!(
                 rows.len() >= 2,

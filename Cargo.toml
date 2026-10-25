@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "modules/ticket-render"]
+members = [".", "modules/ticket-render", "modules/ipp-tool"]
 exclude = ["desk"]
 
 [package]
@@ -40,6 +40,7 @@ qrcode = { version = "0.14", default-features = false, features = ["image"] }
 fontdue = "0.9"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp"] }
 ticket-render = { path = "modules/ticket-render" }
+ipp-tool = { path = "modules/ipp-tool" }
 
 [dev-dependencies]
 ttf-parser = "0.25.1"
@@ -47,6 +48,8 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 tokio-tungstenite = "0.26"
 tower = { version = "0.5", features = ["util"] }
 rqrr = "0.8"
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
+rcgen = "0.14.10"
 
 [build-dependencies]
 tonic-build = "0.14.6"

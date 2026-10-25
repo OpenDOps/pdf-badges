@@ -669,6 +669,17 @@ impl CurrentEvent {
         Ok(())
     }
 
+    /// Replace the badge cache. Tests draw a layout that was not loaded from disk.
+    #[cfg(test)]
+    pub(crate) fn testing_badges(&self, badges: Badges) {
+        self.lock_state().badges = badges;
+    }
+
+    /// The badge cache built when this event opened, and replaced for one category when sync stores its template.
+    pub fn badges(&self) -> Badges {
+        self.lock_state().badges.clone()
+    }
+
     /// The prepared layout size for `category`, or the decode error kept for that directory.
     pub fn badge_layout(&self, category: i64) -> Option<Result<(i32, i32), String>> {
         self.lock_state().badges.layout_size(category)

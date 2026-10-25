@@ -83,6 +83,10 @@ impl Registration for RegistrationService {
             .enqueue(PrintJob {
                 id: id.clone(),
                 pages: request.pages,
+                zone: None,
+                name: None,
+                certificate: None,
+                category: None,
             })
             .map_err(enqueue_status)?;
         Ok(Response::new(EnqueuePrintResponse { id }))

@@ -595,19 +595,11 @@ fn paint_lines(
             let (red, green, blue) = segment.color.components();
             operations.push(Operation::new(
                 "rg",
-                vec![
-                    Object::Real(red),
-                    Object::Real(green),
-                    Object::Real(blue),
-                ],
+                vec![Object::Real(red), Object::Real(green), Object::Real(blue)],
             ));
             operations.push(Operation::new(
                 "RG",
-                vec![
-                    Object::Real(red),
-                    Object::Real(green),
-                    Object::Real(blue),
-                ],
+                vec![Object::Real(red), Object::Real(green), Object::Real(blue)],
             ));
             operations.push(Operation::new("BT", vec![]));
             operations.push(Operation::new(
