@@ -16,9 +16,9 @@ use lopdf::{dictionary, Document, Object, ObjectId, Stream};
 
 pub use geometry::{media_box, media_size, pdf_point, to_points, trim_box};
 pub use page::{
-    load_page, parse_page, Barcode, Bleeds, ContentEntry, FontResource, FontStyle, HorizontalAlign,
-    ImagePlacement, ImageResource, Padding, Page, PageSize, Photo, RenderError, Rgb, SourceFormat,
-    TextBody, TextBox, Units, VerticalAlign,
+    load_page, parse_page, Barcode, Bleeds, Border, BoxFrame, ContentEntry, FontResource,
+    FontStyle, HorizontalAlign, ImagePlacement, ImageResource, Padding, Page, PageSize, Photo,
+    RenderError, Rgb, SourceFormat, TextBody, TextBox, Units, VerticalAlign,
 };
 pub(crate) use raster::{bmp_bytes, png_bytes, render_pixels, FaceSet};
 pub use raster::{render, Raster};
@@ -221,6 +221,45 @@ pub fn render_pages(pages: &[Page], base_dir: &Path) -> Result<Vec<u8>, RenderEr
             let image_id = shared_image(&mut doc, &mut shared_images, stream);
             xobjects.set(name, Object::Reference(image_id));
         }
+        for form in painted_page.forms {
+            let mut form_xobjects = lopdf::Dictionary::new();
+            for (name, stream) in form.xobjects {
+                let image_id = shared_image(&mut doc, &mut shared_images, stream);
+                form_xobjects.set(name, Object::Reference(image_id));
+            }
+            let mut form_fonts = lopdf::Dictionary::new();
+            for pending in form.fonts {
+                let index = font_groups
+                    .iter()
+                    .position(|group| group.bytes == pending.bytes)
+                    .expect("painted font belongs to a group");
+                form_fonts.set(pending.resource_name, Object::Reference(font_ids[index]));
+            }
+            let mut form_resources = lopdf::Dictionary::new();
+            if !form_xobjects.is_empty() {
+                form_resources.set("XObject", form_xobjects);
+            }
+            if !form_fonts.is_empty() {
+                form_resources.set("Font", form_fonts);
+            }
+            let mut dict = dictionary! {
+                "Type" => "XObject",
+                "Subtype" => "Form",
+                "FormType" => 1,
+                "BBox" => pdf_rect(form.bbox),
+                "Group" => dictionary! {
+                    "Type" => "Group",
+                    "S" => "Transparency",
+                    "I" => true,
+                    "CS" => "DeviceRGB",
+                },
+            };
+            if !form_resources.is_empty() {
+                dict.set("Resources", Object::Dictionary(form_resources));
+            }
+            let id = doc.add_object(Stream::new(dict, form.content));
+            xobjects.set(form.name, Object::Reference(id));
+        }
         let mut font_dict = lopdf::Dictionary::new();
         for pending in painted_page.fonts {
             let index = font_groups
@@ -235,6 +274,18 @@ pub fn render_pages(pages: &[Page], base_dir: &Path) -> Result<Vec<u8>, RenderEr
         }
         if !font_dict.is_empty() {
             resources.set("Font", font_dict);
+        }
+        if !painted_page.ext_gstates.is_empty() {
+            let mut graphics = lopdf::Dictionary::new();
+            for (name, alpha) in painted_page.ext_gstates {
+                let id = doc.add_object(dictionary! {
+                    "Type" => "ExtGState",
+                    "ca" => Object::Real(alpha),
+                    "CA" => Object::Real(alpha),
+                });
+                graphics.set(name, Object::Reference(id));
+            }
+            resources.set("ExtGState", graphics);
         }
         let content_id = doc.add_object(Stream::new(dictionary! {}, painted_page.content));
         let media = media_box(page);
@@ -282,7 +333,11 @@ struct FontGroup {
 fn union_fonts(painted: &[images::PaintedPage]) -> Vec<FontGroup> {
     let mut groups = Vec::new();
     for page in painted {
-        for font in &page.fonts {
+        for font in page
+            .fonts
+            .iter()
+            .chain(page.forms.iter().flat_map(|form| form.fonts.iter()))
+        {
             let index = if let Some(index) = groups
                 .iter()
                 .position(|group: &FontGroup| group.bytes == font.bytes)

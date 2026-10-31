@@ -1623,15 +1623,39 @@ fn reconcile_pool(app: &App, event_id: &str, pool: &Pool) {
     }
 }
 
+fn pool_limits(app: &App, event_id: &str, cat_id: i64) -> (i64, i64) {
+    let path = CurrentEvent::lock(&app.current)
+        .base_dir()
+        .join(event_id)
+        .join("barcodes.json");
+    let Ok(bytes) = std::fs::read(&path) else {
+        return (BC_MIN, BC_ADD);
+    };
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return (BC_MIN, BC_ADD);
+    };
+    let Some(entry) = value.get(cat_id.to_string()) else {
+        return (BC_MIN, BC_ADD);
+    };
+    let min = entry
+        .get("min")
+        .and_then(|item| item.as_i64())
+        .filter(|item| *item >= 0)
+        .unwrap_or(BC_MIN);
+    let add = entry
+        .get("add")
+        .and_then(|item| item.as_i64())
+        .filter(|item| *item >= 0)
+        .unwrap_or(BC_ADD);
+    (min, add)
+}
+
 fn pool_take(app: &App, event_id: &str, pool: &Pool) -> Option<i64> {
     let count = CurrentEvent::lock(&app.current)
         .barcode_count(event_id, pool.cat_id, pool.bc_type, &pool.date)
         .unwrap_or(0);
-    let take = if count < BC_MIN {
-        BC_MIN + BC_ADD - count
-    } else {
-        0
-    };
+    let (min, add) = pool_limits(app, event_id, pool.cat_id);
+    let take = if count < min { min + add - count } else { 0 };
     if take < BC_TAKE_MIN {
         None
     } else {

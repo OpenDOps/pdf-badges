@@ -53,7 +53,6 @@ export function deskRoutes(): RouteObject[] {
         { path: "import", ...lazy("/import") },
         { path: "settings", ...lazy("/settings") },
         { path: "printers", ...lazy("/printers") },
-        { path: "settings/registration", ...lazy("/settings/registration") },
       ],
     },
   ];

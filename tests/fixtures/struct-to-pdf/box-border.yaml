@@ -1,0 +1,43 @@
+page_size:
+  width: 100
+  height: 100
+  units: mm
+  bleeds:
+    top: 0
+    right: 0
+    bottom: 0
+    left: 0
+resources:
+  images: {}
+  fonts:
+    font1:
+      name: font1
+      font_family: LiberationSerif
+      weight: normal
+      italic: false
+      embedded: true
+      source_path: fonts/LiberationSerif-Regular.ttf
+contents:
+  - id: framed
+    posX: 15
+    posY: 30
+    width: 70
+    height: 40
+    border:
+      width: 0.4
+      color: "#112233"
+    alignment:
+      horizontal: center
+      vertical: middle
+    padding:
+      top: 2
+      right: 2
+      bottom: 2
+      left: 2
+    text:
+      font: font1
+      font_size: 8
+      leading: 0
+      line_height: 10
+      preentered: Border
+      content: null

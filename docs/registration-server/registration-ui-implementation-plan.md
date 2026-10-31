@@ -20,7 +20,7 @@ The operator screens are done when steps 1 through 12 are done. Tests fetch the 
 | [8. Print progress](#step-8-print-progress) | The running job, pause, stop | not started |
 | [9. Import](#step-9-import) | Column mapping and the CSV file on one screen | not started |
 | [10. Settings](#step-10-settings) | The two settings links | not started |
-| [11. Printers](#step-11-printers) | Queues, test, save | not started |
+| [11. Printers](#step-11-printers) | Address, name, visibility, default, routing | done |
 | [12. Registration settings](#step-12-registration-settings) | The six switches, barcode pools, sync | not started |
 
 Shared rules:
@@ -182,7 +182,7 @@ The form screen is the desk component from the form plan. This step gives it the
 2. One search field. A category multi-select whose first option is "Все категории". The other options are the shared desk catalog. "Все категории" is selected alone and sends no `category`. Each other category adds its id, and choosing it again removes that id. The choice does not change the category stored for the form.
 3. Columns are a row checkbox, Имя, Фамилия, Компания, Категория, and `(print_count)` at the right. The cells are `name`, `surname`, `c_name`, `category`, and `print_count`. The header checkbox selects or clears the current page. Those checks clear on a page change, a search change, or a category change. "Выбрать все" selects every match of the current search or category, stays selected across pages, and is cleared when the search or category changes. It is disabled when both are empty. An empty `c_name` shows `email` in that cell, grey: the first two letters, then exactly `***`, then `@` and the domain. A shorter or empty local part still gets `***`. Even and odd rows use two close backgrounds. `print_count` above zero uses a light amber pair.
 4. "<" and ">" on the bottom bar ask for the previous and next `offset`. Between them are buttons for the first page, the last page, and pages `current - 2` through `current + 2`. A gap in that run is "...". The current page button is selected. "<" is disabled at offset 0. ">" is disabled when `offset + limit` reaches `total`. The bottom-bar buttons are compact so the pager and the actions stay on one row.
-5. The shared printer dropdown sits in the desk navigation, the same custom list as the form. The chosen name stays selected for the confirm step.
+5. The shared printer dropdown sits in the desk navigation, the same custom list as the form. The chosen address stays selected for the confirm step. A printer that leaves the catalog becomes the default, or the first printer when none is the default.
 6. The bottom bar holds the pager, then "Отметить", "Заказать сертификат", and "Печать". "Отметить" and "Заказать сертификат" are toggles. Their pressed state stays for the confirm step.
 7. There is one search field. When it has text, a round clear button at its right edge empties it. The separate email, name, surname, and company inputs from the static page are not on this screen.
 8. The desk navigation does not reserve a blank gap for a Посетитель tab. The printer sits immediately after Посетители on this list only, and the network status fills the rest of the bar. Opening a visitor removes that header printer and adds the Посетитель tab. The first click on a row highlights it. The second click on that row opens the tab at `/visitor?userId={uid}`, which is the form filled from `GET /api/registrations/{uid}`. Reloading that address keeps the tab open and loads the same visitor. Leaving `/visitor` for another screen closes the tab. The close control returns to `/visitors` and clears the tab. If the form changed since it opened or was last saved, the close and the switch ask whether to continue and drop those changes. Сохранить on that form writes the visitor and closes the tab. Печать writes first only when that same change check says the form changed, posts `POST /api/print` for that uid, and closes the tab after the print is accepted. The printer label in that bar is an icon, and the network status grows into the space left beside it.
@@ -315,26 +315,27 @@ The "Печать" dialog on the visitor list. Confirming it opens `/print`.
 
 [Back to summary](#summary)
 
-`9.html` and `printersSetup.mustache`. Routing fields are the ones in [printing.md](printing.md): `zone`, `print_cert`, `auto_print`, `no_postscript`.
+`9.html` and `printersSetup.mustache`. The stored fields are the address file in [printing.md](printing.md): `name`, `hidden`, `default`, `print_cert`, `category`, and `zone`. Search fills the list. This screen does not post a search, a test page, or a queue cancel.
 
 ### Work
 
 1. The heading is "Тест принтеров".
-2. "Обновить список принтеров" posts `POST /api/printers/search` and replaces the table with the returned list. "Сбросить очередь печати" posts `POST /api/printers/cancel`.
-3. An empty list shows "Нет подключенных принтеров".
-4. Each row shows the queue name and edits `zone`, `print_cert` ("Печать сертификата"), `auto_print` ("Автопечать из анкеты"), and `no_postscript` ("Запретить PostScript").
-5. "Тест" posts `POST /api/printers/{name}/test` for that row.
-6. "Сохранить" patches `PATCH /api/printers/{name}` with that row's `values`, and `PATCH /api/printers/{name}/routing` with the four routing fields. A 200 shows "Ok" on that row.
+2. The page polls `GET /api/printers` about every two seconds. The list includes a hidden printer and a printer that is not available.
+3. An empty list shows "Нет принтеров".
+4. Each row shows the address and "Доступен" or "Недоступен", and edits the name, "Показывать" (`hidden`), "По умолчанию" (`default`), "Печать сертификата" (`print_cert`), "Категория", and "Зона".
+5. A poll updates names, visibility, and availability. A field the operator is editing is kept.
+6. "Сохранить" patches `PATCH /api/printers/{id}` with `name`, `hidden`, `default`, `zone`, `category`, and `print_cert`. `{id}` is the address. A 200 shows "Ok" on that row.
 7. Back points at `/settings`.
+8. The form and visitor selects follow `GET /api/desk/catalog`. A selected printer that leaves that list becomes the default printer, or the first printer when none is the default.
 
 ### Test scenarios
 
 | Scenario | Assert |
 |---|---|
-| `printers_lists_queues` | One queue named "HP" shows that name and its zone. An empty list shows "Нет подключенных принтеров" and no row. |
-| `printers_refresh_and_cancel` | "Обновить список принтеров" posts `POST /api/printers/search` and shows the new name. "Сбросить очередь печати" posts `POST /api/printers/cancel`. |
-| `printers_test_one_queue` | "Тест" on "HP" posts `POST /api/printers/HP/test` and does not post for the other row. |
-| `printers_save_writes_values_and_routing` | Changing the zone and "Сохранить" patches `values` and `routing` for that name. `routing` contains the zone, `print_cert`, `auto_print`, and `no_postscript`. The row then shows "Ok". |
+| `printers_saves_name_visibility_and_routing` | One printer shows its address and name. Changing the name, hiding it, setting the certificate, the category, and the zone, then "Сохранить", patches that address. The row then shows "Ok". |
+| `printers_polls_name_and_availability_without_dropping_an_edit` | A poll that marks the printer unavailable keeps the name the operator is typing. After "Сохранить", a later poll shows the new name. |
+| `catalog_switches_to_the_default_when_the_printer_disappears` | The chosen address leaves the catalog and the select becomes the printer with `default` set. |
+| `catalog_switches_to_the_first_printer_when_the_choice_left` | A stored printer that is gone, and no `default`, becomes the first printer in the list. |
 
 ### Done when
 

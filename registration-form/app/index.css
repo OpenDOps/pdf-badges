@@ -39,6 +39,12 @@
     min-height: 2.75rem;
   }
 
+  [data-screen="printers"] input:not([type="checkbox"]):not([type="radio"]),
+  [data-screen="printers"] select {
+    min-height: 2rem;
+    padding: 0.25rem 0.5rem;
+  }
+
   [data-network] {
     width: max-content;
     max-width: calc(100% - 1.5rem);
@@ -81,6 +87,11 @@
     padding: 0.2rem 0.65rem;
     font-size: 0.875rem;
     line-height: 1.25rem;
+  }
+
+  [data-testid="desk-nav"] :is(a, button) {
+    cursor: pointer;
+    appearance: none;
   }
 
   [data-testid="desk-nav"] label {
@@ -181,6 +192,7 @@
     padding: 0.75rem 1.25rem;
     min-height: 2.75rem;
     cursor: pointer;
+    appearance: none;
   }
 
   [data-testid="discard"] button[data-choice="stay"] {

@@ -74,13 +74,13 @@ These require the operator cookie. The old `protect(AdminKey)` routes also requi
 | `POST /deleteKey` | `DELETE /api/keys/{id}` | Delete that row. |
 | `POST /printKeys` | `POST /api/keys/print` | Enqueue one badge per key. |
 | `POST /keyAuth` | `POST /api/desk/auth` | Check a desk key. Set the desk cookie. `GET /keyAuth` is a page. |
-| `GET /get_printers` | `GET /api/printers` | Connected printers, choices, values, routing. |
-| `GET /printers/all` | `GET /api/printers` | Names are a field on that list. `GET /printers/all2` is the same list with make and model. |
-| `GET /update_printers` | `POST /api/printers/search` | Run the step 8 search and return the new list. |
-| `POST /set_printer_params` | `PATCH /api/printers/{name}` | Save `values` to `base/printer_conf/{name}.yml`. `GET /set_printer_params` is the same body and is not a second route. |
-| `POST /set_printer_routings` | `PATCH /api/printers/{name}/routing` | Save `used`, `zone`, `category`, `is_internet`, `print_cert`, `sector_name`, `second_name`, `auto_print`, `no_postscript`, and `rule` for the open event. |
-| `GET /test_printer` | `POST /api/printers/{name}/test` | Enqueue the test badge from the printing plan. |
-| `GET /printers/jobs/cancel-all` | `POST /api/printers/cancel` | `Cancel-Job` for jobs this process submitted, and drop the waiting print channel. |
+| `GET /get_printers` | `GET /api/printers` | Every address file, including a hidden printer and one that is not available. A desk cookie is required. |
+| `GET /printers/all` | `GET /api/printers` | The display name is a field on that list. The id is the address. |
+| `GET /update_printers` | search at startup | The background search fills a missing address file. The settings screen polls `GET /api/printers`. It does not post a search. |
+| `POST /set_printer_params` | `PATCH /api/printers/{id}` | Update the address file. `{id}` is the address, percent-encoded. An admin desk key is required. An unknown address is 404. |
+| `POST /set_printer_routings` | `PATCH /api/printers/{id}` | The same PATCH. The body sets `name`, `hidden`, `default`, `zone`, `category`, and `print_cert`. A field it omits stays as stored. |
+| `GET /test_printer` | not registered | The settings screen has no test button. |
+| `GET /printers/jobs/cancel-all` | not registered | The settings screen has no cancel button. |
 | `POST /show_ticket_status` | `PATCH /api/settings` | The registration flags, one object. |
 | `POST /show_gotsome` | `PATCH /api/settings` | Same object. |
 | `POST /print_from_ipad_form` | `PATCH /api/settings` | Same object. |
@@ -149,7 +149,7 @@ An email plus a phone that hit different rows is 409 `invalid_phone_email_combo`
 
 `POST /api/print` replaces the skeleton body. The body is `{ "ids", "printer", "zone", "certificate", "category", "noprint", "check" }`. `ids` are the uids. The handler loads each row and passes `printer`, `zone`, and `certificate` to the step 8 pick, then enqueues.
 
-`printer` is the chosen queue name. When it is set, the pick returns that queue. `zone` is the routing zone. When `printer` is empty and `zone` is set, the pick keeps queues whose routing `zone` matches. `certificate` is true when the job is a certificate. The pick then keeps queues whose routing `print_cert` is set and draws the certificate layout. A false or absent `certificate` uses the category printer. `category` on the body overrides the category on the stored row. The internet flag is the flag on that row. The body does not send a zone rule. A missing `rule` on the queue is `round_robin`.
+`printer` is the address from the desk catalog, or a display name. When it is set, the pick returns that queue. `zone` is the routing zone. When `printer` is empty and `zone` is set, the pick keeps queues whose routing `zone` matches. `certificate` is true when the job is a certificate. The pick then keeps queues whose routing `print_cert` is set and draws the certificate layout. A false or absent `certificate` uses the category printer. `category` on the body overrides the category on the stored row. The internet flag is the flag on that row. The body does not send a zone rule. A missing `rule` on the queue is `round_robin`.
 
 `noprint` writes the print row and does not enqueue. `check` is the `doCheck` flag: a uid that fails the check is listed in the response and is not printed. The data is one object per queue that received a job: `{ "printer", "zone", "certificate", "zone_name" }`. `printer` is the queue the pick chose. `zone` is that queue's routing zone. `certificate` is the flag the job carried. `zone_name` is the sector name, the string the old client put in `zoneName.ru`. A pick that matches nothing is 409 `no_printer`.
 
@@ -163,7 +163,9 @@ An email plus a phone that hit different rows is 409 `invalid_phone_email_combo`
 
 `GET /api/keys` returns `{ "id", "key", "comment", "is_admin" }`. `POST /api/keys` inserts an operator key and returns `{ "id", "key" }`. `PATCH` and `DELETE` take the id. `POST /api/keys/print` enqueues one test-shaped badge per key, with the key text as the name and the comment as the company. The two default rows from step 4 are the rows an empty table already has.
 
-`GET /api/printers` is the in-memory printer list from step 8, including a queue with `connected` false so the screen can show it. Each queue includes its routing record. `POST /api/printers/search` runs search and then returns that list. `PATCH /api/printers/{name}` writes `values`. `PATCH /api/printers/{name}/routing` writes `used`, `zone`, `category`, `is_internet`, `print_cert`, `sector_name`, `second_name`, `auto_print`, `no_postscript`, and `rule`. A field the body omits stays as stored. `rule` is `round_robin` or `fewest_jobs`. A missing rule is `round_robin`. The pick reads `used`, `zone`, `category`, `is_internet`, `print_cert`, and `rule` from that record. `POST /api/printers/{name}/test` enqueues the test page. `POST /api/printers/cancel` cancels submitted IPP jobs and drops jobs still waiting on the print channel.
+Search fills `base/printer_conf/{hex}.json` the first time an address is seen. The file holds `id`, `name`, `hidden`, `default`, `zone`, `category`, and `print_cert`. The searched name is copied only when that file is absent. `GET /api/printers` requires a desk cookie and returns every file joined to the live list: those fields plus `available`. Available means connected, accepting jobs, and not stopped. A hidden printer and an unavailable printer stay in this list. A file whose printer is gone stays with `available` false. `GET /api/desk/catalog` is the select list: available printers that are not hidden, each with `id` (the address), `name`, `text`, and `default`. `text` adds the host when two visible printers share a name. `rev` includes that list, so a rename, a hide, a default change, or an availability change answers the long-poll.
+
+`PATCH /api/printers/{id}` requires an admin desk key. `{id}` is the address, percent-encoded. The body may set `name`, `hidden`, `default`, `zone`, `category`, and `print_cert`. A field the body omits stays as stored. `default` true clears `default` on the other files. An address with no file is 404. The PATCH does not start a search and does not talk to CUPS. The pick still reads `used`, `zone`, `category`, `is_internet`, `print_cert`, and `rule` from the live record. `zone`, `category`, and `print_cert` on that record come from the address file. `rule` is `round_robin` or `fewest_jobs`. A missing rule is `round_robin`. A test-page route and a cancel-all route are not registered. The settings screen does not need them: search fills the files, and the catalog long-poll plus the settings poll carry name, visibility, and availability.
 
 `GET /api/settings` returns one object: `show_ticket_status`, `show_gotsome`, `print_on_save`, `capitalize_names`, `transliterate`, `double_print`, `load_barcodes`. `PATCH` writes the fields it is given and leaves the others. The file is `base/{event_id}/settings.json`. The print worker reads `transliterate` and `double_print` when it decides on a second page.
 
@@ -284,7 +286,7 @@ Keys, printers, and the registration flags. The operator cookie is required.
 
 1. Replace the step 3 key stubs with the table reads and writes.
 2. Desk auth sets the desk cookie. Admin-only printer and settings routes check it.
-3. Printer routes call the step 8 records. Settings are one YAML file, with `class` `native` or `ipp`.
+3. Printer routes call the step 8 records. The address file is `base/printer_conf/{hex}.json`. Options stay in `{name}.yml`, with `class` `native` or `ipp`.
 
 ### Test scenarios
 
@@ -292,7 +294,8 @@ Keys, printers, and the registration flags. The operator cookie is required.
 |---|---|
 | `keys_roundtrip` | `POST /api/keys` then `GET /api/keys` includes the new operator key. `DELETE` removes it. The two default rows remain. |
 | `desk_key_required` | `PATCH /api/settings` without a desk cookie is 401. With an admin key it stores `double_print` true, and a following GET returns it. |
-| `printer_patch_writes_the_file` | `PATCH /api/printers/{name}` writes `base/printer_conf/{name}.yml`, including `class`. Search is not sent to cupsd by the PATCH. |
+| `printer_patch_does_not_create_a_printer` | `PATCH /api/printers/{id}` for an address with no file is 404 and writes nothing. |
+| `catalog_uses_search_addresses_and_hides_the_rest` | Search writes the address file and the catalog id is that address. A second search keeps a renamed name. A hidden printer and a stopped printer are left out of `GET /api/desk/catalog`. `GET /api/printers` still lists them. `default` true on one printer clears it on the other. A non-admin key is 401. |
 
 ### Done when
 

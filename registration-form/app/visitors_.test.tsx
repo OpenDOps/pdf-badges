@@ -229,9 +229,25 @@ test("visitors_next_page", async () => {
   expect(screen.queryByRole("button", { name: "8" })).not.toBeInTheDocument();
 });
 
+test("visitors_list_prints_checked_rows", async () => {
+  const { posts } = mount();
+  const printer = await screen.findByLabelText("Принтер");
+  fireEvent.click(printer);
+  fireEvent.click(await screen.findByRole("option", { name: "HP" }));
+  fireEvent.click(await screen.findByRole("checkbox", { name: "Анна Иванова" }));
+  fireEvent.click(screen.getByRole("checkbox", { name: "Борис Петров" }));
+  posts.length = 0;
+  fireEvent.click(screen.getByRole("button", { name: "Печать" }));
+  await waitFor(() => expect(posts.map((post) => post.path)).toEqual(["/api/print"]));
+  expect(posts[0]?.body).toEqual({ ids: ["a", "b"], printer: "HP" });
+  expect(screen.getByRole("checkbox", { name: "Анна Иванова" })).not.toBeChecked();
+  expect(screen.getByRole("checkbox", { name: "Борис Петров" })).not.toBeChecked();
+});
+
 test("visitors_printer_and_switches", async () => {
   mount((query) => (query.get("q") === "ещё" ? { total: 0, rows: [] } : { total: firstPage.length, rows: firstPage }));
   const printer = await screen.findByLabelText("Принтер");
+  expect(screen.getByRole("button", { name: "Принтеры" }).closest("[data-testid='desk-nav']")).toBeTruthy();
   fireEvent.click(printer);
   fireEvent.click(await screen.findByRole("option", { name: "HP" }));
   expect(printer).toHaveValue("HP");

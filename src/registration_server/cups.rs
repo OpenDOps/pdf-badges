@@ -36,6 +36,10 @@ impl Error {
     fn is_no_queue(&self) -> bool {
         self.message == "no queue"
     }
+
+    pub(crate) fn is_still_processing(&self) -> bool {
+        self.message == "job still processing"
+    }
 }
 
 impl std::fmt::Display for Error {
@@ -129,7 +133,8 @@ pub enum Page {
 /// What a print asks the current list to choose.
 #[derive(Debug, Clone, Default)]
 pub struct Job {
-    /// An explicit queue name. It wins when that queue is connected, installed, and used.
+    /// An explicit queue. A display name or the printer address both match.
+    /// The queue still has to be connected, installed, and used.
     pub name: Option<String>,
     /// Visitor category. Empty means the job does not name one.
     pub category: Option<String>,
@@ -168,6 +173,8 @@ struct Slot {
     adopted: HashSet<String>,
     /// USB devices waiting until the queue listing has been read.
     pending_install: Vec<Device>,
+    /// IPP URIs that were asked and did not answer.
+    missed: Vec<String>,
     running: bool,
     error: Option<String>,
 }
@@ -227,6 +234,7 @@ impl Search {
                     seen_devices: HashSet::new(),
                     adopted: HashSet::new(),
                     pending_install: Vec::new(),
+                    missed: Vec::new(),
                     running: false,
                     error: None,
                 }),
@@ -262,6 +270,7 @@ impl Search {
                     seen_devices: HashSet::new(),
                     adopted: HashSet::new(),
                     pending_install: Vec::new(),
+                    missed: Vec::new(),
                     running: false,
                     error: None,
                 }),
@@ -276,7 +285,9 @@ impl Search {
 
     /// Put one queue on the current list. The listing thread is not running.
     #[cfg(test)]
-    pub(crate) fn testing_insert(&self, printer: Printer) {
+    pub(crate) fn testing_insert(&self, mut printer: Printer) {
+        let home = files_of(&self.inner);
+        attach_files(home.as_ref(), &mut printer);
         self.inner
             .slot
             .lock()
@@ -322,6 +333,37 @@ impl Search {
             base: base.to_path_buf(),
             event_id: event_id.to_string(),
         });
+        let home = files_of(&self.inner);
+        let mut slot = self.inner.slot.lock().expect("printers");
+        for printer in &mut slot.current {
+            attach_files(home.as_ref(), printer);
+        }
+        for printer in &mut slot.devices {
+            attach_files(home.as_ref(), printer);
+        }
+        for printer in &mut slot.searching {
+            attach_files(home.as_ref(), printer);
+        }
+    }
+
+    /// Keep a stored name and routing on the live record with this address.
+    pub fn adopt_card(&self, card: &PrinterCard) {
+        let mut slot = self.inner.slot.lock().expect("printers");
+        for printer in &mut slot.current {
+            if printer_address(printer) == card.id {
+                apply_card(printer, card);
+            }
+        }
+        for printer in &mut slot.devices {
+            if printer_address(printer) == card.id {
+                apply_card(printer, card);
+            }
+        }
+        for printer in &mut slot.searching {
+            if printer_address(printer) == card.id {
+                apply_card(printer, card);
+            }
+        }
     }
 
     /// Write the routing file, including an empty second name, and keep it on the current record.
@@ -347,8 +389,68 @@ impl Search {
         {
             printer.routing = routing.clone();
         }
+        let address = slot
+            .current
+            .iter()
+            .find(|printer| printer.name == name)
+            .map(|printer| printer_address(printer));
         drop(slot);
-        write_routing(&home, name, &class, &routing).map_err(|err| Error::new(err.to_string()))
+        write_routing(&home, name, &class, &routing)?;
+        if let Some(address) = address {
+            if let Some(mut card) = read_card(&home.base, &address) {
+                card.zone = routing.zone.clone();
+                card.category = routing.category.clone();
+                card.print_cert = routing.print_cert;
+                write_card(&home.base, &card)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Write the allowed options into `printer_conf/{name}.yml` and keep them on the live record.
+    pub fn save_options(
+        &self,
+        address: &str,
+        incoming: &BTreeMap<String, String>,
+    ) -> Result<(), Error> {
+        let home = files_of(&self.inner).ok_or_else(|| Error::new("printer files are not set"))?;
+        let mut slot = self.inner.slot.lock().expect("printers");
+        let Some(current) = slot
+            .current
+            .iter()
+            .find(|printer| printer_address(printer) == address)
+        else {
+            return Err(Error::new("no queue"));
+        };
+        let name = current.name.clone();
+        let class = current.class.clone();
+        let mut options = current.values.options.clone();
+        for param in printer_params(current) {
+            let Some(value) = incoming.get(&param.name) else {
+                continue;
+            };
+            if param.values.iter().any(|item| item == value) {
+                options.insert(param.name.clone(), value.clone());
+            }
+        }
+        for printer in &mut slot.current {
+            if printer_address(printer) == address || printer.name == name {
+                printer.values.options.clone_from(&options);
+            }
+        }
+        for printer in &mut slot.devices {
+            if printer_address(printer) == address || printer.name == name {
+                printer.values.options.clone_from(&options);
+            }
+        }
+        for printer in &mut slot.searching {
+            if printer_address(printer) == address || printer.name == name {
+                printer.values.options.clone_from(&options);
+            }
+        }
+        drop(slot);
+        let path = home.base.join("printer_conf").join(format!("{name}.yml"));
+        write_options(&path, &class, &options)
     }
 
     /// One connected, installed, used queue from the current list, or an error that names no queue.
@@ -367,6 +469,12 @@ impl Search {
     /// A failed job is cancelled and sent again, up to ten times.
     pub fn submit(&self, printer: &Printer, page: &Page) -> Result<i32, Error> {
         let (format, document, options) = prepare_page(printer, page);
+        log::debug!(
+            "print submit format={format} bytes={} printer={} uri={}",
+            document.len(),
+            printer.name,
+            printer.device_uri
+        );
         if printer.state == "stopped" || !printer.accepting {
             resume_printer(&self.inner.service, printer)?;
         }
@@ -377,12 +485,22 @@ impl Search {
             match wait_job(&self.inner.service, printer, id)? {
                 Outcome::Completed => {
                     self.note_printed(&printer.name);
+                    log::debug!(
+                        "print sent job={id} format={format} printer={} uri={}",
+                        printer.name,
+                        printer.device_uri
+                    );
                     return Ok(id);
                 }
                 Outcome::Running => return Err(Error::new("job still processing")),
                 outcome => match settled_job(&self.inner.service, printer, id)? {
                     Some(id) => {
                         self.note_printed(&printer.name);
+                        log::debug!(
+                            "print sent job={id} format={format} printer={} uri={}",
+                            printer.name,
+                            printer.device_uri
+                        );
                         return Ok(id);
                     }
                     None => {
@@ -397,6 +515,11 @@ impl Search {
                 },
             }
         }
+        log::debug!(
+            "print submit failed printer={} uri={}: {last}",
+            printer.name,
+            printer.device_uri
+        );
         Err(last)
     }
 
@@ -460,12 +583,14 @@ fn begin(inner: &Arc<Inner>) {
         slot.fresh.clear();
         slot.seen_devices.clear();
         slot.pending_install.clear();
+        slot.missed.clear();
         slot.running = true;
         slot.error = None;
         slot.searching.clear();
         slot.generation
     };
     *inner.details.lock().expect("details") = None;
+    log::debug!("printer search");
     let inner = Arc::clone(inner);
     thread::spawn(move || pass(inner, generation));
 }
@@ -593,6 +718,9 @@ fn on_ipp(inner: &Inner, generation: u64, report: IppReport) -> Vec<Change> {
             if let Some(host) = host_of(&uri) {
                 slot.pending.remove(&host);
             }
+            if !slot.missed.iter().any(|item| item == &uri) {
+                slot.missed.push(uri);
+            }
             try_settle(&mut slot)
         }
         IppReport::Finished => {
@@ -711,6 +839,7 @@ fn try_settle(slot: &mut Slot) -> Vec<Change> {
     }
     if slot.error.is_some() {
         slot.running = false;
+        log_search(slot);
         return Vec::new();
     }
     let found: Vec<(String, Printer)> = slot
@@ -760,8 +889,117 @@ fn try_settle(slot: &mut Slot) -> Vec<Change> {
     }
     slot.fresh.clear();
     slot.running = false;
+    log_search(slot);
     debug_assert!(same_membership(slot));
     changes
+}
+
+fn log_search(slot: &Slot) {
+    let printers = listed(slot);
+    let available = printers
+        .iter()
+        .filter(|printer| printer_available(printer))
+        .count();
+    let mut unavailable = printers.len() - available;
+    let mut silent = Vec::new();
+    for uri in &slot.missed {
+        if printers.iter().any(|printer| printer.device_uri == *uri) {
+            continue;
+        }
+        silent.push(uri.clone());
+    }
+    for host in &slot.pending {
+        if printers.iter().any(|printer| &printer.host == host) {
+            continue;
+        }
+        if silent
+            .iter()
+            .any(|uri| host_of(uri).as_deref() == Some(host))
+        {
+            continue;
+        }
+        silent.push(host.clone());
+    }
+    unavailable += silent.len();
+    let available_text = count_text(available);
+    let unavailable_text = count_text(unavailable);
+    match &slot.error {
+        Some(message) => log::debug!(
+            "printer search stopped: {message}, available {available_text}, unavailable {unavailable_text}"
+        ),
+        None => log::debug!(
+            "printer search finished, available {available_text}, unavailable {unavailable_text}"
+        ),
+    }
+    for printer in printers.iter().filter(|printer| printer_available(printer)) {
+        log::debug!(
+            "printer available {} class={} state={} uri={}",
+            printer.name,
+            printer.class,
+            printer.state,
+            printer.device_uri
+        );
+    }
+    for printer in printers
+        .iter()
+        .filter(|printer| !printer_available(printer))
+    {
+        log::debug!(
+            "printer unavailable {} reason={} class={} state={} uri={}",
+            printer.name,
+            unavailable_reason(printer),
+            printer.class,
+            printer.state,
+            printer.device_uri
+        );
+    }
+    for uri in silent {
+        log::debug!("printer unavailable reason=no answer uri={uri}");
+    }
+}
+
+fn listed(slot: &Slot) -> Vec<&Printer> {
+    let mut printers: Vec<&Printer> = slot.current.iter().collect();
+    for printer in &slot.searching {
+        let key = device_key(&printer.host, &printer.device_uri);
+        if printers
+            .iter()
+            .any(|item| device_key(&item.host, &item.device_uri) == key)
+        {
+            continue;
+        }
+        printers.push(printer);
+    }
+    printers
+}
+
+pub(crate) fn printer_available(printer: &Printer) -> bool {
+    printer.connected && printer.accepting && printer.state != "stopped"
+}
+
+fn unavailable_reason(printer: &Printer) -> String {
+    let mut reasons = Vec::new();
+    if !printer.connected {
+        reasons.push("not connected");
+    }
+    if !printer.accepting {
+        reasons.push("not accepting");
+    }
+    if printer.state == "stopped" {
+        reasons.push("stopped");
+    }
+    if reasons.is_empty() {
+        return printer.state.clone();
+    }
+    reasons.join(", ")
+}
+
+fn count_text(count: usize) -> String {
+    if count == 0 {
+        "none".to_string()
+    } else {
+        count.to_string()
+    }
 }
 
 /// A device enters the current devices list, and its queue is added with it.
@@ -989,7 +1227,8 @@ fn on_device(inner: &Inner, generation: u64, report: DeviceReport) -> Vec<Change
             changes.extend(try_settle(&mut slot));
             changes
         }
-        DeviceReport::Failed(_) => {
+        DeviceReport::Failed(message) => {
+            log::debug!("printer search devices failed: {message}");
             slot.device_done = true;
             slot.pending_install.clear();
             try_settle(&mut slot)
@@ -1334,6 +1573,142 @@ fn files_of(inner: &Inner) -> Option<FileHome> {
     inner.files.lock().expect("files").clone()
 }
 
+/// Stored printer. The id is the address from search. The name starts as the
+/// searched name and stays until an admin changes the file.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PrinterCard {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub hidden: bool,
+    #[serde(default, rename = "default")]
+    pub is_default: bool,
+    #[serde(default)]
+    pub zone: String,
+    #[serde(default)]
+    pub category: String,
+    #[serde(default)]
+    pub print_cert: bool,
+}
+
+pub(crate) fn printer_address(printer: &Printer) -> String {
+    if !printer.device_uri.is_empty() {
+        printer.device_uri.clone()
+    } else if !printer.host.is_empty() {
+        printer.host.clone()
+    } else {
+        printer.name.clone()
+    }
+}
+
+fn card_key(id: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(id.len() * 2);
+    for byte in id.bytes() {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
+}
+
+fn card_path(base: &Path, id: &str) -> PathBuf {
+    base.join("printer_conf").join(format!("{}.json", card_key(id)))
+}
+
+pub(crate) fn read_card(base: &Path, id: &str) -> Option<PrinterCard> {
+    let bytes = std::fs::read(card_path(base, id)).ok()?;
+    let card: PrinterCard = serde_json::from_slice(&bytes).ok()?;
+    if card.id.is_empty() {
+        return None;
+    }
+    Some(card)
+}
+
+pub(crate) fn list_cards(base: &Path) -> Vec<PrinterCard> {
+    let mut cards = Vec::new();
+    let Ok(entries) = std::fs::read_dir(base.join("printer_conf")) else {
+        return cards;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        let Ok(card) = serde_json::from_slice::<PrinterCard>(&bytes) else {
+            continue;
+        };
+        if card.id.is_empty() {
+            continue;
+        }
+        cards.push(card);
+    }
+    cards.sort_by(|left, right| left.id.cmp(&right.id));
+    cards
+}
+
+fn write_card(base: &Path, card: &PrinterCard) -> Result<(), Error> {
+    let path = card_path(base, &card.id);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|err| Error::new(err.to_string()))?;
+    }
+    let bytes = serde_json::to_vec_pretty(card).map_err(|err| Error::new(err.to_string()))?;
+    std::fs::write(path, bytes).map_err(|err| Error::new(err.to_string()))
+}
+
+/// Create the address file when this printer has none. An existing file keeps its name.
+pub(crate) fn ensure_card(base: &Path, printer: &Printer) -> Result<PrinterCard, Error> {
+    let id = printer_address(printer);
+    if id.is_empty() {
+        return Err(Error::new("printer address is empty"));
+    }
+    if let Some(card) = read_card(base, &id) {
+        return Ok(card);
+    }
+    let name = if printer.name.is_empty() {
+        id.clone()
+    } else {
+        printer.name.clone()
+    };
+    let card = PrinterCard {
+        id,
+        name,
+        hidden: false,
+        is_default: false,
+        zone: printer.routing.zone.clone(),
+        category: printer.routing.category.clone(),
+        print_cert: printer.routing.print_cert,
+    };
+    write_card(base, &card)?;
+    Ok(card)
+}
+
+pub(crate) fn save_card(base: &Path, card: &PrinterCard) -> Result<(), Error> {
+    if card.id.is_empty() {
+        return Err(Error::new("printer address is empty"));
+    }
+    if card.is_default {
+        for mut other in list_cards(base) {
+            if other.id != card.id && other.is_default {
+                other.is_default = false;
+                write_card(base, &other)?;
+            }
+        }
+    }
+    write_card(base, card)
+}
+
+fn apply_card(printer: &mut Printer, card: &PrinterCard) {
+    if !card.name.is_empty() {
+        printer.name = card.name.clone();
+    }
+    printer.routing.zone = card.zone.clone();
+    printer.routing.category = card.category.clone();
+    printer.routing.print_cert = card.print_cert;
+}
+
 fn attach_files(home: Option<&FileHome>, printer: &mut Printer) {
     let Some(home) = home else {
         return;
@@ -1343,6 +1718,9 @@ fn attach_files(home: Option<&FileHome>, printer: &mut Printer) {
     }
     if let Ok(routing) = routing_for(home, printer) {
         printer.routing = routing;
+    }
+    if let Ok(card) = ensure_card(&home.base, printer) {
+        apply_card(printer, &card);
     }
 }
 
@@ -1395,6 +1773,169 @@ fn zpl_defaults() -> BTreeMap<String, String> {
     options.insert("zpl_label_top".to_string(), "0".to_string());
     options.insert("zpl_tear_off".to_string(), "0".to_string());
     options
+}
+
+/// One option the printer dialog can change. `values` is the allowed set.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PrinterParam {
+    pub name: String,
+    pub value: String,
+    pub values: Vec<String>,
+}
+
+/// ZPL queues use the argument lists from the Scala printer classes.
+/// Every other queue uses its PPD choices, except `PageSize`.
+pub(crate) fn printer_params(printer: &Printer) -> Vec<PrinterParam> {
+    if printer.kind == Kind::Zpl {
+        return zpl_arg_params(printer);
+    }
+    let mut params = Vec::new();
+    for choice in &printer.choices {
+        if choice.name == "PageSize" || choice.values.is_empty() {
+            continue;
+        }
+        params.push(param_of(
+            &printer.values.options,
+            &choice.name,
+            &choice.values[0],
+            choice.values.clone(),
+        ));
+    }
+    if printer.make_model.to_ascii_lowercase().contains("evolis")
+        && params.iter().all(|param| param.name != "InkType")
+    {
+        params.push(param_of(
+            &printer.values.options,
+            "InkType",
+            "Black",
+            vec!["Black".to_string()],
+        ));
+    }
+    params
+}
+
+fn zpl_arg_params(printer: &Printer) -> Vec<PrinterParam> {
+    let lower = printer.make_model.to_ascii_lowercase();
+    let tsc = lower.contains("tsc") && !lower.contains("zebra");
+    let mut specs = if tsc { tsc_specs() } else { zebra_specs() };
+    specs.extend(zpl_motion_specs());
+    specs
+        .into_iter()
+        .map(|(name, default, values)| param_of(&printer.values.options, name, default, values))
+        .collect()
+}
+
+fn zebra_specs() -> Vec<(&'static str, &'static str, Vec<String>)> {
+    vec![
+        (
+            "zeMediaTracking",
+            "Web",
+            strings(&["Continuous", "Web", "Mark"]),
+        ),
+        ("MediaType", "Direct", strings(&["Thermal", "Direct"])),
+        (
+            "zePrintMode",
+            "Cutter",
+            strings(&["Tear", "Peel", "Rewind", "Applicator", "Cutter"]),
+        ),
+    ]
+}
+
+fn tsc_specs() -> Vec<(&'static str, &'static str, Vec<String>)> {
+    vec![
+        (
+            "PaperType",
+            "LabelGaps",
+            strings(&["LabelGaps", "LabelMark", "Continue"]),
+        ),
+        (
+            "MediaMethod",
+            "Normal",
+            strings(&["Normal", "Direct", "Transfer"]),
+        ),
+        (
+            "PostAction",
+            "Cut",
+            strings(&["None", "TearOff", "PeelOff", "Cut", "PartialCut"]),
+        ),
+    ]
+}
+
+fn zpl_motion_specs() -> Vec<(&'static str, &'static str, Vec<String>)> {
+    let mut shift = vec!["-1000".to_string()];
+    shift.extend(span(-200, 200, 20, 0));
+    shift.push("1000".to_string());
+    vec![
+        ("zpl_label_shift", "0", shift),
+        ("zpl_label_top", "0", span(-120, 120, 5, 0)),
+        ("zpl_tear_off", "0", span(-120, 120, 5, 3)),
+        ("Darkness", "0", span(-30, 30, 5, 0)),
+        ("Speed", "10", span(1, 14, 1, 0)),
+    ]
+}
+
+fn strings(values: &[&str]) -> Vec<String> {
+    values.iter().map(|value| (*value).to_string()).collect()
+}
+
+fn span(from: i64, to: i64, step: i64, pad: usize) -> Vec<String> {
+    let mut values = Vec::new();
+    let mut current = from;
+    while current <= to {
+        values.push(padded(current, pad));
+        current += step;
+    }
+    values
+}
+
+fn padded(value: i64, pad: usize) -> String {
+    if pad <= 1 {
+        return value.to_string();
+    }
+    let body = format!("{:0width$}", value.unsigned_abs(), width = pad);
+    if value < 0 {
+        format!("-{body}")
+    } else {
+        body
+    }
+}
+
+fn param_of(
+    options: &BTreeMap<String, String>,
+    name: &str,
+    default: &str,
+    values: Vec<String>,
+) -> PrinterParam {
+    PrinterParam {
+        value: chosen(options, name, default, &values),
+        name: name.to_string(),
+        values,
+    }
+}
+
+fn chosen(options: &BTreeMap<String, String>, name: &str, default: &str, values: &[String]) -> String {
+    let raw = options
+        .get(name)
+        .map(String::as_str)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(default);
+    if let Some(found) = values.iter().find(|item| item.as_str() == raw) {
+        return found.clone();
+    }
+    if let Ok(number) = raw.parse::<i64>() {
+        if let Some(found) = values
+            .iter()
+            .find(|item| item.parse::<i64>().ok() == Some(number))
+        {
+            return found.clone();
+        }
+    }
+    values
+        .iter()
+        .find(|item| item.as_str() == default)
+        .cloned()
+        .or_else(|| values.first().cloned())
+        .unwrap_or_default()
 }
 
 fn read_options(path: &Path) -> Option<BTreeMap<String, String>> {
@@ -1540,7 +2081,9 @@ fn eligible(current: &[Printer], job: &Job) -> Vec<Printer> {
 
 fn select(service: &str, mut pool: Vec<Printer>, job: &Job) -> Option<Printer> {
     if let Some(name) = &job.name {
-        return pool.into_iter().find(|printer| printer.name == *name);
+        return pool.into_iter().find(|printer| {
+            printer.name == *name || printer.device_uri == *name
+        });
     }
     if pool.is_empty() {
         return None;
@@ -1928,6 +2471,146 @@ fn queued_jobs(service: &str, name: &str) -> Option<i32> {
 
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod tests {
+    mod cards {
+        use std::path::PathBuf;
+
+        use super::super::{
+            ensure_card, printer_address, printer_params, Job, Printer, Routing, Search, Values,
+        };
+        use crate::registration_server::native_print::{Choice, Kind};
+
+        fn dir() -> PathBuf {
+            let path = std::env::temp_dir().join(format!(
+                "rust-reg-card-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&path).unwrap();
+            path
+        }
+
+        fn printer(name: &str, uri: &str) -> Printer {
+            Printer {
+                name: name.to_string(),
+                device_uri: uri.to_string(),
+                make_model: "HP LaserJet".to_string(),
+                state: "idle".to_string(),
+                accepting: true,
+                host: "192.0.2.10".to_string(),
+                kind: Kind::Raster,
+                dpi: 300,
+                width_in: Some(4.0),
+                choices: Vec::new(),
+                installed: true,
+                connected: true,
+                class: "ipp".to_string(),
+                values: Values::default(),
+                routing: Routing::default(),
+                last_print: 0,
+                formats: ipp_tool::Formats::default(),
+                settings: ipp_tool::Settings::default(),
+                toner: ipp_tool::Toner::default(),
+            }
+        }
+
+        #[test]
+        fn zpl_options_are_the_argument_lists() {
+            let mut zebra = printer("zebra", "usb://Zebra/ZTC");
+            zebra.kind = Kind::Zpl;
+            zebra.make_model = "Zebra Technologies ZTC GK420t".to_string();
+            zebra.values.options.insert("zeMediaTracking".to_string(), "Mark".to_string());
+            zebra.values.options.insert("zpl_tear_off".to_string(), "0".to_string());
+            let params = printer_params(&zebra);
+            let tracking = params.iter().find(|param| param.name == "zeMediaTracking").unwrap();
+            assert_eq!(tracking.value, "Mark");
+            assert_eq!(tracking.values, ["Continuous", "Web", "Mark"]);
+            let tear = params.iter().find(|param| param.name == "zpl_tear_off").unwrap();
+            assert_eq!(tear.value, "000");
+            assert!(tear.values.iter().any(|value| value == "-095"));
+            assert!(params.iter().any(|param| param.name == "Speed"));
+            assert!(!params.iter().any(|param| param.name == "PaperType"));
+
+            let mut tsc = zebra.clone();
+            tsc.make_model = "TSC TTP-244".to_string();
+            let params = printer_params(&tsc);
+            assert!(params.iter().any(|param| param.name == "PaperType"));
+            assert!(params.iter().any(|param| param.name == "zpl_label_shift"));
+            assert!(!params.iter().any(|param| param.name == "zeMediaTracking"));
+        }
+
+        #[test]
+        fn raster_options_follow_the_ppd_choices() {
+            let mut laser = printer("laser", "ipp://192.0.2.10/ipp/print");
+            laser.choices = vec![
+                Choice { name: "PageSize".to_string(), values: vec!["A4".to_string()] },
+                Choice { name: "Resolution".to_string(), values: vec!["300dpi".to_string(), "600dpi".to_string()] },
+            ];
+            laser.values.options.insert("Resolution".to_string(), "600dpi".to_string());
+            let params = printer_params(&laser);
+            assert_eq!(params.len(), 1);
+            assert_eq!(params[0].name, "Resolution");
+            assert_eq!(params[0].value, "600dpi");
+        }
+
+        #[test]
+        fn saved_options_land_in_the_settings_file() {
+            let path = dir();
+            let search = Search::parked("http://127.0.0.1:9");
+            search.set_files(&path, "event-1");
+            let mut zebra = printer("zebra", "usb://Zebra/ZTC");
+            zebra.kind = Kind::Zpl;
+            zebra.class = "native".to_string();
+            zebra.make_model = "Zebra Technologies ZTC GK420t".to_string();
+            search.testing_insert(zebra);
+            let mut incoming = std::collections::BTreeMap::new();
+            incoming.insert("zePrintMode".to_string(), "Peel".to_string());
+            incoming.insert("Speed".to_string(), "99".to_string());
+            search.save_options("usb://Zebra/ZTC", &incoming).unwrap();
+            let text = std::fs::read_to_string(path.join("printer_conf").join("zebra.yml")).unwrap();
+            let value: serde_yaml::Value = serde_yaml::from_str(&text).unwrap();
+            assert_eq!(value["zePrintMode"].as_str(), Some("Peel"));
+            assert_eq!(value["Speed"].as_i64(), Some(10));
+            let stored = search.printers().into_iter().find(|item| item.name == "zebra").unwrap();
+            assert_eq!(stored.values.options["zePrintMode"], "Peel");
+            let _ = std::fs::remove_dir_all(&path);
+        }
+
+        #[test]
+        fn search_fills_the_address_and_keeps_a_stored_name() {
+            let path = dir();
+            let uri = "ipp://192.0.2.10:631/ipp/print";
+            let found = printer("ECOSYS", uri);
+            let card = ensure_card(&path, &found).unwrap();
+            assert_eq!(card.id, uri);
+            assert_eq!(card.name, "ECOSYS");
+            assert_eq!(printer_address(&found), uri);
+
+            let mut again = found.clone();
+            again.name = "From the next search".to_string();
+            let kept = ensure_card(&path, &again).unwrap();
+            assert_eq!(kept.name, "ECOSYS");
+            let _ = std::fs::remove_dir_all(&path);
+        }
+
+        #[test]
+        fn an_explicit_address_picks_that_printer() {
+            let uri = "ipp://192.0.2.10:631/ipp/print";
+            let search = Search::parked("http://127.0.0.1:9");
+            search.testing_insert(printer("ECOSYS", uri));
+            search.testing_insert(printer("Other", "ipp://192.0.2.11:631/ipp/print"));
+            let chosen = search
+                .pick(&Job {
+                    name: Some(uri.to_string()),
+                    ..Job::default()
+                })
+                .unwrap();
+            assert_eq!(chosen.device_uri, uri);
+        }
+    }
+
     mod queues {
         use std::io::{Read, Write};
         use std::net::TcpListener;

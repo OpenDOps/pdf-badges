@@ -1,0 +1,32 @@
+[package]
+name = "google-tables"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "google-tables"
+path = "src/main.rs"
+
+[dependencies]
+blake2 = "0.10"
+futures = "0.3"
+heed = "0.20"
+prost = "0.14.4"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "sync", "time"] }
+tokio-stream = "0.1"
+tonic = "0.14.6"
+tonic-prost = "0.14.6"
+log = "0.4"
+libc = "0.2"
+
+[build-dependencies]
+tonic-build = "0.14.6"
+tonic-prost-build = "0.14.6"
+
+[dev-dependencies]
+futures = "0.3"
+prost = "0.14.4"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "sync", "time"] }
+tonic = "0.14.6"

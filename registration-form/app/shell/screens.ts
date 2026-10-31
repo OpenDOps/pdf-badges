@@ -15,8 +15,7 @@ type ScreenFile =
   | "routes/print.tsx"
   | "routes/import.tsx"
   | "routes/settings.tsx"
-  | "routes/printers.tsx"
-  | "routes/registration-settings.tsx";
+  | "routes/printers.tsx";
 
 const screens: Record<string, { file: ScreenFile; load: () => Promise<ScreenModule> }> = {
   "/key": { file: "routes/key.tsx", load: () => import("../routes/key") },
@@ -28,10 +27,6 @@ const screens: Record<string, { file: ScreenFile; load: () => Promise<ScreenModu
   "/import": { file: "routes/import.tsx", load: () => import("../routes/import") },
   "/settings": { file: "routes/settings.tsx", load: () => import("../routes/settings") },
   "/printers": { file: "routes/printers.tsx", load: () => import("../routes/printers") },
-  "/settings/registration": {
-    file: "routes/registration-settings.tsx",
-    load: () => import("../routes/registration-settings"),
-  },
 };
 
 const loads: ScreenFile[] = [];

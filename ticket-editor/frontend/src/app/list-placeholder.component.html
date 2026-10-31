@@ -1,0 +1,15 @@
+<h1>Макеты</h1>
+@if (error()) {
+  <p>Не удалось загрузить макеты.</p>
+} @else {
+  <ul>
+    @for (template of templates(); track template.id) {
+      <li>
+        <a [routerLink]="['/editor', template.id]">{{ template.name }}</a>
+        <span>{{ template.page_width_mm }}×{{ template.page_height_mm }} мм</span>
+        <span>{{ template.updated_at || '—' }}</span>
+        <a [routerLink]="['/editor', template.id]">Редактировать</a>
+      </li>
+    }
+  </ul>
+}

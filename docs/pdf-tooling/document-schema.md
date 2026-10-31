@@ -177,6 +177,16 @@ padding:
   right: 0
   bottom: 0
   left: 0
+background: "#FF6A00"       # optional fill of this frame; absent means no fill
+border:                     # optional; both keys required when present
+  width: 0.4                # page units, > 0. Stroke is centered on the frame
+  color: "#112233"
+border_radius: 2            # optional, >= 0. Absent or 0 is a sharp rectangle
+opacity: 1                  # optional, 0 to 1. Absent means 1
+scale_x: 1                  # optional. Absent means 1. Not 0. Anchor is the top-left
+scale_y: 1
+skew_x: 0                   # optional degrees. Absent means 0. 90 has no finite tangent
+skew_y: 0
 auto_scale: true            # card: shrink font sizes so the long text fits this rectangle
 template: true              # scan this box for fields; absent means false
 delimiters:                 # only with template: true; absent means {{ and }}
@@ -187,6 +197,7 @@ text:
   font_size: 5              # in page_size.units
   leading: 0.5              # extra gap after each line, same unit
   line_height: 6            # line box height, same unit
+  letter_spacing: 0         # optional extra advance after each glyph, same unit. Absent means 0
   font_style:
     weight: normal          # normal | bold
     italic: false
@@ -195,7 +206,7 @@ text:
   content: null             # replacement; null or absent means render preentered
 ```
 
-Lengths on the page (`posX`, `posY`, `width`, `height`, `padding`, `font_size`, `leading`, `line_height`) use `page_size.units`: `points` or `mm`. The writer converts `mm` to points with `pt = mm * 72 / 25.4` before building the PDF.
+Lengths on the page (`posX`, `posY`, `width`, `height`, `padding`, `font_size`, `leading`, `line_height`, `border.width`, `border_radius`, `text.letter_spacing`) use `page_size.units`: `points` or `mm`. The writer converts `mm` to points with `pt = mm * 72 / 25.4` before building the PDF. `scale_x` and `scale_y` are factors. `skew_x` and `skew_y` are degrees. `opacity` is a fraction from 0 to 1.
 
 `alignment`, `padding`, `auto_scale`, `template`, and `delimiters` sit on the box, next to the rectangle. They are not inside `text`. The current single value `text.alignment` (`Left`, `Center`, `Right`, `Justified`) is replaced by the two-axis object.
 
@@ -210,6 +221,13 @@ Lengths on the page (`posX`, `posY`, `width`, `height`, `padding`, `font_size`, 
 | `font_size` | Default size, in page units. |
 | `line_height` | Height of one line box, in page units. |
 | `leading` | Extra space after each line, in page units. The distance from one baseline to the next is `line_height + leading`. |
+| `letter_spacing` | Optional, inside `text`. Extra advance after each glyph, in page units. Absent means `0`. Negative is allowed. A span does not override it. Image, barcode, and photo entries reject the key, including on the entry itself. |
+| `background` | Optional `#RRGGBB` fill of this frame, on every content entry. Absent means no fill. The same parser as `text.color`. Painted before the entry's own marks. `page_size.background` still fills the sheet underneath. |
+| `border` | Optional stroke of this frame. `width` is a finite length greater than 0. `color` is `#RRGGBB`. Both are required when `border` is present. The stroke is centered on the path and painted after the fill, before the entry's marks. |
+| `border_radius` | Optional corner radius, `>= 0`. Absent or `0` is a sharp rectangle. A radius larger than half the shorter side fails to load. Fill, stroke, and the entry's marks use that rounded path. |
+| `opacity` | Optional, from 0 to 1 inclusive. Absent means 1. One alpha for the fill, the stroke, and the entry. `1` adds no graphics state. |
+| `scale_x`, `scale_y` | Optional factors. Absent means `1`. Finite, and not `0`. `width` and `height` stay the size before the transform. The anchor is the top-left. |
+| `skew_x`, `skew_y` | Optional shear in degrees. Absent means `0`. The off-diagonal of the matrix is the tangent of that angle. An angle with no finite tangent, including 90, fails to load. Text `rotation` of `0` or `90` is applied inside this matrix. |
 | `font_style` | Default weight, italic, and underline for text that is not inside a styled tag. |
 | `preentered` | Text extracted from the PDF, or the authored string. Kept so a fill can be reverted. |
 | `content` | Text written by the automatic tool or a later editor. Render `content` when it is a string, including an empty string. Render `preentered` when `content` is null or absent. |
@@ -346,7 +364,7 @@ image:
   resource_name: X4
 ```
 
-The rectangle is the source of truth after any edit. `transformation_matrix` is optional and diagnostic. The writer ignores it.
+The rectangle is the source of truth after any edit. `transformation_matrix` is optional and diagnostic. The writer ignores it. The placement may set `background`, `border`, `border_radius`, `opacity`, `scale_x`, `scale_y`, `skew_x`, and `skew_y` with the same rules as a text box.
 
 Moving a placement changes `posX` and `posY`. Scaling changes `width` and `height`, and the opposite edges when the dragged handle is not the bottom-right.
 
@@ -374,7 +392,7 @@ barcode:
 | `template`, `delimiters`, `preentered`, `content` | Same as a text box. The string that is drawn is `content` when it is a string, otherwise `preentered`. A template string is filled from the row before the symbol is drawn. |
 | Rectangle | The symbol is scaled into `posX`, `posY`, `width`, `height`. EAN-13 keeps its quiet zones inside that rectangle. |
 
-`ean13` and `code128` draw those symbols from the filled string. `qr` draws a QR code of that string. The entry has no font. The v0 writer draws the symbol into the rectangle.
+`ean13` and `code128` draw those symbols from the filled string. `qr` draws a QR code of that string. The entry has no font. The v0 writer draws the symbol into the rectangle. The entry may set the same frame fields as a text box (`background`, `border`, `border_radius`, `opacity`, `scale_x`, `scale_y`, `skew_x`, `skew_y`).
 
 ### Photo
 
@@ -393,7 +411,7 @@ photo:
 
 `field` is a key in the row. In a string row the value is a path relative to the page file. The registration print may pass the bytes for that key directly. The file, or those bytes, is jpeg, bmp, or png. A missing key, an empty value, or a missing file leaves the rectangle undrawn. A file that is present and not one of those formats is an error that names the entry `id`. The rectangle is scaled to `width` and `height` the same way an image placement is.
 
-The v0 writer draws the photo into the rectangle. A missing photo leaves that rectangle empty.
+The v0 writer draws the photo into the rectangle. A missing photo leaves that rectangle empty. The entry may set the same frame fields as a text box (`background`, `border`, `border_radius`, `opacity`, `scale_x`, `scale_y`, `skew_x`, `skew_y`).
 
 ### Resources (target)
 

@@ -90,6 +90,7 @@ pub fn draw_text(
             to_points(content_width, units),
             units,
             &text.id,
+            to_points(text.text.letter_spacing, units),
         )?
     };
     if lines.is_empty() {
@@ -141,6 +142,7 @@ pub fn authored_text_bounds(
         to_points(content_width, units),
         units,
         &text.id,
+        to_points(text.text.letter_spacing, units),
     )?;
     Ok(bounds_of_lines(&fonts, &lines, units))
 }
@@ -168,6 +170,7 @@ fn fit_font_sizes(
         content_width_pt,
         units,
         &text.id,
+        to_points(text.text.letter_spacing, units),
     )?;
     if lines.is_empty() {
         return Ok(lines);
@@ -188,6 +191,7 @@ fn fit_font_sizes(
             content_width_pt,
             units,
             &text.id,
+            to_points(text.text.letter_spacing, units),
         )?;
     }
     Ok(lines)
@@ -368,6 +372,7 @@ fn layout(
     content_width_pt: f32,
     units: Units,
     id: &str,
+    spacing_pt: f32,
 ) -> Result<Vec<LaidLine>, RenderError> {
     let mut lines = Vec::new();
     let mut words = Vec::new();
@@ -375,7 +380,7 @@ fn layout(
         match item {
             MarkupItem::Run(run) => {
                 for piece in run.text.split(' ').filter(|word| !word.is_empty()) {
-                    let word = word_from(run, piece, advances, units, id)?;
+                    let word = word_from(run, piece, advances, units, id, spacing_pt)?;
                     if words.is_empty()
                         || words_width(&words)
                             + words.last().expect("word").space_pt
@@ -410,10 +415,14 @@ fn word_from(
     advances: &BTreeMap<String, Advances>,
     units: Units,
     id: &str,
+    spacing_pt: f32,
 ) -> Result<Word, RenderError> {
+    let chars = text.chars().count() as f32;
     Ok(Word {
-        width_pt: measure_advances(advances, &run.font_key, text, run.font_size, units, id)?,
-        space_pt: measure_advances(advances, &run.font_key, " ", run.font_size, units, id)?,
+        width_pt: measure_advances(advances, &run.font_key, text, run.font_size, units, id)?
+            + spacing_pt * chars,
+        space_pt: measure_advances(advances, &run.font_key, " ", run.font_size, units, id)?
+            + spacing_pt,
         text: text.to_string(),
         font_key: run.font_key.clone(),
         font_size: run.font_size,
@@ -570,6 +579,12 @@ fn paint_lines(
         Operation::new("W", vec![]),
         Operation::new("n", vec![]),
     ];
+    if text.text.letter_spacing != 0.0 {
+        operations.push(Operation::new(
+            "Tc",
+            vec![Object::Real(to_points(text.text.letter_spacing, units))],
+        ));
+    }
 
     let mut baseline = block_top + first_ascent;
     for (index, line) in lines.iter().enumerate() {

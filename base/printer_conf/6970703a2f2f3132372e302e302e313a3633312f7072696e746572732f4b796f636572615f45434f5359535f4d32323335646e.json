@@ -1,0 +1,9 @@
+{
+  "id": "ipp://127.0.0.1:631/printers/Kyocera_ECOSYS_M2235dn",
+  "name": "Принтер 1",
+  "hidden": false,
+  "default": false,
+  "zone": "",
+  "category": "",
+  "print_cert": false
+}

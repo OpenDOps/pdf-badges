@@ -37,3 +37,12 @@ __pycache__/
 .DS_Store
 .idea/
 *.swp
+
+# Separate checkout of the offline registration node
+/PIR_REG/expocab-offline-registration/
+
+# google-tables runtime data and service-account keys
+/data/google-tables/*
+!/data/google-tables/.gitkeep
+/modules/google-tables/credentials/*
+!/modules/google-tables/credentials/.gitkeep

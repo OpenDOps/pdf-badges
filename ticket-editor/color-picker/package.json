@@ -1,0 +1,49 @@
+{
+  "name": "ticket-editor-color-picker",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "main": "./dist/preact.js",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./dist/preact.js"
+    },
+    "./preact": {
+      "types": "./index.d.ts",
+      "default": "./dist/preact.external.js"
+    },
+    "./react": {
+      "types": "./index.d.ts",
+      "default": "./dist/react.js"
+    }
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs react && node scripts/build.mjs preact && node scripts/build.mjs preact --external",
+    "build:react": "node scripts/build.mjs react",
+    "build:preact": "node scripts/build.mjs preact",
+    "build:preact:external": "node scripts/build.mjs preact --external",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && npm run check && node --test src/bundles.test.mjs"
+  },
+  "peerDependencies": {
+    "preact": "^10.0.0",
+    "react": "^18.0.0 || ^19.0.0",
+    "react-dom": "^18.0.0 || ^19.0.0"
+  },
+  "peerDependenciesMeta": {
+    "preact": { "optional": true },
+    "react": { "optional": true },
+    "react-dom": { "optional": true }
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.2",
+    "@types/react-dom": "^19.2.2",
+    "esbuild": "^0.25.11",
+    "preact": "^10.27.2",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "typescript": "~5.9.2"
+  }
+}

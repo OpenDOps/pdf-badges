@@ -57,13 +57,13 @@ Sheets developer metadata attaches to a spreadsheet, a sheet, one entire row, or
 | Key | Where | Value |
 |---|---|---|
 | `irbis.uid` | the hidden UID column | empty. The cells hold the 16-character ids |
-| `irbis.fingerprint` | the hidden fingerprint column | empty. The first cell holds the formula |
+| `irbis.fingerprint` | the hidden fingerprint column | the stamp of the formula last written. The first cell holds the formula |
 | `irbis.column` | each mapped column | the name from `SelectHeader` or `SelectColumns` |
 | `irbis.exclude_hash` | a mapped column the fingerprint skips | `1` |
 
 Inserting or moving a column moves its metadata with it. The service finds columns by these keys. Letters are what a `Row` shows for the current position. The stored cell and the content hash use the metadata name.
 
-The fingerprint formula is an `ARRAYFORMULA` that joins, per row, the mapped columns which are not excluded. A blank join means the row has no mapped values. Sheets recalculates a row when one of those cells changes, so the next read of this column names the changed rows. The formula is rewritten, as one cell, when a mapped column changes index or when `SetColumnOptions` changes `exclude_from_hash`.
+The fingerprint formula is an `ARRAYFORMULA` that joins, per row, the mapped columns which are not excluded. A blank join means the row has no mapped values. Sheets recalculates a row when one of those cells changes, so the next read of this column names the changed rows. The formula is rewritten, as one cell, when the stamp on `irbis.fingerprint` is not the stamp of the formula for the current columns, or when the formula cell is empty. A mapped column that changes index, or `SetColumnOptions` changing `exclude_from_hash`, changes that formula. The cycle does not compare the formula text Sheets returns: spacing, case, and locale separators differ from the text that was written.
 
 A column left in the fingerprint that contains `NOW()`, `TODAY()`, or `RAND()` changes on every recalculation, and every row it touches is reported updated on every cycle.
 
@@ -71,7 +71,7 @@ A column left in the fingerprint that contains `NOW()`, `TODAY()`, or `RAND()` c
 
 - A missing UID column is appended, hidden, marked, and covered by a warning-only protected range. An editor who changes a UID is prompted and can still edit. The service account keeps edit access.
 - A missing fingerprint column is appended, hidden, marked, and given its formula.
-- A column already marked is left where it is. An empty formula cell is rewritten from the current column positions.
+- A column already marked is left where it is. An empty formula cell, or a stamp that is not the formula for the current columns, is rewritten. The write stores that stamp on `irbis.fingerprint`.
 
 A deleted service column is recreated the same way on the next cycle, including the warning-only range. A mapped column whose metadata disappears pauses the watch with status `column_missing`. The cycle does not assign that name to another letter.
 
@@ -95,25 +95,24 @@ The seen baseline is the `version` stored in LMDB at the last commit. A write of
 2. Search the four metadata keys and read the UID column and the fingerprint column in one `values.batchGet`, from the first data row through the last non-empty cell of either column.
 3. Read `version` again. A value other than V drops the read. Wait another 10 quiet seconds.
 4. Decide UID cells from that snapshot. The header row is never a UID.
-   - An empty UID on a row with a fingerprint is filled with a stored UID of the same content hash when that UID is missing from the column. Otherwise it gets a new id.
-   - A value that is not 16 characters from `0123456789ABCDEFGHIKLMNOPQRSTVXYZ` is replaced.
+   - When a stored UID is missing from the column, an empty UID, an invalid UID, or a valid UID that is not stored and not duplicated is filled with that stored UID when the other cells hash to it. An empty or invalid value that matches nothing gets a new id. A valid foreign id that matches nothing stays.
    - A UID that appears on more than one row stays on the row whose mapped cells hash to the stored content hash. The other copies get new ids. When none match, every copy gets a new id and the stored UID is deleted, under the mass-delete guard. When two match, the earlier sheet row keeps it.
    - Those decisions fetch mapped cells for the duplicate and restored rows only.
-5. A snapshot that needs a UID write or a formula rewrite sends that batch (`RAW` for UIDs) and stops. Nothing is committed. Wait another 10 quiet seconds and begin at step 1.
-6. A snapshot that needs no write compares fingerprints with the index. One `values.batchGet` fetches mapped cells for added UIDs and for UIDs whose fingerprint differs, with `UNFORMATTED_VALUE`, date `SERIAL_NUMBER`, and `numberFormat.type` on those cells.
+5. A snapshot that needs a UID write or a formula rewrite sends that batch and stops. UID values are one range per contiguous run, at most 100 ranges per request (`RAW`). Nothing is committed. Wait another 10 quiet seconds and begin at step 1.
+6. A snapshot that needs no write compares fingerprints with the index. Consecutive changed rows are one range. When more than half of the service rows changed, that fetch is one block from the first changed row through the last. A request holds at most 100 ranges. The read uses `UNFORMATTED_VALUE`, date `SERIAL_NUMBER`, and `numberFormat.type` on those cells.
 7. Read `version` again. A value other than V drops the fetch and commits nothing. When it is still V, commit and store V as the baseline.
 
 A UID is taken from a two-column read whose `version` matched on both sides. That write becomes part of the snapshot only on a later read that also matches.
 
 Deletions are UIDs in the index and absent from this UID column. The column is read whole so a missing id is visible. Unchanged rows are not downloaded. A sort that only moves rows updates the stored sheet row and emits no row event.
 
-The first cycle of a new watch finds every UID absent from the index, fetches those rows, stores them, and appends one `SNAPSHOT` event. It does not append one `ADDED` per row.
+The first cycle of a new watch finds every UID absent from the index, fetches those rows, stores them, and appends one `SNAPSHOT` event. It does not append one `ADDED` per row. That same commit stores a snapshot of those rows with reason `initial` and the time it was written. A later cycle, after the log has left sequence 0, appends one `ADDED` per new row. A refill after a clear is that later cycle.
 
 ### Mass delete
 
-The commit counts UIDs that would be deleted. Above 30 percent of the stored UIDs, and at least 10 stored, the commit is skipped. Status becomes `needs_confirm` and `pending_deletes` is that count. Subscribers hear nothing about those rows.
+The commit counts UIDs that would be deleted. Above 30 percent of the stored UIDs, and at least 10 stored, the commit stores a snapshot of the sheet as it is before those deletes, with reason `massive_delete` and the time it was written. It then applies the deletes and appends one `DELETED` per removed UID. `ListSnapshots` returns the stored snapshots oldest first. A watch keeps at most 10. Writing another drops the oldest until 10 remain. `GetSnapshot` returns one of them. A dropped id is `NOT_FOUND`. No caller sends an approval.
 
-`SyncNow` with `confirm` runs one cycle and applies the deletes. Without `confirm` it is an ordinary rescan and holds again while the guard still trips. A later cycle under the threshold commits on its own.
+A delete under that threshold appends `DELETED` and stores no snapshot. There is no third snapshot reason. A refill of a cleared sheet is `ADDED`, not a snapshot.
 
 ### Events
 
@@ -124,7 +123,7 @@ The fingerprint chooses which rows to fetch. The content hash chooses the event.
 | UID absent from the index | `ADDED` |
 | UID present, content hash differs | `UPDATED`, with the names of the cells that differ |
 | UID present, content hash equal | no row event. The stored sheet row is updated when the row moved |
-| UID in the index, absent from the column | `DELETED`, unless the mass-delete guard holds the commit |
+| UID in the index, absent from the column | `DELETED`. Above 30 percent, and at least 10 stored, a `massive_delete` snapshot of the previous sheet is stored first |
 
 `ADDED` and `UPDATED` carry the new row. `DELETED` carries the last stored row.
 
@@ -147,7 +146,7 @@ The first `StartWatch` for a spreadsheet and `sheetId` assigns a 4-byte `wid`.
 
 The sheet UIDs are sorted, then merged with a cursor on `idx` for that `wid`. The UID column itself is in sheet order. Only UIDs that differ are loaded from `row`. Memory follows the sheets in a cycle, not the number of watches.
 
-`map_size` is set at open and is address space, not allocated disk. Subscriber transactions close at the end of each batch. The file stays large after a watch is removed. An operator reclaims space with an offline compacting copy. `StopWatch` stops the loop and leaves the prefix.
+`map_size` comes from `GOOGLE_TABLES_MAP_SIZE`, a byte count. The default is 16 GiB. It is address space, not allocated disk. Startup exits with an error when the file is already larger. When 10 percent or less of the map is free, startup logs a warning. When 5 percent or less is free, that warning says the space is critical. Subscriber transactions close at the end of each batch. The file stays large after a watch is removed. An operator reclaims space with an offline compacting copy. `StopWatch` stops the loop and leaves the prefix.
 
 ```protobuf
 message StoredRow {
@@ -192,6 +191,8 @@ service GoogleTables {
   rpc GetWatch(GetWatchRequest) returns (Watch);
   rpc Subscribe(SubscribeRequest) returns (stream RowChange);
   rpc ReadStored(ReadStoredRequest) returns (stream StoredBatch);
+  rpc ListSnapshots(ListSnapshotsRequest) returns (ListSnapshotsResponse);
+  rpc GetSnapshot(GetSnapshotRequest) returns (stream SnapshotBatch);
 }
 
 message OpenSpreadsheetRequest {
@@ -265,20 +266,16 @@ message StartWatchRequest {
 message StopWatchRequest { string watch_id = 1; }
 message GetWatchRequest { string watch_id = 1; }
 
-message SyncNowRequest {
-  string watch_id = 1;
-  bool confirm = 2;
-}
+message SyncNowRequest { string watch_id = 1; }
 
 message Watch {
   string watch_id = 1;
   string spreadsheet_id = 2;
   int32 sheet_id = 3;
-  string status = 4;                  // running, needs_confirm, column_missing, or the last error
+  string status = 4;                  // running, column_missing, or the last error
   uint64 last_seq = 5;
   string drive_version = 6;
   repeated irbis.table.v1.Column columns = 7;
-  uint32 pending_deletes = 8;
 }
 
 message SyncReport {
@@ -286,7 +283,6 @@ message SyncReport {
   uint32 added = 2;
   uint32 updated = 3;
   uint32 deleted = 4;
-  bool held = 5;
 }
 
 message SubscribeRequest {
@@ -323,7 +319,7 @@ enum ChangeKind {
 
 `EnsureIdentity` returns the mapped columns and omits the two hidden columns. `StartWatch` requires a mapping and identity. `credentials_ref` rejects a value that contains a slash.
 
-Errors are gRPC status codes with a short reason: unknown spreadsheet, permission denied, unknown session, unknown `sheetId`, header row not in the candidates, duplicate column name, bad `SelectColumns` entry, a service column that cannot be recreated, unknown watch, `confirm` when the status is not `needs_confirm`.
+Errors are gRPC status codes with a short reason: unknown spreadsheet, permission denied, unknown session, unknown `sheetId`, header row not in the candidates, duplicate column name, bad `SelectColumns` entry, a service column that cannot be recreated, unknown watch, unknown snapshot.
 
 ## Google access
 
@@ -365,7 +361,7 @@ docker compose up google-tables
 - a `version` change between the two reads commits nothing
 - a UID write stores no baseline until a later two-column read matches around its `version`
 - a duplicated UID stays on the row whose content hash still matches
-- deleting 30 percent or more sets `needs_confirm` until `confirm` is set
+- deleting 30 percent or more stores a `massive_delete` snapshot, then appends `DELETED`
 
 ## Left out
 

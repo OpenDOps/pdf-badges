@@ -62,6 +62,19 @@ test("formpath_back_opens_the_menu", async () => {
   expect(screen.getByRole("link", { name: "Настройки" })).toHaveAttribute("href", "/settings");
 });
 
+test("formpath_printer_button_opens_printers", async () => {
+  const { router, view } = renderAt("/form");
+  render(view);
+  const printers = await screen.findByRole("button", { name: "Принтеры" });
+  const printer = screen.getByLabelText("Принтер");
+  expect(printers.closest("[data-testid='desk-nav']")).toBeTruthy();
+  expect(printer.closest("[data-testid='desk-nav']")).toBeTruthy();
+  expect(screen.getByTestId("operator-bar").contains(printer)).toBe(false);
+  expect(printers.compareDocumentPosition(printer) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  fireEvent.click(printers);
+  await waitFor(() => expect(router.state.location.pathname).toBe("/printers"));
+});
+
 test("formpath_desk_redirects", async () => {
   const { router, view } = renderAt("/desk");
   render(view);

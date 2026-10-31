@@ -309,8 +309,52 @@ export class FormClient {
     return this.send(`/api/registrations/${encodeURIComponent(id)}/photo`, bytes);
   }
 
+  settings(): Promise<unknown> {
+    return this.getJson("/api/settings");
+  }
+
+  patchSettings(body: Record<string, boolean>): Promise<unknown> {
+    return this.patchJson("/api/settings", body);
+  }
+
+  barcodes(): Promise<unknown> {
+    return this.getJson("/api/barcodes");
+  }
+
+  patchBarcodes(body: { cat_id: number; min: number; add: number }): Promise<unknown> {
+    return this.patchJson("/api/barcodes", body);
+  }
+
+  restartSync(): Promise<unknown> {
+    return this.send("/api/sync", "{}", { "Content-Type": "application/json" });
+  }
+
   printers(): Promise<unknown> {
     return this.getJson("/api/printers");
+  }
+
+  async patchPrinter(
+    id: string,
+    body: {
+      name?: string;
+      hidden?: boolean;
+      default?: boolean;
+      zone?: string;
+      category?: string;
+      print_cert?: boolean;
+      options?: Record<string, string>;
+    },
+  ): Promise<unknown> {
+    const path = `/api/printers/${encodeURIComponent(id)}`;
+    const response = await this.fetchImpl(path, {
+      method: "PATCH",
+      credentials: "include",
+      body: JSON.stringify(body),
+      headers: { "Content-Type": "application/json" },
+    });
+    if (response.status === 401) throw unauthorized(path);
+    if (!response.ok) throw new Error(`${path} ${response.status}`);
+    return unwrapData(await response.json());
   }
 
   categories(): Promise<unknown> {
@@ -329,6 +373,18 @@ export class FormClient {
     const data = unwrapData<{ rev: unknown; categories: unknown; printers: unknown }>(await response.json());
     if (!data || typeof data !== "object" || typeof data.rev !== "number") throw new Error("catalog");
     return { rev: data.rev, categories: data.categories, printers: data.printers };
+  }
+
+  private async patchJson(path: string, body: unknown): Promise<unknown> {
+    const response = await this.fetchImpl(path, {
+      method: "PATCH",
+      credentials: "include",
+      body: JSON.stringify(body),
+      headers: { "Content-Type": "application/json" },
+    });
+    if (response.status === 401) throw unauthorized(path);
+    if (!response.ok) throw new Error(`${path} ${response.status}`);
+    return unwrapData(await response.json());
   }
 
   private async getJson<T>(path: string): Promise<T> {

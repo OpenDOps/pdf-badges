@@ -42,6 +42,27 @@ services:
       retries: 30
       start_period: 5s
 
+  google-tables:
+    build:
+      context: .
+      dockerfile: modules/google-tables/Dockerfile
+    image: google-tables
+    expose:
+      - "50052"
+    networks:
+      - private
+    volumes:
+      - ./data/google-tables:/data
+      - ./modules/google-tables/credentials:/credentials:ro
+    tmpfs:
+      - /tmp
+    healthcheck:
+      test: ["CMD", "/tcpcheck"]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+
 networks:
   private:
     internal: true

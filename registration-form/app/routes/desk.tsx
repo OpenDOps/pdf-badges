@@ -253,15 +253,17 @@ export default function Desk() {
               </button>
             </div>
           </div>
-          <label className="flex min-w-0 flex-1 flex-col gap-1">
-            <span className="text-xs font-medium text-gray-500">{t("desk.printer")}</span>
-            <ClosedSelect
-              label={t("desk.printer")}
-              options={catalog.printers}
-              value={catalog.printer}
-              onPick={(id) => chooseDeskCatalog({ printer: id })}
-            />
-          </label>
+          {pathname === "/form" ? null : (
+            <label className="flex min-w-0 flex-1 flex-col gap-1">
+              <span className="text-xs font-medium text-gray-500">{t("desk.printer")}</span>
+              <ClosedSelect
+                label={t("desk.printer")}
+                options={catalog.printers}
+                value={catalog.printer}
+                onPick={(id) => chooseDeskCatalog({ printer: id })}
+              />
+            </label>
+          )}
           <label className="flex min-w-0 flex-1 flex-col gap-1">
             <span className="text-xs font-medium text-gray-500">{t("desk.packets")}</span>
             <input aria-label={t("desk.packets")} data-testid="packets" value={packets} onChange={(event) => setPackets(event.target.value)} />

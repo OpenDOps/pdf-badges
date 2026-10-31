@@ -1,0 +1,24 @@
+{% load static %}
+<body style="width: 210mm; height:297mm;">
+     <b style="position: absolute; 
+              left:110mm; 
+              top:100mm; 
+              display: inline-block;
+              width: 100mm; 
+              text-align: center;">
+        {{ form_data.field_108 }} {{ form_data.field_107 }}
+    </b>
+    <b style="position: absolute; 
+              left:110mm; 
+              top:107mm; 
+              display: inline-block;
+              width: 100mm; 
+              text-align: center;">
+        {{ form_data.field_118 }}
+    </b>
+     <img style="position: absolute; left: 140mm; top: 122mm; width: 40mm;" src={{ barcode }}>
+     <img style="position: absolute; left: 10mm; top: 5mm; width: 31mm;" src={{ vcard_qrcode }}>
+   
+     <img style="width: 210mm; height: 297mm;"
+          src={{ files.ticket_visitor_pirexpo2026}}>
+</body>

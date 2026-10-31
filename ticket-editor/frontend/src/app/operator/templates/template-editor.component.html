@@ -1,0 +1,190 @@
+@if (loading()) {
+  <p class="text-text-secondary">Загрузка…</p>
+} @else if (template() || localCatalog()) {
+  <div class="flex flex-col gap-3 flex-1 min-h-0">
+
+    <!-- Toolbar -->
+    <div class="bg-bg-white rounded-2xl shadow px-4 py-3 flex flex-wrap items-center gap-3 text-sm">
+      <a routerLink="/editor/list" class="text-text-blue">&larr; Макеты</a>
+
+      <input
+        id="template-name"
+        [(ngModel)]="name"
+        (ngModelChange)="markDirty()"
+        [disabled]="readonly"
+        class="px-3 py-1.5 rounded-lg border border-border-grey-medium font-medium min-w-[220px]"
+      />
+      <span class="text-text-secondary">{{ template()?.ticket_type_name }}</span>
+      @if (isCloud) {
+        <span class="text-xs px-2 py-0.5 rounded-full bg-bg-grey text-text-secondary">облачный · только чтение</span>
+        <button type="button" class="text-text-blue" (click)="createCopy()">Создать копию для редактирования</button>
+      }
+
+      <div class="flex rounded-lg overflow-hidden border border-border-grey-medium">
+        <button
+          type="button"
+          class="px-3 py-1.5"
+          [class]="mode() === 'visual' ? 'bg-button-primary text-text-white' : 'bg-bg-white text-text-base'"
+          [disabled]="!!visualBlocked()"
+          [title]="visualBlocked() || (readonly ? 'Облачный макет: только просмотр на холсте' : '')"
+          (click)="setMode('visual')"
+        >
+          Визуально
+        </button>
+        <button
+          type="button"
+          class="px-3 py-1.5"
+          [class]="mode() === 'code' ? 'bg-button-primary text-text-white' : 'bg-bg-white text-text-base'"
+          (click)="setMode('code')"
+        >
+          Код
+        </button>
+      </div>
+
+      <!-- Page format -->
+      <label class="flex items-center gap-1">
+        <span class="text-text-secondary">Лист</span>
+        <select [(ngModel)]="pageFormat" (ngModelChange)="onPageChange()" [disabled]="readonly" class="px-2 py-1.5 rounded-lg border border-border-grey-medium">
+          <option value="custom">Свой размер (мм)</option>
+          @for (f of formats()?.standard ?? []; track f.format) {
+            <option [value]="f.format">{{ f.format }} ({{ f.width_mm }}×{{ f.height_mm }})</option>
+          }
+        </select>
+      </label>
+      @if (pageFormat === 'custom') {
+        <input id="page-width" type="number" min="10" max="1000" step="0.5" [(ngModel)]="widthMm" (ngModelChange)="onPageChange()" [disabled]="readonly" class="w-20 px-2 py-1.5 rounded-lg border border-border-grey-medium" />
+        <span class="text-text-secondary">×</span>
+        <input type="number" min="10" max="1000" step="0.5" [(ngModel)]="heightMm" (ngModelChange)="onPageChange()" [disabled]="readonly" class="w-20 px-2 py-1.5 rounded-lg border border-border-grey-medium" />
+        <span class="text-text-secondary">мм</span>
+        @if (!readonly) {
+          <select class="px-2 py-1.5 rounded-lg border border-border-grey-medium text-text-secondary" (change)="onPreset($any($event.target).value)">
+            <option value="">пресеты…</option>
+            @for (p of formats()?.thermal_presets ?? []; track p.label) {
+              <option [value]="p.width_mm + 'x' + p.height_mm">{{ p.label }}</option>
+            }
+          </select>
+        }
+      } @else {
+        <select [(ngModel)]="orientation" (ngModelChange)="onPageChange()" [disabled]="readonly" class="px-2 py-1.5 rounded-lg border border-border-grey-medium">
+          <option value="portrait">книжная</option>
+          <option value="landscape">альбомная</option>
+        </select>
+      }
+      @if (yamlPage) {
+        <label class="flex items-center gap-1 text-text-secondary">вылеты, мм
+          <input id="bleed-top" type="number" min="0" step="0.5" [(ngModel)]="bleeds.top" (ngModelChange)="onBleedsChange()" [disabled]="readonly" title="сверху" class="w-16 px-2 py-1.5 rounded-lg border border-border-grey-medium" />
+          <input id="bleed-right" type="number" min="0" step="0.5" [(ngModel)]="bleeds.right" (ngModelChange)="onBleedsChange()" [disabled]="readonly" title="справа" class="w-16 px-2 py-1.5 rounded-lg border border-border-grey-medium" />
+          <input id="bleed-bottom" type="number" min="0" step="0.5" [(ngModel)]="bleeds.bottom" (ngModelChange)="onBleedsChange()" [disabled]="readonly" title="снизу" class="w-16 px-2 py-1.5 rounded-lg border border-border-grey-medium" />
+          <input id="bleed-left" type="number" min="0" step="0.5" [(ngModel)]="bleeds.left" (ngModelChange)="onBleedsChange()" [disabled]="readonly" title="слева" class="w-16 px-2 py-1.5 rounded-lg border border-border-grey-medium" />
+        </label>
+      }
+      <details class="relative">
+        <summary class="cursor-pointer text-text-secondary">Поля</summary>
+        <div class="absolute z-10 mt-1 bg-bg-white border border-border-grey-light rounded-lg shadow p-3 grid grid-cols-2 gap-2 w-56">
+          <label class="flex flex-col"><span class="text-xs text-text-secondary">сверху, мм</span><input type="number" step="0.5" min="0" [(ngModel)]="margins.top" (ngModelChange)="onPageChange()" [disabled]="readonly" class="px-2 py-1 rounded border border-border-grey-medium" /></label>
+          <label class="flex flex-col"><span class="text-xs text-text-secondary">справа, мм</span><input type="number" step="0.5" min="0" [(ngModel)]="margins.right" (ngModelChange)="onPageChange()" [disabled]="readonly" class="px-2 py-1 rounded border border-border-grey-medium" /></label>
+          <label class="flex flex-col"><span class="text-xs text-text-secondary">снизу, мм</span><input type="number" step="0.5" min="0" [(ngModel)]="margins.bottom" (ngModelChange)="onPageChange()" [disabled]="readonly" class="px-2 py-1 rounded border border-border-grey-medium" /></label>
+          <label class="flex flex-col"><span class="text-xs text-text-secondary">слева, мм</span><input type="number" step="0.5" min="0" [(ngModel)]="margins.left" (ngModelChange)="onPageChange()" [disabled]="readonly" class="px-2 py-1 rounded border border-border-grey-medium" /></label>
+        </div>
+      </details>
+
+      @if (mode() === 'visual') {
+        <label class="flex items-center gap-1 text-text-secondary">
+          Масштаб
+          <input type="range" min="25" max="400" step="5" [ngModel]="zoom()" (ngModelChange)="onZoom($event)" class="w-24" />
+          {{ zoom() }}%
+          <button type="button" class="underline" title="Показать весь лист" (click)="fitToView()">вписать</button>
+        </label>
+      }
+
+      <span class="flex-1"></span>
+
+      @for (contribution of contributions; track contribution) {
+        <ng-container [ngComponentOutlet]="contribution.toolbar" />
+      }
+
+      @if (!readonly) {
+        <button
+          type="button"
+          class="px-4 py-1.5 rounded-lg bg-button-primary text-text-white disabled:bg-button-disabled"
+          [disabled]="saving() || !dirty() || !template()"
+          (click)="save()"
+        >
+          {{ saving() ? 'Сохранение…' : (dirty() ? 'Сохранить' : 'Сохранено') }}
+        </button>
+      }
+    </div>
+
+    @if (errorMessage()) {
+      <div class="bg-bg-red text-text-red rounded-lg px-4 py-2 text-sm flex items-center gap-3">
+        <span>{{ errorMessage() }}@if (errorLine()) { (строка {{ errorLine() }}) }</span>
+        @if (conflict()) {
+          <button type="button" class="underline" (click)="reload()">Перезагрузить макет</button>
+        }
+      </div>
+    }
+    @if (visualBlocked() && mode() === 'code' && !isCloud) {
+      <p class="text-xs text-text-secondary px-1">{{ visualBlocked() }}</p>
+    }
+
+    <!-- Workspace -->
+    <div class="flex gap-3 flex-1 min-h-0">
+      @if (mode() === 'visual') {
+        <app-tool-rail
+          [tool]="tool()"
+          [readonly]="readonly"
+          [foreground]="swatches().foreground"
+          [background]="swatches().background"
+          (toolChange)="tool.set($event)"
+          (colorPick)="onColorPick($event)"
+        />
+      }
+
+      <!-- Center -->
+      <section class="flex-1 min-w-0 min-h-0 bg-bg-white rounded-2xl shadow p-3 flex flex-col">
+        @if (mode() === 'code') {
+          <app-code-editor
+            class="flex-1 min-h-0 block"
+            [language]="yamlPage ? 'json' : 'html'"
+            [value]="html"
+            [readonly]="readonly"
+            [completions]="completions()"
+            [errorLine]="errorLine()"
+            (valueChange)="onCodeChange($event)"
+          />
+        } @else {
+          <app-visual-editor
+            class="flex-1 min-h-0 block"
+            [demo]="demo()"
+            [groups]="palette()"
+            [dpi]="printerDpi"
+            [fileUrls]="fileUrls()"
+            [page]="pagePayload"
+            [readonly]="readonly"
+            [yamlPage]="yamlPage"
+            [bleeds]="bleeds"
+            [fonts]="fontChoices()"
+            [fontFaces]="fontFaces()"
+            [tool]="tool()"
+            (changed)="onVisualChange()"
+            (boxChange)="onBoxChange($event)"
+            (yamlDrop)="onYamlDrop($event)"
+            (toolGesture)="onToolGesture($event)"
+            (historyKey)="onHistoryKey($event)"
+            (entryRemove)="onEntryRemove($event)"
+            (entrySelect)="onEntrySelect($event)"
+            (preenteredEdit)="onPreenteredEdit($event)"
+            (ready)="onVisualReady()"
+            (zoomChanged)="zoom.set($event)"
+          />
+        }
+      </section>
+
+      @for (contribution of contributions; track contribution) {
+        @if (contribution.aside) {
+          <ng-container [ngComponentOutlet]="contribution.aside" />
+        }
+      }
+    </div>
+  </div>
+}

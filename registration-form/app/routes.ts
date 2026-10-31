@@ -13,6 +13,5 @@ export default [
     route("import", "routes/import.tsx"),
     route("settings", "routes/settings.tsx"),
     route("printers", "routes/printers.tsx"),
-    route("settings/registration", "routes/registration-settings.tsx"),
   ]),
 ] satisfies RouteConfig;

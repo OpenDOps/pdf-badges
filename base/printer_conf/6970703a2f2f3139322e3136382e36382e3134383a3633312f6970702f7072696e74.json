@@ -1,0 +1,9 @@
+{
+  "id": "ipp://192.168.68.148:631/ipp/print",
+  "name": "HP LaserJet MFP M426fdn",
+  "hidden": false,
+  "default": false,
+  "zone": "",
+  "category": "",
+  "print_cert": false
+}

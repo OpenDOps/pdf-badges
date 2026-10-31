@@ -1,0 +1,170 @@
+:host {
+  box-sizing: border-box;
+  background: #323232;
+  padding: 4px 3px;
+  gap: 2px;
+  border-radius: 2px;
+}
+
+button {
+  appearance: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  width: 100%;
+  height: 28px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 2px;
+  background: transparent;
+  color: #cfcfcf;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+button i {
+  font-size: 14px;
+  pointer-events: none;
+}
+
+button[aria-pressed='true'] {
+  background: #555555;
+  color: #ffffff;
+}
+
+button:hover:not(:disabled):not([aria-pressed='true']):not(.swatch):not(.apply) {
+  background: #3f3f3f;
+  color: #ffffff;
+}
+
+button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.swatches {
+  position: relative;
+  z-index: 22;
+  width: 40px;
+  height: 40px;
+  margin: auto auto 2px;
+  flex-shrink: 0;
+}
+
+button.swap {
+  position: absolute;
+  top: 0;
+  right: 0;
+  z-index: 3;
+  width: 14px;
+  height: 14px;
+  color: #f3f3f3;
+}
+
+button.swap svg {
+  width: 12px;
+  height: 12px;
+  overflow: visible;
+}
+
+button.swap path {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.3;
+  stroke-linecap: square;
+  stroke-linejoin: miter;
+}
+
+button.swatch {
+  position: absolute;
+  width: 24px;
+  height: 24px;
+  border: 1px solid #fff;
+  border-radius: 1px;
+  box-shadow: 0 0 0 1px #111;
+}
+
+button.swatch.background {
+  z-index: 1;
+  right: 0;
+  bottom: 0;
+}
+
+button.swatch.foreground {
+  z-index: 2;
+  top: 0;
+  left: 0;
+}
+
+.color-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  background: transparent;
+}
+
+.color-dialog {
+  position: absolute;
+  left: calc(100% + 8px);
+  bottom: 0;
+  z-index: 21;
+  width: 220px;
+  padding: 8px;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #1a1a1a;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
+}
+
+.color-dialog [role='tablist'] {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+
+.color-dialog [role='tab'] {
+  height: 24px;
+  color: #1a1a1a;
+  background: #ececec;
+}
+
+.color-dialog [role='tab'][aria-selected='true'] {
+  background: #d7d7d7;
+  color: #1a1a1a;
+}
+
+.picker-host {
+  min-height: 180px;
+}
+
+.channels,
+.hex {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+  font-size: 12px;
+}
+
+.channels input,
+.hex input {
+  width: 100%;
+  color: #1a1a1a;
+  background: #ffffff;
+  border: 1px solid #cccccc;
+}
+
+button.apply {
+  width: 100%;
+  height: 28px;
+  margin-top: 10px;
+  background: #323232;
+  color: #ffffff;
+}
+
+button.apply:hover {
+  background: #111111;
+  color: #ffffff;
+}

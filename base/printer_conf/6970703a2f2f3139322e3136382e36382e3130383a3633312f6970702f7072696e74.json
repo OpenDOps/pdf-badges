@@ -1,0 +1,9 @@
+{
+  "id": "ipp://192.168.68.108:631/ipp/print",
+  "name": "ECOSYS P2335dw",
+  "hidden": false,
+  "default": false,
+  "zone": "",
+  "category": "",
+  "print_cert": false
+}

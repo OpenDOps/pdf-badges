@@ -87,7 +87,6 @@ test("lazy_admin_menu_keeps_upload_unloaded", async () => {
   );
   expect(screenLoads()).not.toContain("routes/print.tsx");
   expect(screenLoads()).not.toContain("routes/printers.tsx");
-  expect(screenLoads()).not.toContain("routes/registration-settings.tsx");
 });
 
 test("lazy_form_loads_the_menu", async () => {
@@ -102,11 +101,9 @@ test("lazy_form_loads_the_menu", async () => {
 test("lazy_settings_loads_its_two_links", async () => {
   const settings = renderAt("/settings");
   const mounted = render(settings.view);
-  expect(await screen.findByRole("link", { name: "Настройки принтеров" })).toBeInTheDocument();
-  await waitFor(() => {
-    expect(screenLoads()).toContain("routes/printers.tsx");
-    expect(screenLoads()).toContain("routes/registration-settings.tsx");
-  });
+  expect(await screen.findByRole("button", { name: "Настроить принтеры" })).toBeInTheDocument();
+  await waitFor(() => expect(screenLoads()).toContain("routes/settings.tsx"));
+  expect(screenLoads()).not.toContain("routes/printers.tsx");
   mounted.unmount();
 
   resetScreenLoads();
@@ -114,7 +111,6 @@ test("lazy_settings_loads_its_two_links", async () => {
   render(printers.view);
   expect(await screen.findByRole("link", { name: "Форма" })).toHaveAttribute("href", "/form");
   await waitFor(() => expect(screenLoads()).toContain("routes/desk.tsx"));
-  expect(screenLoads()).not.toContain("routes/registration-settings.tsx");
 });
 
 test("lazy_typed_url_loads_that_screen", async () => {

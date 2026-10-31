@@ -15,7 +15,6 @@ const backTo: Record<string, string | undefined> = {
   "/import": "/",
   "/settings": "/",
   "/printers": "/settings",
-  "/settings/registration": "/settings",
 };
 
 function ScreenLink({
@@ -51,7 +50,7 @@ function ScreenLink({
   );
 }
 
-const deskTabs = ["/form", "/visitor", "/visitors", "/printers"] as const;
+const deskTabs = ["/form", "/visitor", "/visitors", "/printers", "/settings"] as const;
 
 export function isDeskNav(pathname: string) {
   return (deskTabs as readonly string[]).includes(pathname);
@@ -65,6 +64,10 @@ export function DeskNav() {
   const opened = useOpenVisitor();
   const dirty = useVisitorDirty();
   const visitors = pathname === "/visitors";
+  const printers = pathname === "/printers";
+  const showPrinter = pathname === "/form" || visitors || pathname === "/settings";
+  const showPrinterButton = pathname === "/form" || showPrinter || printers;
+  const printerSetup = pathname === "/settings" || printers;
   const visitorOpen = pathname === "/visitor";
   const blocker = useBlocker(visitorOpen && dirty);
   const seenVisitor = useRef(visitorOpen);
@@ -119,9 +122,26 @@ export function DeskNav() {
           </ScreenLink>
         ))}
       </nav>
-      {visitors ? (
-        <label className="flex w-56 shrink-0 items-center gap-1.5">
+      {showPrinterButton ? (
+        <button
+          type="button"
+          aria-label={printerSetup ? undefined : t("nav.printers")}
+          aria-current={printers ? "page" : undefined}
+          className={
+            printers
+              ? "inline-flex min-h-0 shrink-0 items-center gap-1.5 rounded-lg border border-transparent bg-[#1d4ed8] px-3 py-1.5 text-sm font-semibold leading-5 text-white"
+              : printerSetup
+                ? "inline-flex min-h-0 shrink-0 items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm font-semibold leading-5 text-gray-900"
+                : "inline-flex min-h-0 shrink-0 items-center justify-center rounded-lg border border-slate-300 bg-white px-1.5 py-1.5 text-sm font-semibold text-gray-900"
+          }
+          onClick={() => navigate("/printers")}
+        >
           <PrinterIcon />
+          {printerSetup ? t("settings.setupPrinters") : null}
+        </button>
+      ) : null}
+      {showPrinter ? (
+        <label className="flex w-56 shrink-0 items-center">
           <ClosedSelect
             label={t("desk.printer")}
             options={catalog.printers}
@@ -187,7 +207,7 @@ export function DeskNav() {
 
 function PrinterIcon() {
   return (
-    <svg viewBox="0 0 24 24" aria-hidden="true" className="h-5 w-5 shrink-0 text-gray-500" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <svg viewBox="0 0 24 24" aria-hidden="true" className="h-5 w-5 shrink-0" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <path d="M6 9V2h12v7" />
       <path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2" />
       <path d="M6 14h12v8H6z" />

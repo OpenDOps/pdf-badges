@@ -8,6 +8,9 @@ WORKDIR /src
 COPY Cargo.toml Cargo.lock build.rs ./
 COPY proto ./proto
 COPY src ./src
+COPY modules/ticket-render ./modules/ticket-render
+COPY modules/ipp-tool ./modules/ipp-tool
+COPY modules/google-tables/Cargo.toml modules/google-tables/Cargo.toml
 COPY tests/live_remote.rs tests/live_remote.rs
 RUN cargo build --release --bin rust-reg
 

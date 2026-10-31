@@ -93,6 +93,83 @@ fn loads_same_page_as_json() {
 }
 
 #[test]
+fn loads_rectangle_as_empty_text() {
+    let page = load_page(&fixture("rect-empty-text.yaml")).expect("rectangle yaml");
+    assert_eq!(page.contents.len(), 1);
+    match &page.contents[0] {
+        ContentEntry::Text(text) => {
+            assert_eq!(text.id, "p1-t1");
+            assert_eq!(text.pos_x, 5.0);
+            assert_eq!(text.pos_y, 5.0);
+            assert_eq!(text.width, 20.0);
+            assert_eq!(text.height, 10.0);
+            assert_eq!(text.horizontal, HorizontalAlign::Left);
+            assert_eq!(text.vertical, VerticalAlign::Top);
+            assert_eq!(text.padding.top, 0.0);
+            assert_eq!(text.padding.left, 0.0);
+            assert_eq!(
+                text.frame.background,
+                Some(rust_reg::struct_to_pdf::Rgb::WHITE)
+            );
+            let border = text.frame.border.as_ref().expect("border");
+            assert_eq!(border.width, 0.2);
+            assert_eq!(border.color, rust_reg::struct_to_pdf::Rgb::BLACK);
+            assert_eq!(text.text.font, "text");
+            assert_eq!(text.text.font_size, 4.233);
+            assert_eq!(text.text.leading, 0.0);
+            assert_eq!(text.text.line_height, 5.08);
+            assert_eq!(text.text.preentered, None);
+            assert_eq!(text.text.content, None);
+            assert!(!text.template);
+        }
+        _ => panic!("rectangle entry is a text box"),
+    }
+}
+
+#[test]
+fn loads_qr_and_ean13() {
+    let page = load_page(&fixture("qr-barcode.yaml")).expect("qr and barcode yaml");
+    assert_eq!(page.contents.len(), 3);
+    match &page.contents[0] {
+        ContentEntry::Barcode(code) => {
+            assert_eq!(code.id, "p1-b1");
+            assert_eq!(code.barcode_type, "qr");
+            assert_eq!(code.pos_x, 0.0);
+            assert_eq!(code.pos_y, 0.0);
+            assert_eq!(code.width, 30.0);
+            assert_eq!(code.height, 12.0);
+            assert!(code.template);
+            assert_eq!(code.preentered.as_deref(), Some("{{code}}"));
+            assert_eq!(code.content, None);
+        }
+        _ => panic!("qr entry is a barcode"),
+    }
+    match &page.contents[1] {
+        ContentEntry::Barcode(code) => {
+            assert_eq!(code.id, "p1-b2");
+            assert_eq!(code.barcode_type, "qr");
+            assert_eq!(code.width, 30.0);
+            assert_eq!(code.height, 30.0);
+            assert!(code.template);
+            assert_eq!(code.preentered.as_deref(), Some("{{code}}"));
+        }
+        _ => panic!("shifted qr entry is a barcode"),
+    }
+    match &page.contents[2] {
+        ContentEntry::Barcode(code) => {
+            assert_eq!(code.id, "p1-b3");
+            assert_eq!(code.barcode_type, "ean13");
+            assert_eq!(code.width, 30.0);
+            assert_eq!(code.height, 12.0);
+            assert!(code.template);
+            assert_eq!(code.preentered.as_deref(), Some("{{code}}"));
+            assert_eq!(code.content, None);
+        }
+        _ => panic!("barcode entry is a barcode"),
+    }
+}
+
+#[test]
 fn rejects_document() {
     let source = "pages: []\nmetadata: {}\n";
     assert_context(parse_yaml(source), "pages");
@@ -452,6 +529,109 @@ fn jpeg_rect_inside_trim() {
         b"DeviceRGB"
     );
     assert_eq!(stream.content[..2], [0xFF, 0xD8]);
+}
+
+#[test]
+fn each_picture_keeps_its_own_name() {
+    let source = r#"
+page_size:
+  width: 100
+  height: 100
+  units: mm
+  bleeds: {top: 0, right: 0, bottom: 0, left: 0}
+resources:
+  images:
+    photo:
+      name: photo
+      width: 8
+      height: 8
+      file_format: jpg
+      extracted_path: images/pixel.jpg
+  fonts: {}
+contents:
+  - id: sheet
+    posX: 0
+    posY: 0
+    width: 100
+    height: 100
+    image:
+      resource_name: photo
+  - id: bars
+    posX: 10
+    posY: 10
+    width: 40
+    height: 15
+    barcode:
+      type: ean13
+      preentered: "5901234123457"
+  - id: mark
+    posX: 60
+    posY: 10
+    width: 30
+    height: 30
+    barcode:
+      type: qr
+      preentered: "PIR visitor"
+"#;
+    let page = parse_yaml(source).expect("page");
+    let fixture_path = fixture("jpeg-page.yaml");
+    let base_dir = fixture_path.parent().expect("fixture directory");
+    let bytes = render_page(&page, base_dir).expect("pdf");
+    let drawn: Vec<String> = content_ops(&bytes)
+        .into_iter()
+        .filter(|op| op.operator == "Do")
+        .map(|op| String::from_utf8(op.operands[0].as_name().expect("name").to_vec()).unwrap())
+        .collect();
+    assert_eq!(drawn, ["Im1", "Im2", "Im3"]);
+
+    let doc = Document::load_mem(&bytes).unwrap();
+    let page_id = *doc.get_pages().get(&1).unwrap();
+    let xobjects = doc
+        .get_dictionary(page_id)
+        .unwrap()
+        .get(b"Resources")
+        .unwrap()
+        .as_dict()
+        .unwrap()
+        .get(b"XObject")
+        .unwrap()
+        .as_dict()
+        .unwrap();
+    assert_eq!(xobjects.len(), 3);
+    let jpeg = doc
+        .get_object(xobjects.get(b"Im1").unwrap().as_reference().unwrap())
+        .unwrap()
+        .as_stream()
+        .unwrap();
+    assert_eq!(
+        jpeg.dict.get(b"Filter").unwrap().as_name().unwrap(),
+        b"DCTDecode"
+    );
+    let bars = doc
+        .get_object(xobjects.get(b"Im2").unwrap().as_reference().unwrap())
+        .unwrap()
+        .as_stream()
+        .unwrap();
+    assert_eq!(bars.dict.get(b"Height").unwrap().as_i64().unwrap(), 1);
+    let mark = doc
+        .get_object(xobjects.get(b"Im3").unwrap().as_reference().unwrap())
+        .unwrap()
+        .as_stream()
+        .unwrap();
+    let side = mark.dict.get(b"Width").unwrap().as_i64().unwrap();
+    assert_eq!(side, 450);
+    assert_eq!(side, mark.dict.get(b"Height").unwrap().as_i64().unwrap());
+    assert!(matches!(
+        mark.dict.get(b"Interpolate").unwrap(),
+        Object::Boolean(false)
+    ));
+    let cms: Vec<_> = content_ops(&bytes)
+        .into_iter()
+        .filter(|op| op.operator == "cm")
+        .collect();
+    let symbol = 450.0 / 400.0 * 72.0;
+    approx(num(&cms[2].operands[0]), symbol);
+    approx(num(&cms[2].operands[3]), symbol);
 }
 
 #[test]
@@ -1746,4 +1926,417 @@ fn rejects_bad_auto_scale() {
     let err = load_page(&fixture("text-scale-bad.yaml")).expect_err("number is not a boolean");
     assert!(err.context.contains("line-1"), "{}", err.context);
     assert!(!out.exists());
+}
+
+fn assert_message(result: Result<rust_reg::struct_to_pdf::Page, RenderError>, needle: &str) {
+    let err = result.expect_err("expected a validation error");
+    assert!(
+        err.message.contains(needle),
+        "message {:?} does not contain {needle}; context: {}",
+        err.message,
+        err.context
+    );
+}
+
+fn render_sample(name: &str) -> (rust_reg::struct_to_pdf::Page, Vec<u8>) {
+    let (page, base_dir) = load_fixture(name);
+    let bytes = render_page(&page, &base_dir).unwrap_or_else(|err| panic!("render {name}: {err}"));
+    let stem = name.trim_end_matches(".yaml");
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let pdf = format!("{stem}.pdf");
+    save_pdf(
+        &bytes,
+        &root.join("target/struct-to-pdf/samples").join(&pdf),
+    )
+    .unwrap();
+    save_pdf(
+        &bytes,
+        &root.join("tests/fixtures/struct-to-pdf/samples").join(&pdf),
+    )
+    .unwrap();
+    (page, bytes)
+}
+
+fn op_at(ops: &[lopdf::content::Operation], name: &str) -> usize {
+    ops.iter()
+        .position(|op| op.operator == name)
+        .unwrap_or_else(|| panic!("missing {name}"))
+}
+
+fn last_before<'a>(
+    ops: &'a [lopdf::content::Operation],
+    at: usize,
+    name: &str,
+) -> &'a lopdf::content::Operation {
+    ops[..at]
+        .iter()
+        .rev()
+        .find(|op| op.operator == name)
+        .unwrap_or_else(|| panic!("missing {name} before {at}"))
+}
+
+fn expect_hex(op: &lopdf::content::Operation, hex: &str) {
+    let channel =
+        |start: usize| u8::from_str_radix(&hex[start..start + 2], 16).unwrap() as f32 / 255.0;
+    approx(num(&op.operands[0]), channel(1));
+    approx(num(&op.operands[1]), channel(3));
+    approx(num(&op.operands[2]), channel(5));
+}
+
+fn bare_entry(body: &str) -> String {
+    format!(
+        r#"
+page_size:
+  width: 100
+  height: 100
+  units: mm
+  bleeds: {{top: 0, right: 0, bottom: 0, left: 0}}
+resources:
+  images: {{}}
+  fonts: {{}}
+contents:
+{body}
+"#
+    )
+}
+
+#[test]
+fn box_background_fills_before_glyphs() {
+    let (page, bytes) = render_sample("box-background.yaml");
+    let ops = content_ops(&bytes);
+    let fill = op_at(&ops, "f");
+    let text = op_at(&ops, "Tj");
+    assert!(fill < text);
+    expect_hex(last_before(&ops, fill, "rg"), "#FF6A00");
+    let rect = last_before(&ops, fill, "re");
+    approx(num(&rect.operands[2]), mm(76.0));
+    approx(num(&rect.operands[3]), mm(28.0));
+    assert_eq!(ops.iter().filter(|op| op.operator == "f").count(), 1);
+    match &page.contents[0] {
+        ContentEntry::Text(text) => {
+            assert_eq!(
+                text.frame.background,
+                Some(rust_reg::struct_to_pdf::Rgb {
+                    red: 0xFF,
+                    green: 0x6A,
+                    blue: 0x00,
+                })
+            );
+        }
+        other => panic!("text box, got {other:?}"),
+    }
+
+    let (plain, base_dir) = load_fixture("text-hello.yaml");
+    let plain_bytes = render_page(&plain, &base_dir).unwrap();
+    assert!(content_ops(&plain_bytes)
+        .iter()
+        .all(|op| op.operator != "f"));
+
+    let mut bad = minimal_page();
+    bad = bad.replace("posX: 10", "background: orange\n    posX: 10");
+    assert_message(parse_yaml(&bad), "color");
+
+    let image = parse_yaml(&bare_entry(
+        r##"
+  - id: logo
+    posX: 1
+    posY: 1
+    width: 10
+    height: 10
+    background: "#FF6A00"
+    image:
+      resource_name: logo
+"##,
+    ))
+    .unwrap();
+    assert!(image.contents[0].frame().background.is_some());
+}
+
+#[test]
+fn box_border_strokes_the_frame() {
+    let (_, bytes) = render_sample("box-border.yaml");
+    let ops = content_ops(&bytes);
+    let stroke = op_at(&ops, "S");
+    let text = op_at(&ops, "Tj");
+    assert!(stroke < text);
+    expect_hex(last_before(&ops, stroke, "RG"), "#112233");
+    approx(num(&last_before(&ops, stroke, "w").operands[0]), mm(0.4));
+    assert!(ops.iter().all(|op| op.operator != "f"));
+    assert!(ops.iter().all(|op| op.operator != "c"));
+
+    let mut zero = minimal_page();
+    zero = zero.replace(
+        "posX: 10",
+        "border: {width: 0, color: \"#112233\"}\n    posX: 10",
+    );
+    assert_message(parse_yaml(&zero), "border width must be > 0");
+
+    let mut missing = minimal_page();
+    missing = missing.replace("posX: 10", "border: {width: 0.4}\n    posX: 10");
+    assert_message(parse_yaml(&missing), "border color is missing");
+}
+
+#[test]
+fn box_radius_uses_one_rounded_path() {
+    let (_, bytes) = render_sample("box-radius.yaml");
+    let ops = content_ops(&bytes);
+    let fill = op_at(&ops, "f");
+    let stroke = op_at(&ops, "S");
+    assert!(fill < stroke);
+    assert!(stroke < op_at(&ops, "Tj"));
+    assert!(ops[..fill].iter().any(|op| op.operator == "c"));
+    assert!(ops[fill..stroke].iter().any(|op| op.operator == "c"));
+    assert!(ops.iter().filter(|op| op.operator == "c").count() >= 8);
+
+    let sharp = std::fs::read_to_string(fixture("box-border.yaml"))
+        .unwrap()
+        .replace("border:", "border_radius: 0\n    border:");
+    let page = parse_yaml(&sharp).unwrap();
+    let bytes = render_page(&page, fixture("box-border.yaml").parent().unwrap()).unwrap();
+    assert!(content_ops(&bytes).iter().all(|op| op.operator != "c"));
+
+    let mut huge = minimal_page();
+    huge = huge.replace("posX: 10", "border_radius: 26\n    posX: 10");
+    assert_message(parse_yaml(&huge), "half the shorter side");
+}
+
+#[test]
+fn box_opacity_sets_ext_gstate() {
+    let (_, bytes) = render_sample("box-opacity.yaml");
+    let ops = content_ops(&bytes);
+    let gs = ops.iter().find(|op| op.operator == "gs").expect("gs");
+    match &gs.operands[0] {
+        Object::Name(name) => assert_eq!(name, b"Gs1"),
+        other => panic!("gs name {other:?}"),
+    }
+    let doc = Document::load_mem(&bytes).unwrap();
+    let page_id = *doc.get_pages().get(&1).unwrap();
+    let resources = doc
+        .get_dictionary(page_id)
+        .unwrap()
+        .get(b"Resources")
+        .unwrap()
+        .as_dict()
+        .unwrap();
+    let graphics = resources.get(b"ExtGState").unwrap().as_dict().unwrap();
+    let state_id = graphics.get(b"Gs1").unwrap().as_reference().unwrap();
+    let state = doc.get_dictionary(state_id).unwrap();
+    approx(num(state.get(b"ca").unwrap()), 0.4);
+    approx(num(state.get(b"CA").unwrap()), 0.4);
+
+    let opaque = std::fs::read_to_string(fixture("box-opacity.yaml"))
+        .unwrap()
+        .replace("opacity: 0.4", "opacity: 1");
+    let page = parse_yaml(&opaque).unwrap();
+    let bytes = render_page(&page, fixture("box-opacity.yaml").parent().unwrap()).unwrap();
+    assert!(content_ops(&bytes).iter().all(|op| op.operator != "gs"));
+
+    let mut high = minimal_page();
+    high = high.replace("posX: 10", "opacity: 1.5\n    posX: 10");
+    assert_message(parse_yaml(&high), "opacity must be from 0 to 1");
+    let mut low = minimal_page();
+    low = low.replace("posX: 10", "opacity: -0.1\n    posX: 10");
+    assert_message(parse_yaml(&low), "opacity must be from 0 to 1");
+}
+
+#[test]
+fn box_opacity_fades_the_group() {
+    let (_, bytes) = render_sample("box-opacity.yaml");
+    let ops = content_ops(&bytes);
+    let gs = op_at(&ops, "gs");
+    assert_eq!(ops[gs + 1].operator, "Do");
+    assert_eq!(ops.iter().filter(|op| op.operator == "f").count(), 1);
+
+    let (dict, form_ops) = transparency_group(&bytes).expect("isolated group");
+    let group = dict.get(b"Group").unwrap().as_dict().unwrap();
+    assert_eq!(group.get(b"S").unwrap().as_name().unwrap(), b"Transparency");
+    assert!(matches!(group.get(b"I").unwrap(), Object::Boolean(true)));
+    assert!(form_ops.iter().any(|op| op.operator == "f"));
+    assert!(form_ops.iter().any(|op| op.operator == "Tj"));
+    assert!(form_ops.iter().all(|op| op.operator != "gs"));
+
+    let source = std::fs::read_to_string(fixture("box-opacity.yaml"))
+        .unwrap()
+        .replace("background: \"#2255CC\"\n    opacity: 0.4", "opacity: 0.4");
+    let page = parse_yaml(&source).unwrap();
+    let bytes = render_page(&page, fixture("box-opacity.yaml").parent().unwrap()).unwrap();
+    let ops = content_ops(&bytes);
+    assert!(ops.iter().any(|op| op.operator == "gs"));
+    assert!(ops.iter().any(|op| op.operator == "Tj"));
+    assert!(transparency_group(&bytes).is_none());
+}
+
+fn transparency_group(bytes: &[u8]) -> Option<(lopdf::Dictionary, Vec<lopdf::content::Operation>)> {
+    let doc = Document::load_mem(bytes).unwrap();
+    let resources = page_dict(&doc, 1)
+        .get(b"Resources")
+        .unwrap()
+        .as_dict()
+        .unwrap();
+    let Ok(xobjects) = resources.get(b"XObject") else {
+        return None;
+    };
+    for (_, object) in xobjects.as_dict().unwrap().iter() {
+        let id = object.as_reference().unwrap();
+        let stream = doc.get_object(id).unwrap().as_stream().unwrap();
+        let Ok(Object::Name(subtype)) = stream.dict.get(b"Subtype") else {
+            continue;
+        };
+        if subtype != b"Form" {
+            continue;
+        }
+        let mut stream = stream.clone();
+        stream.decompress().ok();
+        let ops = lopdf::content::Content::decode(&stream.content)
+            .unwrap()
+            .operations;
+        return Some((stream.dict, ops));
+    }
+    None
+}
+
+#[test]
+fn box_scale_and_skew_set_cm_about_the_top_left() {
+    let (page, bytes) = render_sample("box-scale-skew.yaml");
+    assert_eq!(page.contents[0].bounds().2, 35.0);
+    assert_eq!(page.contents[0].frame().scale_x, 2.0);
+    assert_eq!(page.contents[1].frame().skew_x, 45.0);
+    let cms: Vec<_> = content_ops(&bytes)
+        .into_iter()
+        .filter(|op| op.operator == "cm")
+        .collect();
+    assert_eq!(cms.len(), 2);
+    approx(num(&cms[0].operands[0]), 2.0);
+    approx(num(&cms[0].operands[1]), 0.0);
+    approx(num(&cms[0].operands[2]), 0.0);
+    approx(num(&cms[0].operands[3]), 1.0);
+    approx(num(&cms[1].operands[0]), 1.0);
+    approx(num(&cms[1].operands[2]), -1.0);
+
+    let (plain, base_dir) = load_fixture("text-hello.yaml");
+    let plain_bytes = render_page(&plain, &base_dir).unwrap();
+    assert!(content_ops(&plain_bytes)
+        .iter()
+        .all(|op| op.operator != "cm"));
+
+    let mut zero = minimal_page();
+    zero = zero.replace("posX: 10", "scale_x: 0\n    posX: 10");
+    assert_message(parse_yaml(&zero), "scale_x must not be 0");
+    let mut right = minimal_page();
+    right = right.replace("posX: 10", "skew_x: 90\n    posX: 10");
+    assert_message(parse_yaml(&right), "skew_x has no finite tangent");
+}
+
+#[test]
+fn box_letter_spacing_sets_tc() {
+    let (page, bytes) = render_sample("box-letter-spacing.yaml");
+    match &page.contents[0] {
+        ContentEntry::Text(text) => assert_eq!(text.text.letter_spacing, 0.5),
+        other => panic!("text box, got {other:?}"),
+    }
+    match &page.contents[1] {
+        ContentEntry::Text(text) => assert_eq!(text.text.letter_spacing, 0.0),
+        other => panic!("text box, got {other:?}"),
+    }
+    let ops = content_ops(&bytes);
+    let tracked: Vec<_> = ops.iter().filter(|op| op.operator == "Tc").collect();
+    assert_eq!(tracked.len(), 1);
+    approx(num(&tracked[0].operands[0]), mm(0.5));
+
+    let (plain, base_dir) = load_fixture("text-hello.yaml");
+    let plain_bytes = render_page(&plain, &base_dir).unwrap();
+    assert!(content_ops(&plain_bytes)
+        .iter()
+        .all(|op| op.operator != "Tc"));
+
+    let mut root = minimal_page();
+    root = root.replace("posX: 10", "letter_spacing: 0.5\n    posX: 10");
+    assert_message(parse_yaml(&root), "letter_spacing belongs on text");
+
+    assert_message(
+        parse_yaml(&bare_entry(
+            r#"
+  - id: code
+    posX: 0
+    posY: 0
+    width: 40
+    height: 16
+    barcode:
+      type: ean13
+      letter_spacing: 0.5
+      preentered: "9891160081678"
+"#,
+        )),
+        "letter_spacing is only valid on a text box",
+    );
+    assert_message(
+        parse_yaml(&bare_entry(
+            r#"
+  - id: logo
+    posX: 0
+    posY: 0
+    width: 10
+    height: 10
+    image:
+      resource_name: logo
+      letter_spacing: 0.5
+"#,
+        )),
+        "letter_spacing is only valid on a text box",
+    );
+    assert_message(
+        parse_yaml(&bare_entry(
+            r#"
+  - id: portrait
+    posX: 0
+    posY: 0
+    width: 18
+    height: 24
+    photo:
+      field: photo
+      letter_spacing: 0.5
+"#,
+        )),
+        "letter_spacing is only valid on a text box",
+    );
+}
+
+#[test]
+fn imported_html_pages_load() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ticket-editor/data/templates");
+    let pir = load_page(&root.join("pir/template.yml")).expect("pir page");
+    assert_eq!(pir.page_size.width, 210.0);
+    assert_eq!(pir.page_size.height, 297.0);
+    assert_eq!(pir.page_size.units, Units::Mm);
+    assert_eq!(pir.contents.len(), 5);
+    match &pir.contents[0] {
+        ContentEntry::Image(image) => {
+            assert_eq!(image.resource_name, "ticket_visitor_pirexpo2026");
+            assert_eq!(image.pos_x, 0.0);
+            assert_eq!(image.pos_y, 0.0);
+            assert_eq!(image.width, 210.0);
+            assert_eq!(image.height, 297.0);
+        }
+        other => panic!("sheet image should be the first entry, got {other:?}"),
+    }
+    for entry in &pir.contents {
+        let (x, y, w, h) = match entry {
+            ContentEntry::Text(box_) => (box_.pos_x, box_.pos_y, box_.width, box_.height),
+            ContentEntry::Image(box_) => (box_.pos_x, box_.pos_y, box_.width, box_.height),
+            ContentEntry::Barcode(box_) => (box_.pos_x, box_.pos_y, box_.width, box_.height),
+            ContentEntry::Photo(box_) => (box_.pos_x, box_.pos_y, box_.width, box_.height),
+        };
+        assert!(
+            x + w <= pir.page_size.width,
+            "{entry:?} extends past the page width"
+        );
+        assert!(
+            y + h <= pir.page_size.height,
+            "{entry:?} extends past the page height"
+        );
+    }
+    let sample = load_page(&root.join("sample/template.yml")).expect("sample page");
+    assert_eq!(sample.page_size.width, 90.0);
+    assert_eq!(sample.page_size.height, 130.0);
+    assert_eq!(sample.contents.len(), 1);
 }

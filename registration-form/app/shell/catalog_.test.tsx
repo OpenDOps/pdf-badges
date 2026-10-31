@@ -113,7 +113,7 @@ test("catalog_restores_the_stored_choice", async () => {
   await waitFor(() => expect(screen.getByTestId("chosen").textContent).toBe("7/"));
 });
 
-test("catalog_drops_a_stored_choice_that_left", async () => {
+test("catalog_switches_to_the_first_printer_when_the_choice_left", async () => {
   localStorage.setItem(DESK_CHOICE_KEY, JSON.stringify({ category: "9", printer: "Gone" }));
   vi.stubGlobal(
     "fetch",
@@ -127,6 +127,100 @@ test("catalog_drops_a_stored_choice_that_left", async () => {
   );
 
   render(<View />);
-  await waitFor(() => expect(screen.getByTestId("chosen").textContent).toBe("3/"));
-  expect(localStorage.getItem(DESK_CHOICE_KEY)).toBe(JSON.stringify({ category: "3", printer: "" }));
+  await waitFor(() => expect(screen.getByTestId("chosen").textContent).toBe("3/Zebra"));
+  expect(localStorage.getItem(DESK_CHOICE_KEY)).toBe(JSON.stringify({ category: "3", printer: "Zebra" }));
+});
+
+test("catalog_switches_to_the_default_when_the_printer_disappears", async () => {
+  let rev = 1;
+  let printers: unknown[] = [
+    { id: "ipp://front", name: "Front", text: "Front", default: true },
+    { id: "ipp://side", name: "Side", text: "Side" },
+  ];
+  let release: ((response: Response) => void) | undefined;
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL) => {
+      const raw = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      const asked = new URL(raw, "http://localhost").searchParams.get("rev") ?? "";
+      if (asked !== String(rev)) {
+        return json({ rev, categories: [{ cat_id: 3, name: { ru: "Гость" } }], printers });
+      }
+      return new Promise<Response>((resolve) => {
+        release = resolve;
+      });
+    }),
+  );
+
+  function Picker() {
+    const catalog = useDeskCatalog();
+    return (
+      <div>
+        <span data-testid="chosen">{catalog.printer}</span>
+        <button type="button" onClick={() => chooseDeskCatalog({ printer: "ipp://side" })}>
+          side
+        </button>
+      </div>
+    );
+  }
+
+  render(<Picker />);
+  await waitFor(() => expect(screen.getByTestId("chosen").textContent).toBe(""));
+  fireEvent.click(screen.getByRole("button", { name: "side" }));
+  expect(screen.getByTestId("chosen").textContent).toBe("ipp://side");
+
+  rev = 2;
+  printers = [{ id: "ipp://front", name: "Front", text: "Front", default: true }];
+  release?.(json({ rev, categories: [{ cat_id: 3, name: { ru: "Гость" } }], printers }));
+  await waitFor(() => expect(screen.getByTestId("chosen").textContent).toBe("ipp://front"));
+});
+
+test("catalog_keeps_the_printer_while_the_list_is_empty", async () => {
+  let rev = 1;
+  let printers: unknown[] = [{ id: "ipp://side", name: "Side", text: "Side" }];
+  let release: ((response: Response) => void) | undefined;
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL) => {
+      const raw = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      const asked = new URL(raw, "http://localhost").searchParams.get("rev") ?? "";
+      if (asked !== String(rev)) {
+        return json({ rev, categories: [{ cat_id: 3, name: { ru: "Гость" } }], printers });
+      }
+      return new Promise<Response>((resolve) => {
+        release = resolve;
+      });
+    }),
+  );
+
+  function Picker() {
+    const catalog = useDeskCatalog();
+    return (
+      <div>
+        <span data-testid="printers">{catalog.printers.map((item) => item.label).join(",")}</span>
+        <span data-testid="chosen">{catalog.printer}</span>
+        <button type="button" onClick={() => chooseDeskCatalog({ printer: "ipp://side" })}>
+          side
+        </button>
+      </div>
+    );
+  }
+
+  render(<Picker />);
+  await waitFor(() => expect(screen.getByTestId("chosen").textContent).toBe(""));
+  fireEvent.click(screen.getByRole("button", { name: "side" }));
+  expect(screen.getByTestId("chosen").textContent).toBe("ipp://side");
+  expect(screen.getByTestId("printers")).toHaveTextContent("Side");
+
+  rev = 2;
+  printers = [];
+  release?.(json({ rev, categories: [{ cat_id: 3, name: { ru: "Гость" } }], printers }));
+  await waitFor(() => expect(screen.getByTestId("printers").textContent).toBe(""));
+  expect(screen.getByTestId("chosen").textContent).toBe("ipp://side");
+  expect(localStorage.getItem(DESK_CHOICE_KEY)).toBe(JSON.stringify({ category: "3", printer: "ipp://side" }));
+
+  rev = 3;
+  printers = [{ id: "ipp://side", name: "Side", text: "Side" }];
+  release?.(json({ rev, categories: [{ cat_id: 3, name: { ru: "Гость" } }], printers }));
+  await waitFor(() => expect(screen.getByTestId("chosen").textContent).toBe("ipp://side"));
 });

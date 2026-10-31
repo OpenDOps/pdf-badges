@@ -2,7 +2,7 @@ import { useSyncExternalStore } from "react";
 
 import { FormClient } from "../form/client";
 
-export type DeskOption = { id: string; label: string };
+export type DeskOption = { id: string; label: string; default?: boolean };
 
 export type DeskCatalog = {
   categories: DeskOption[];
@@ -56,10 +56,10 @@ function optionsOf(body: unknown, kind: "category" | "printer"): DeskOption[] {
       options.push({ id: String(id), label });
       continue;
     }
-    const id = textOf(item.value) || textOf(item.name) || textOf(item.id);
+    const id = textOf(item.id) || textOf(item.value) || textOf(item.name);
     const label = textOf(item.text) || textOf(item.name) || id;
     if (!id) continue;
-    options.push({ id, label });
+    options.push({ id, label, default: item.default === true });
   }
   return options;
 }
@@ -68,8 +68,11 @@ function emit() {
   listeners.forEach((listener) => listener());
 }
 
-function kept(options: DeskOption[], id: string): string {
-  return options.some((item) => item.id === id) ? id : "";
+function keptPrinter(options: DeskOption[], id: string): string {
+  if (options.length === 0) return id;
+  if (id !== "" && options.some((item) => item.id === id)) return id;
+  if (id === "") return "";
+  return options.find((item) => item.default)?.id ?? options[0]?.id ?? "";
 }
 
 function keptCategory(options: DeskOption[], id: string): string {
@@ -117,7 +120,7 @@ function publish(body: { categories: unknown; printers: unknown }) {
     categories,
     printers,
     category: keptCategory(categories, chosen.category),
-    printer: kept(printers, chosen.printer),
+    printer: keptPrinter(printers, chosen.printer),
   };
   if (
     next.category === state.category &&
@@ -125,7 +128,12 @@ function publish(body: { categories: unknown; printers: unknown }) {
     next.categories.length === state.categories.length &&
     next.printers.length === state.printers.length &&
     next.categories.every((item, index) => item.id === state.categories[index]?.id && item.label === state.categories[index]?.label) &&
-    next.printers.every((item, index) => item.id === state.printers[index]?.id && item.label === state.printers[index]?.label)
+    next.printers.every(
+      (item, index) =>
+        item.id === state.printers[index]?.id &&
+        item.label === state.printers[index]?.label &&
+        !!item.default === !!state.printers[index]?.default,
+    )
   ) {
     return;
   }

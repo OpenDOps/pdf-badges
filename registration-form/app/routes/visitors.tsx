@@ -8,6 +8,7 @@ import { openVisitor, visitorHref } from "../shell/open-visitor";
 import { MultiSelect } from "../picker";
 
 const PAGE = 20;
+const BUSINESS = new Set(["no_ticket_code", "no_printer", "invalid_phone_email_combo"]);
 
 type Row = {
   uid: string;
@@ -74,6 +75,12 @@ function maskedEmail(email: string): string {
   return shown + "***" + tail;
 }
 
+function businessCode(error: unknown): string | undefined {
+  if (!(error instanceof Error)) return undefined;
+  const code = (error as Error & { code?: string }).code;
+  return code && BUSINESS.has(code) ? code : undefined;
+}
+
 function rowsOf(body: unknown, options: DeskOption[]): { total: number; rows: Row[] } {
   if (!isRecord(body) || !Array.isArray(body.rows)) return { total: 0, rows: [] };
   const rows = body.rows.filter(isRecord).map((row, index) => ({
@@ -105,6 +112,8 @@ export default function Visitors() {
   const [picked, setPicked] = useState("");
   const [arrived, setArrived] = useState(false);
   const [certificate, setCertificate] = useState(false);
+  const [printing, setPrinting] = useState(false);
+  const [printError, setPrintError] = useState("");
   const pageStart = offset === 0;
   const pageEnd = offset + PAGE >= total;
   const pages = pagerItems(offset, total);
@@ -182,6 +191,38 @@ export default function Visitors() {
     }
     setAllMatches(true);
     setChecked(pageIds);
+  }
+
+  async function selectedIds(): Promise<string[]> {
+    if (!allMatches) return checked;
+    const body = await client.registrations({
+      q: search,
+      category: categoryQuery,
+      limit: Math.max(total, 1),
+      offset: 0,
+    });
+    return rowsOf(body, catalog.categories).rows.map((row) => row.uid);
+  }
+
+  async function printSelected() {
+    if (printing) return;
+    const printer = catalog.printer;
+    if (!printer) {
+      setPrintError("no_printer");
+      return;
+    }
+    setPrintError("");
+    setPrinting(true);
+    try {
+      const ids = await selectedIds();
+      if (ids.length === 0) return;
+      await client.print(ids, printer);
+      clearSelection();
+    } catch (error) {
+      setPrintError(businessCode(error) ?? (error instanceof Error ? error.message : ""));
+    } finally {
+      setPrinting(false);
+    }
   }
 
   return (
@@ -305,7 +346,18 @@ export default function Visitors() {
           <button type="button" aria-pressed={certificate} onClick={() => setCertificate((value) => !value)}>
             {t("visitors.certificate")}
           </button>
-          <button type="button">{t("visitors.print")}</button>
+          <button
+            type="button"
+            disabled={printing || (!allMatches && checked.length === 0)}
+            onClick={() => void printSelected()}
+          >
+            {t("visitors.print")}
+          </button>
+          {printError ? (
+            <p role="alert" className="text-sm text-red-700">
+              {BUSINESS.has(printError) ? t(`error.${printError}`) : printError}
+            </p>
+          ) : null}
         </div>
       </div>
     </main>

@@ -1,0 +1,53 @@
+{
+  "name": "frontend",
+  "version": "0.0.0",
+  "scripts": {
+    "ng": "ng",
+    "start": "ng serve --port 4200",
+    "build": "ng build",
+    "watch": "ng build --watch --configuration development",
+    "sync:picker": "npm run build --prefix ../color-picker && rm -rf node_modules/ticket-editor-color-picker && mkdir -p node_modules/ticket-editor-color-picker && cp ../color-picker/package.json ../color-picker/index.d.ts node_modules/ticket-editor-color-picker/ && cp -R ../color-picker/dist node_modules/ticket-editor-color-picker/dist",
+    "pretest": "npm run sync:picker",
+    "prestart": "npm run sync:picker",
+    "prebuild": "npm run sync:picker",
+    "test": "ng test"
+  },
+  "private": true,
+  "packageManager": "npm@11.11.0",
+  "dependencies": {
+    "@angular/common": "^21.2.0",
+    "@angular/compiler": "^21.2.0",
+    "@angular/core": "^21.2.0",
+    "@angular/forms": "^21.2.0",
+    "@angular/platform-browser": "^21.2.0",
+    "@angular/router": "^21.2.0",
+    "@codemirror/autocomplete": "^6.20.4",
+    "@codemirror/commands": "^6.11.1",
+    "@codemirror/lang-css": "^6.3.1",
+    "@codemirror/lang-html": "^6.4.12",
+    "@codemirror/lang-json": "^6.0.2",
+    "@codemirror/language": "^6.13.1",
+    "@codemirror/state": "^6.7.6",
+    "@codemirror/view": "^6.43.15",
+    "@fortawesome/fontawesome-free": "^7.3.1",
+    "@use-gesture/vanilla": "^10.3.1",
+    "codemirror": "^6.0.2",
+    "grapesjs": "^0.23.6",
+    "ticket-editor-color-picker": "file:../color-picker",
+    "rxjs": "~7.8.0",
+    "tslib": "^2.3.0",
+    "zone.js": "^0.15.1"
+  },
+  "devDependencies": {
+    "@angular/build": "^21.2.28",
+    "@angular/cli": "^21.2.28",
+    "@angular/compiler-cli": "^21.2.0",
+    "autoprefixer": "^10.6.2",
+    "jsdom": "^28.0.0",
+    "postcss": "^8.5.32",
+    "prettier": "^3.8.1",
+    "tailwindcss": "^3.4.19",
+    "typescript": "~5.9.2",
+    "vitest": "^4.0.8"
+  }
+}

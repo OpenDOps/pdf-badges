@@ -6,7 +6,7 @@ import { clientLoader as operatorLoader } from "./routes/operator";
 import { renderAt } from "./shell/test-router";
 import { resetScreenLoads } from "./shell/screens";
 
-const operatorPaths = ["/", "/form", "/visitors", "/print", "/import", "/settings", "/printers", "/settings/registration"];
+const operatorPaths = ["/", "/form", "/visitors", "/print", "/import", "/settings", "/printers"];
 
 function stubFetch(sync: number, categories = 200) {
   vi.stubGlobal(
@@ -92,7 +92,6 @@ test("shell_cookie_opens_every_operator_path", async () => {
     "/import": "import",
     "/settings": "settings",
     "/printers": "printers",
-    "/settings/registration": "registration",
   };
   for (const path of operatorPaths) {
     const { router, view } = renderAt(path);
@@ -129,7 +128,6 @@ test("shell_back_follows_the_table", async () => {
   stubFetch(200);
   const backs: Record<string, string> = {
     "/print": "/visitors",
-    "/settings/registration": "/settings",
   };
   for (const [path, back] of Object.entries(backs)) {
     const { view } = renderAt(path);

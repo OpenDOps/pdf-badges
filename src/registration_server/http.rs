@@ -12,6 +12,7 @@ use tokio::sync::watch;
 
 use rusqlite::OptionalExtension;
 
+use crate::registration_server::cups;
 use crate::registration_server::current::CurrentEvent;
 use crate::registration_server::gate::Gate;
 use crate::registration_server::print_queue::{EnqueueError, PrintJob};
@@ -62,7 +63,12 @@ pub fn router(app: App) -> Router {
             "/api/settings",
             get(desk_settings).patch(desk_settings_patch),
         )
-        .route("/api/printers/{name}", patch(printer_patch))
+        .route(
+            "/api/barcodes",
+            get(desk_barcodes).patch(desk_barcodes_patch),
+        )
+        .route("/api/printers", get(printers_index))
+        .route("/api/printers/{*id}", patch(printer_patch))
         .route("/api/sync", get(sync_status).post(sync_wake_request))
         .route("/api/update", get(update_status).post(update_install))
         .route("/api/update/check", post(update_check))
@@ -156,7 +162,6 @@ fn form_screen(path: &str) -> bool {
             | "/print"
             | "/import"
             | "/settings"
-            | "/settings/registration"
             | "/printers"
     )
 }
@@ -266,9 +271,9 @@ fn catalog_response(snapshot: CatalogSnapshot) -> Response {
 }
 
 fn read_catalog(app: &App) -> CatalogSnapshot {
-    let (base, event) = catalog_dirs(app);
+    let (_, event) = catalog_dirs(app);
     let categories = read_category_list(event.as_deref());
-    let printers = read_printer_list(&base, event.as_deref());
+    let printers = catalog_printers(app);
     let fingerprint = serde_json::json!({
         "categories": &categories,
         "printers": &printers,
@@ -316,47 +321,131 @@ fn read_category_list(event: Option<&std::path::Path>) -> serde_json::Value {
     serde_json::Value::Array(items)
 }
 
-fn read_printer_list(base: &std::path::Path, event: Option<&std::path::Path>) -> serde_json::Value {
-    let mut names = std::collections::BTreeSet::new();
-    collect_stems(&base.join("printer_conf"), "", &mut names);
-    if let Some(event) = event {
-        collect_stems(event, "pr_", &mut names);
+struct ListedPrinter {
+    id: String,
+    name: String,
+    hidden: bool,
+    is_default: bool,
+    available: bool,
+    zone: String,
+    category: String,
+    print_cert: bool,
+    host: String,
+    kind: String,
+    params: Vec<cups::PrinterParam>,
+}
+
+fn printer_rows(app: &App) -> Vec<ListedPrinter> {
+    use crate::registration_server::cups::{self, PrinterCard};
+
+    let (base, _) = catalog_dirs(app);
+    let mut rows = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    let search = app.search.lock().expect("search").clone();
+    if let Some(search) = search {
+        for printer in search.printers() {
+            let address = cups::printer_address(&printer);
+            if address.is_empty() || !seen.insert(address.clone()) {
+                continue;
+            }
+            let card = match cups::ensure_card(&base, &printer) {
+                Ok(card) => card,
+                Err(_) => PrinterCard {
+                    id: address,
+                    name: if printer.name.is_empty() {
+                        cups::printer_address(&printer)
+                    } else {
+                        printer.name.clone()
+                    },
+                    hidden: false,
+                    is_default: false,
+                    zone: printer.routing.zone.clone(),
+                    category: printer.routing.category.clone(),
+                    print_cert: printer.routing.print_cert,
+                },
+            };
+            search.adopt_card(&card);
+            rows.push(ListedPrinter {
+                host: printer.host.clone(),
+                available: cups::printer_available(&printer),
+                id: card.id,
+                name: card.name,
+                hidden: card.hidden,
+                is_default: card.is_default,
+                zone: card.zone,
+                category: card.category,
+                print_cert: card.print_cert,
+                kind: printer.kind.as_str().to_string(),
+                params: cups::printer_params(&printer),
+            });
+        }
+    }
+    for card in cups::list_cards(&base) {
+        if !seen.insert(card.id.clone()) {
+            continue;
+        }
+        rows.push(ListedPrinter {
+            id: card.id,
+            name: card.name,
+            hidden: card.hidden,
+            is_default: card.is_default,
+            available: false,
+            zone: card.zone,
+            category: card.category,
+            print_cert: card.print_cert,
+            host: String::new(),
+            kind: String::new(),
+            params: Vec::new(),
+        });
+    }
+    rows.sort_by(|left, right| left.name.cmp(&right.name).then(left.id.cmp(&right.id)));
+    rows
+}
+
+fn catalog_printers(app: &App) -> serde_json::Value {
+    let rows = printer_rows(app);
+    let visible: Vec<&ListedPrinter> = rows
+        .iter()
+        .filter(|row| row.available && !row.hidden)
+        .collect();
+    let mut counts = std::collections::BTreeMap::<String, usize>::new();
+    for row in &visible {
+        *counts.entry(row.name.clone()).or_default() += 1;
     }
     serde_json::Value::Array(
-        names
+        visible
             .into_iter()
-            .map(|name| serde_json::json!({ "name": name, "text": name }))
+            .map(|row| {
+                let shared = counts.get(&row.name).copied().unwrap_or(0) > 1;
+                let text = if shared && !row.host.is_empty() {
+                    format!("{} ({})", row.name, row.host)
+                } else {
+                    row.name.clone()
+                };
+                serde_json::json!({
+                    "id": row.id,
+                    "name": row.name,
+                    "text": text,
+                    "default": row.is_default,
+                })
+            })
             .collect(),
     )
 }
 
-fn collect_stems(
-    dir: &std::path::Path,
-    prefix: &str,
-    names: &mut std::collections::BTreeSet<String>,
-) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
-            continue;
-        }
-        let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
-            continue;
-        };
-        let Some(name) = stem.strip_prefix(prefix) else {
-            continue;
-        };
-        if name.is_empty() {
-            continue;
-        }
-        names.insert(name.to_string());
-    }
+fn printer_json(row: &ListedPrinter) -> serde_json::Value {
+    serde_json::json!({
+        "id": row.id,
+        "name": row.name,
+        "hidden": row.hidden,
+        "default": row.is_default,
+        "available": row.available,
+        "zone": row.zone,
+        "category": row.category,
+        "print_cert": row.print_cert,
+        "kind": row.kind,
+        "params": row.params,
+    })
 }
 
 fn catalog_rev(body: &str) -> u64 {
@@ -925,6 +1014,11 @@ fn print_ids(app: &App, parsed: &serde_json::Value, certificate: bool) -> Respon
         return api_error(StatusCode::BAD_REQUEST, "bad_request");
     };
     let printer_name = body_text(parsed, "printer");
+    log::debug!(
+        "print request ids={} printer={}",
+        ids.join(","),
+        printer_name.as_deref().unwrap_or("")
+    );
     let zone = body_text(parsed, "zone");
     let certificate = certificate || json_flag(parsed, "certificate");
     let noprint = json_flag(parsed, "noprint");
@@ -968,10 +1062,16 @@ fn print_ids(app: &App, parsed: &serde_json::Value, certificate: bool) -> Respon
             return api_error(StatusCode::CONFLICT, "no_printer");
         };
         if !noprint {
+            let address = crate::registration_server::cups::printer_address(&printer);
+            log::debug!(
+                "print enqueue id={id} address={address} name={} uri={}",
+                printer.name,
+                printer.device_uri
+            );
             if let Err(response) = enqueue_print_job(
                 app,
                 &id,
-                printer.name.clone(),
+                address,
                 zone.clone(),
                 certificate,
                 Some(category),
@@ -1564,33 +1664,272 @@ async fn desk_settings_patch(
     api_ok(document)
 }
 
-async fn printer_patch(
+const BARCODE_MIN: i64 = 150;
+const BARCODE_ADD: i64 = 50;
+
+fn category_id(item: &serde_json::Value) -> Option<i64> {
+    match item.get("cat_id").or_else(|| item.get("id")) {
+        Some(serde_json::Value::Number(number)) => number.as_i64(),
+        Some(serde_json::Value::String(text)) => text.parse().ok(),
+        _ => None,
+    }
+}
+
+fn category_label(item: &serde_json::Value, cat_id: i64) -> String {
+    let fallback = cat_id.to_string();
+    match item.get("name") {
+        Some(serde_json::Value::String(text)) if !text.is_empty() => text.clone(),
+        Some(serde_json::Value::Object(map)) => ["ru", "en"]
+            .into_iter()
+            .find_map(|key| {
+                map.get(key)
+                    .and_then(|value| value.as_str())
+                    .filter(|text| !text.is_empty())
+            })
+            .unwrap_or(&fallback)
+            .to_string(),
+        _ => fallback,
+    }
+}
+
+fn barcode_conf(app: &App) -> serde_json::Map<String, serde_json::Value> {
+    let Some(path) = event_dir(app).map(|dir| dir.join("barcodes.json")) else {
+        return serde_json::Map::new();
+    };
+    match read_stored_json(&path) {
+        Ok(serde_json::Value::Object(map)) => map,
+        _ => serde_json::Map::new(),
+    }
+}
+
+fn conf_count(entry: Option<&serde_json::Value>, key: &str, default: i64) -> i64 {
+    entry
+        .and_then(|value| value.get(key))
+        .and_then(|value| value.as_i64())
+        .filter(|value| *value >= 0)
+        .unwrap_or(default)
+}
+
+fn barcode_counts(app: &App) -> std::collections::HashMap<i64, i64> {
+    CurrentEvent::lock(&app.current)
+        .with_db(|db| {
+            let mut statement = db
+                .file()
+                .prepare("SELECT type, COUNT(*) FROM barcodes GROUP BY type")
+                .ok()?;
+            let rows = statement
+                .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))
+                .ok()?;
+            let mut counts = std::collections::HashMap::new();
+            for row in rows.flatten() {
+                counts.insert(row.0, row.1);
+            }
+            Some(counts)
+        })
+        .flatten()
+        .unwrap_or_default()
+}
+
+fn barcode_rows(app: &App) -> Vec<serde_json::Value> {
+    let categories = read_category_list(event_dir(app).as_deref());
+    let Some(categories) = categories.as_array() else {
+        return Vec::new();
+    };
+    let counts = barcode_counts(app);
+    let conf = barcode_conf(app);
+    categories
+        .iter()
+        .filter_map(|item| {
+            let cat_id = category_id(item)?;
+            let entry = conf.get(&cat_id.to_string());
+            let remaining = counts.get(&cat_id).copied().unwrap_or(0);
+            Some(serde_json::json!({
+                "cat_id": cat_id,
+                "name": category_label(item, cat_id),
+                "remaining": remaining,
+                "total": remaining,
+                "min": conf_count(entry, "min", BARCODE_MIN),
+                "add": conf_count(entry, "add", BARCODE_ADD),
+            }))
+        })
+        .collect()
+}
+
+async fn desk_barcodes(State(app): State<App>, headers: HeaderMap) -> Response {
+    if let Err(response) = require_admin(&app, &headers) {
+        return response;
+    }
+    api_ok(serde_json::Value::Array(barcode_rows(&app)))
+}
+
+async fn desk_barcodes_patch(
     State(app): State<App>,
-    Path(name): Path<String>,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
     if let Err(response) = require_admin(&app, &headers) {
         return response;
     }
-    let Some(name) = segment(&name) else {
+    let Some(dir) = event_dir(&app) else {
+        return api_error(StatusCode::CONFLICT, "no_event");
+    };
+    let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(&body) else {
+        return api_error(StatusCode::BAD_REQUEST, "bad_request");
+    };
+    let Some(cat_id) = parsed.get("cat_id").and_then(|value| value.as_i64()) else {
+        return api_error(StatusCode::BAD_REQUEST, "bad_request");
+    };
+    let Some(min) = parsed.get("min").and_then(|value| value.as_i64()).filter(|value| *value >= 0) else {
+        return api_error(StatusCode::BAD_REQUEST, "bad_request");
+    };
+    let Some(add) = parsed.get("add").and_then(|value| value.as_i64()).filter(|value| *value >= 0) else {
+        return api_error(StatusCode::BAD_REQUEST, "bad_request");
+    };
+    let mut conf = barcode_conf(&app);
+    conf.insert(
+        cat_id.to_string(),
+        serde_json::json!({ "min": min, "add": add }),
+    );
+    let path = dir.join("barcodes.json");
+    let Ok(bytes) = serde_json::to_vec_pretty(&serde_json::Value::Object(conf)) else {
+        return api_error(StatusCode::INTERNAL_SERVER_ERROR, "unknown_error");
+    };
+    if let Err(err) = std::fs::write(&path, bytes) {
+        log::debug!("barcodes {}: {err}", path.display());
+        return api_error(StatusCode::INTERNAL_SERVER_ERROR, "unknown_error");
+    }
+    api_ok(serde_json::Value::Array(barcode_rows(&app)))
+}
+
+async fn printers_index(State(app): State<App>, headers: HeaderMap) -> Response {
+    if let Err(response) = require_desk(&app, &headers) {
+        return response;
+    }
+    let rows = printer_rows(&app);
+    api_ok(serde_json::Value::Array(
+        rows.iter().map(printer_json).collect(),
+    ))
+}
+
+async fn printer_patch(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    if let Err(response) = require_admin(&app, &headers) {
+        return response;
+    }
+    let id = decode_printer_id(id.trim_start_matches('/'));
+    if id.is_empty() || id.contains('\0') {
+        return api_error(StatusCode::NOT_FOUND, "not_found");
+    }
+    let Ok(incoming) = serde_json::from_slice::<serde_json::Value>(&body) else {
+        return api_error(StatusCode::BAD_REQUEST, "bad_request");
+    };
+    let base = CurrentEvent::lock(&app.current).base_dir();
+    let Some(mut card) = crate::registration_server::cups::read_card(&base, &id) else {
         return api_error(StatusCode::NOT_FOUND, "not_found");
     };
-    if serde_json::from_slice::<serde_json::Value>(&body).is_err() {
-        return api_error(StatusCode::BAD_REQUEST, "bad_request");
+    if let Some(name) = incoming.get("name").and_then(|value| value.as_str()) {
+        let name = name.trim();
+        if !name.is_empty() {
+            card.name = name.to_string();
+        }
     }
-    let base = CurrentEvent::lock(&app.current).base_dir();
-    let dir = base.join("printer_conf");
-    if let Err(err) = std::fs::create_dir_all(&dir) {
-        log::debug!("printer conf: {err}");
+    if let Some(hidden) = incoming.get("hidden").and_then(|value| value.as_bool()) {
+        card.hidden = hidden;
+    }
+    if let Some(is_default) = incoming.get("default").and_then(|value| value.as_bool()) {
+        card.is_default = is_default;
+    }
+    if let Some(zone) = incoming.get("zone").and_then(|value| value.as_str()) {
+        card.zone = zone.to_string();
+    }
+    if let Some(category) = incoming.get("category").and_then(|value| value.as_str()) {
+        card.category = category.to_string();
+    }
+    if let Some(print_cert) = incoming.get("print_cert").and_then(|value| value.as_bool()) {
+        card.print_cert = print_cert;
+    }
+    let options = option_map(incoming.get("options"));
+    if let Err(err) = crate::registration_server::cups::save_card(&base, &card) {
+        log::debug!("printer {id}: {err}");
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "unknown_error");
     }
-    let path = dir.join(format!("{name}.json"));
-    if let Err(err) = std::fs::write(&path, &body) {
-        log::debug!("printer {}: {err}", path.display());
-        return api_error(StatusCode::INTERNAL_SERVER_ERROR, "unknown_error");
+    let search = app.search.lock().expect("search").clone();
+    if let Some(search) = search.as_ref() {
+        search.adopt_card(&card);
+        if let Some(options) = options.as_ref() {
+            if let Err(err) = search.save_options(&id, options) {
+                log::debug!("printer {id} options: {err}");
+                return api_error(StatusCode::NOT_FOUND, "not_found");
+            }
+        }
+    } else if options.is_some() {
+        return api_error(StatusCode::NOT_FOUND, "not_found");
     }
-    api_ok(serde_json::json!({}))
+    let (kind, params) = search
+        .as_ref()
+        .and_then(|search| {
+            search
+                .printers()
+                .into_iter()
+                .find(|printer| cups::printer_address(printer) == id)
+                .map(|printer| {
+                    (
+                        printer.kind.as_str().to_string(),
+                        cups::printer_params(&printer),
+                    )
+                })
+        })
+        .unwrap_or_else(|| (String::new(), Vec::new()));
+    api_ok(serde_json::json!({
+        "id": card.id,
+        "name": card.name,
+        "hidden": card.hidden,
+        "default": card.is_default,
+        "zone": card.zone,
+        "category": card.category,
+        "print_cert": card.print_cert,
+        "kind": kind,
+        "params": params,
+    }))
+}
+
+fn option_map(value: Option<&serde_json::Value>) -> Option<std::collections::BTreeMap<String, String>> {
+    let object = value?.as_object()?;
+    let mut options = std::collections::BTreeMap::new();
+    for (key, value) in object {
+        let text = if let Some(text) = value.as_str() {
+            text.to_string()
+        } else if let Some(number) = value.as_i64() {
+            number.to_string()
+        } else {
+            continue;
+        };
+        options.insert(key.clone(), text);
+    }
+    Some(options)
+}
+
+fn decode_printer_id(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            let hex = std::str::from_utf8(&bytes[index + 1..index + 3]).unwrap_or("");
+            if let Ok(byte) = u8::from_str_radix(hex, 16) {
+                out.push(byte);
+                index += 3;
+                continue;
+            }
+        }
+        out.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 pub(crate) fn require_desk(app: &App, headers: &HeaderMap) -> Result<(), Response> {
@@ -1745,8 +2084,105 @@ async fn sync_status(State(app): State<App>, headers: HeaderMap) -> Response {
     }
 }
 
-/// The address this machine would use to reach the network. A UDP connect does not send a packet.
+/// IPv4 addresses on Ethernet and Wi-Fi. `en0` comes before `en1`.
+/// Tunnel interfaces (`utun`, `tun`) and virtual bridges are omitted.
 fn local_addresses() -> Vec<String> {
+    #[cfg(unix)]
+    {
+        let mut found = lan_addresses();
+        found.sort_by(|left, right| {
+            interface_rank(&left.0)
+                .cmp(&interface_rank(&right.0))
+                .then(left.1.cmp(&right.1))
+        });
+        let addresses: Vec<String> = found.into_iter().map(|(_, address)| address).collect();
+        if addresses.is_empty() {
+            vec!["127.0.0.1".to_string()]
+        } else {
+            addresses
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        routed_address()
+    }
+}
+
+/// Wi-Fi and Ethernet names: `en0`, `eth0`, and Linux names such as `enp0s3`.
+fn desk_interface(name: &str) -> bool {
+    if let Some(rest) = name.strip_prefix("en") {
+        if !rest.is_empty() && rest.bytes().all(|byte| byte.is_ascii_digit()) {
+            return true;
+        }
+    }
+    if let Some(rest) = name.strip_prefix("eth") {
+        if !rest.is_empty() && rest.bytes().all(|byte| byte.is_ascii_digit()) {
+            return true;
+        }
+    }
+    name.starts_with("eno")
+        || name.starts_with("ens")
+        || name.starts_with("enp")
+        || name.starts_with("enx")
+}
+
+fn interface_rank(name: &str) -> (u8, u32, &str) {
+    if let Some(rest) = name.strip_prefix("en") {
+        if let Ok(index) = rest.parse::<u32>() {
+            return (0, index, name);
+        }
+    }
+    if let Some(rest) = name.strip_prefix("eth") {
+        if let Ok(index) = rest.parse::<u32>() {
+            return (1, index, name);
+        }
+    }
+    (2, 0, name)
+}
+
+#[cfg(unix)]
+fn lan_addresses() -> Vec<(String, String)> {
+    let mut head = std::ptr::null_mut();
+    if unsafe { libc::getifaddrs(&mut head) } != 0 || head.is_null() {
+        return Vec::new();
+    }
+    let mut found = Vec::new();
+    let mut cursor = head;
+    while !cursor.is_null() {
+        let iface = unsafe { &*cursor };
+        cursor = iface.ifa_next;
+        if iface.ifa_addr.is_null() || iface.ifa_name.is_null() {
+            continue;
+        }
+        let flags = iface.ifa_flags;
+        if flags & libc::IFF_UP as libc::c_uint == 0 || flags & libc::IFF_LOOPBACK as libc::c_uint != 0 {
+            continue;
+        }
+        let family = unsafe { (*iface.ifa_addr).sa_family } as i32;
+        if family != libc::AF_INET {
+            continue;
+        }
+        let name = unsafe { std::ffi::CStr::from_ptr(iface.ifa_name) }.to_string_lossy();
+        if !desk_interface(&name) {
+            continue;
+        }
+        let bits = u32::from_be(unsafe { (*iface.ifa_addr.cast::<libc::sockaddr_in>()).sin_addr.s_addr });
+        let address = std::net::Ipv4Addr::from(bits);
+        if address.is_unspecified() || address.is_loopback() || address.is_link_local() {
+            continue;
+        }
+        let text = address.to_string();
+        if found.iter().any(|(_, kept)| kept == &text) {
+            continue;
+        }
+        found.push((name.into_owned(), text));
+    }
+    unsafe { libc::freeifaddrs(head) };
+    found
+}
+
+#[cfg(not(unix))]
+fn routed_address() -> Vec<String> {
     let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") else {
         return vec!["127.0.0.1".to_string()];
     };
@@ -2732,24 +3168,61 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn printer_patch_writes_the_file() {
-            let mut venue = open_event("EVT");
+        async fn barcode_conf_stores_min_and_add() {
+            let venue = open_event("EVT");
+            let forms = venue.dir.0.join("EVT").join("forms");
+            std::fs::create_dir_all(&forms).unwrap();
+            std::fs::write(
+                forms.join("categories.json"),
+                r#"[{"cat_id":3,"name":{"ru":"Гость"}}]"#,
+            )
+            .unwrap();
             let cookie = admin_cookie(&venue.app);
+            let (status, body, _) = send(&venue.app, "GET", "/api/barcodes", b"", Some(&cookie)).await;
+            assert_eq!(status, StatusCode::OK);
+            let rows = json_body(&body)["data"].as_array().unwrap().clone();
+            let guest = rows.iter().find(|row| row["cat_id"] == 3).unwrap();
+            assert_eq!(guest["name"], "Гость");
+            assert_eq!(guest["remaining"], 0);
+            assert_eq!(guest["min"], 150);
+            assert_eq!(guest["add"], 50);
+
             let (status, _, _) = send(
                 &venue.app,
                 "PATCH",
-                "/api/printers/Zebra",
-                br#"{"values":{"media":"card"}}"#,
+                "/api/barcodes",
+                br#"{"cat_id":3,"min":5,"add":10}"#,
                 Some(&cookie),
             )
             .await;
             assert_eq!(status, StatusCode::OK);
-            let stored =
-                std::fs::read(venue.dir.0.join("printer_conf").join("Zebra.json")).unwrap();
-            assert_eq!(
-                serde_json::from_slice::<serde_json::Value>(&stored).unwrap(),
-                serde_json::json!({ "values": { "media": "card" } })
-            );
+            let (status, body, _) = send(&venue.app, "GET", "/api/barcodes", b"", Some(&cookie)).await;
+            assert_eq!(status, StatusCode::OK);
+            let rows = json_body(&body)["data"].as_array().unwrap().clone();
+            let guest = rows.iter().find(|row| row["cat_id"] == 3).unwrap();
+            assert_eq!(guest["min"], 5);
+            assert_eq!(guest["add"], 10);
+        }
+
+        #[tokio::test]
+        async fn printer_patch_does_not_create_a_printer() {
+            let mut venue = open_event("EVT");
+            let cookie = admin_cookie(&venue.app);
+            let (status, body, _) = send(
+                &venue.app,
+                "PATCH",
+                "/api/printers/ipp%3A%2F%2F192.0.2.9%3A631%2Fipp%2Fprint",
+                br#"{"name":"Zebra"}"#,
+                Some(&cookie),
+            )
+            .await;
+            assert_eq!(status, StatusCode::NOT_FOUND);
+            assert_eq!(json_body(&body)["error"]["code"], "not_found");
+            assert!(crate::registration_server::cups::read_card(
+                &venue.dir.0,
+                "ipp://192.0.2.9:631/ipp/print"
+            )
+            .is_none());
             assert!(venue.worker.try_recv().is_none());
         }
     }
@@ -3036,6 +3509,9 @@ mod tests {
     mod catalog {
         use super::*;
 
+        use crate::registration_server::cups::{self, Search};
+        use crate::registration_server::native_print::Kind;
+
         fn write_categories(venue: &Venue, body: &str) {
             let dir = venue.dir.0.join("EVT").join("forms");
             std::fs::create_dir_all(&dir).unwrap();
@@ -3046,9 +3522,6 @@ mod tests {
         async fn catalog_returns_the_stored_lists() {
             let venue = open_event("EVT");
             write_categories(&venue, r#"[{"cat_id":3,"name":{"ru":"Гость"}}]"#);
-            std::fs::create_dir_all(venue.dir.0.join("printer_conf")).unwrap();
-            std::fs::write(venue.dir.0.join("printer_conf").join("Zebra.json"), b"{}").unwrap();
-            std::fs::write(venue.dir.0.join("EVT").join("pr_HP.json"), b"{}").unwrap();
 
             let (status, body) = call(&venue.app, "/api/desk/catalog").await;
             assert_eq!(status, StatusCode::OK);
@@ -3060,13 +3533,7 @@ mod tests {
             assert_eq!(data["data"]["categories"][0]["name"]["en"], "Exhibitor");
             assert_eq!(data["data"]["categories"][1]["cat_id"], 3);
             assert_eq!(data["data"]["categories"][1]["name"]["ru"], "Гость");
-            let names: Vec<&str> = data["data"]["printers"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|item| item["name"].as_str().unwrap())
-                .collect();
-            assert_eq!(names, vec!["HP", "Zebra"]);
+            assert_eq!(data["data"]["printers"].as_array().unwrap().len(), 0);
 
             write_categories(
                 &venue,
@@ -3119,5 +3586,204 @@ mod tests {
             assert_eq!(data["data"]["categories"][0]["cat_id"], -2);
             assert_eq!(data["data"]["categories"][2]["name"]["ru"], "Пресса");
         }
+
+        fn sample(name: &str, uri: &str, host: &str, state: &str) -> cups::Printer {
+            cups::Printer {
+                name: name.to_string(),
+                device_uri: uri.to_string(),
+                make_model: "HP LaserJet".to_string(),
+                state: state.to_string(),
+                accepting: true,
+                host: host.to_string(),
+                kind: Kind::Raster,
+                dpi: 300,
+                width_in: Some(4.0),
+                choices: Vec::new(),
+                installed: true,
+                connected: true,
+                class: "ipp".to_string(),
+                values: cups::Values::default(),
+                routing: cups::Routing::default(),
+                last_print: 0,
+                formats: ipp_tool::Formats::default(),
+                settings: ipp_tool::Settings::default(),
+                toner: ipp_tool::Toner::default(),
+            }
+        }
+
+        fn admin_cookie(app: &App) -> String {
+            let key = CurrentEvent::lock(&app.current)
+                .with_db(|db| {
+                    db.file()
+                        .query_row("SELECT key FROM keys WHERE is_admin = 1", [], |row| {
+                            row.get::<_, String>(0)
+                        })
+                        .unwrap()
+                })
+                .unwrap();
+            format!("desk={key}")
+        }
+
+        fn operator_cookie(app: &App) -> String {
+            let key = CurrentEvent::lock(&app.current)
+                .with_db(|db| {
+                    db.file()
+                        .query_row("SELECT key FROM keys WHERE is_admin = 0", [], |row| {
+                            row.get::<_, String>(0)
+                        })
+                        .unwrap()
+                })
+                .unwrap();
+            format!("desk={key}")
+        }
+
+        fn printer_uri(id: &str) -> String {
+            let mut out = String::from("/api/printers/");
+            for byte in id.bytes() {
+                match byte {
+                    b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                        out.push(byte as char)
+                    }
+                    _ => out.push_str(&format!("%{byte:02X}")),
+                }
+            }
+            out
+        }
+
+        async fn send(
+            app: &App,
+            method: &str,
+            uri: &str,
+            body: &[u8],
+            cookie: Option<&str>,
+        ) -> (StatusCode, Vec<u8>) {
+            let mut builder = Request::builder().method(method).uri(uri);
+            if !body.is_empty() || method != "GET" {
+                builder = builder.header("content-type", "application/json");
+            }
+            if let Some(cookie) = cookie {
+                builder = builder.header("cookie", cookie);
+            }
+            let response = super::super::router(app.clone())
+                .oneshot(builder.body(Body::from(body.to_vec())).unwrap())
+                .await
+                .unwrap();
+            let status = response.status();
+            let bytes = to_bytes(response.into_body(), 2 * 1024 * 1024)
+                .await
+                .unwrap();
+            (status, bytes.to_vec())
+        }
+
+        #[tokio::test]
+        async fn catalog_uses_search_addresses_and_hides_the_rest() {
+            let venue = open_event("EVT");
+            let search = Search::parked("http://127.0.0.1:9");
+            let front = "ipp://192.0.2.10:631/ipp/print";
+            let side = "ipp://192.0.2.11:631/ipp/print";
+            let stopped = "ipp://192.0.2.12:631/ipp/print";
+            search.set_files(&venue.dir.0, "EVT");
+            search.testing_insert(sample("ECOSYS", front, "192.0.2.10", "idle"));
+            search.testing_insert(sample("ECOSYS", side, "192.0.2.11", "idle"));
+            search.testing_insert(sample("Laser", stopped, "192.0.2.12", "stopped"));
+            *venue.app.search.lock().unwrap() = Some(search);
+
+            let (status, body) = call(&venue.app, "/api/desk/catalog").await;
+            assert_eq!(status, StatusCode::OK);
+            let listed = json_body(&body)["data"]["printers"].as_array().unwrap().clone();
+            assert_eq!(listed.len(), 2);
+            assert_eq!(listed[0]["id"], front);
+            assert_eq!(listed[0]["name"], "ECOSYS");
+            assert_eq!(listed[0]["text"], "ECOSYS (192.0.2.10)");
+            assert_eq!(listed[1]["id"], side);
+            assert_eq!(listed[1]["text"], "ECOSYS (192.0.2.11)");
+            let rev = json_body(&body)["data"]["rev"].as_u64().unwrap();
+
+            let cookie = admin_cookie(&venue.app);
+            let (status, body) = send(&venue.app, "GET", "/api/printers", b"", Some(&cookie)).await;
+            assert_eq!(status, StatusCode::OK);
+            let settings = json_body(&body)["data"].as_array().unwrap().clone();
+            assert_eq!(settings.len(), 3);
+            let stopped_row = settings
+                .iter()
+                .find(|row| row["id"] == stopped)
+                .unwrap();
+            assert_eq!(stopped_row["available"], false);
+            assert_eq!(stopped_row["name"], "Laser");
+
+            let (status, _) = send(
+                &venue.app,
+                "PATCH",
+                &printer_uri(side),
+                br#"{"name":"Side","hidden":true,"zone":"hall","category":"3","print_cert":true,"default":true}"#,
+                Some(&operator_cookie(&venue.app)),
+            )
+            .await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+            let (status, body) = send(
+                &venue.app,
+                "PATCH",
+                &printer_uri(side),
+                br#"{"name":"Side","hidden":true,"zone":"hall","category":"3","print_cert":true,"default":true}"#,
+                Some(&cookie),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(json_body(&body)["data"]["name"], "Side");
+            assert_eq!(json_body(&body)["data"]["id"], side);
+
+            let (status, _) = send(
+                &venue.app,
+                "PATCH",
+                &printer_uri(front),
+                br#"{"default":true}"#,
+                Some(&cookie),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+
+            let (status, body) = call(&venue.app, "/api/desk/catalog").await;
+            assert_eq!(status, StatusCode::OK);
+            let data = json_body(&body);
+            assert_ne!(data["data"]["rev"].as_u64().unwrap(), rev);
+            let listed = data["data"]["printers"].as_array().unwrap();
+            assert_eq!(listed.len(), 1);
+            assert_eq!(listed[0]["id"], front);
+            assert_eq!(listed[0]["name"], "ECOSYS");
+            assert_eq!(listed[0]["text"], "ECOSYS");
+            assert_eq!(listed[0]["default"], true);
+
+            let side_card = cups::read_card(&venue.dir.0, side).unwrap();
+            assert_eq!(side_card.name, "Side");
+            assert!(side_card.hidden);
+            assert!(!side_card.is_default);
+            assert_eq!(side_card.zone, "hall");
+            assert_eq!(side_card.category, "3");
+            assert!(side_card.print_cert);
+            let mut rediscovered = sample("ECOSYS", side, "192.0.2.11", "idle");
+            rediscovered.name = "From the next search".to_string();
+            assert_eq!(
+                cups::ensure_card(&venue.dir.0, &rediscovered).unwrap().name,
+                "Side"
+            );
+        }
+    }
+
+    #[test]
+    fn desk_interfaces_are_ethernet_and_wifi() {
+        assert!(super::desk_interface("en0"));
+        assert!(super::desk_interface("en1"));
+        assert!(super::desk_interface("en10"));
+        assert!(super::desk_interface("eth0"));
+        assert!(super::desk_interface("enp0s3"));
+        assert!(!super::desk_interface("utun4"));
+        assert!(!super::desk_interface("utun0"));
+        assert!(!super::desk_interface("bridge100"));
+        assert!(!super::desk_interface("lo0"));
+        assert!(!super::desk_interface("awdl0"));
+        let addresses = super::local_addresses();
+        assert!(!addresses.iter().any(|address| address == "198.18.0.1"));
+        assert!(!addresses.iter().any(|address| address.starts_with("192.168.64.")));
     }
 }

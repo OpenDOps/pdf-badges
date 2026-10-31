@@ -150,6 +150,52 @@ pub struct Padding {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct Border {
+    pub width: f64,
+    pub color: Rgb,
+}
+
+/// Paint around one content entry. Absent YAML keys stay at the identity:
+/// no fill, no stroke, sharp corners, opaque, scale 1, skew 0.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BoxFrame {
+    pub background: Option<Rgb>,
+    pub border: Option<Border>,
+    pub border_radius: f64,
+    pub opacity: f64,
+    pub scale_x: f64,
+    pub scale_y: f64,
+    pub skew_x: f64,
+    pub skew_y: f64,
+}
+
+impl BoxFrame {
+    pub fn plain() -> Self {
+        Self {
+            background: None,
+            border: None,
+            border_radius: 0.0,
+            opacity: 1.0,
+            scale_x: 1.0,
+            scale_y: 1.0,
+            skew_x: 0.0,
+            skew_y: 0.0,
+        }
+    }
+
+    pub fn is_plain(&self) -> bool {
+        self.background.is_none()
+            && self.border.is_none()
+            && self.border_radius == 0.0
+            && self.opacity == 1.0
+            && self.scale_x == 1.0
+            && self.scale_y == 1.0
+            && self.skew_x == 0.0
+            && self.skew_y == 0.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct FontStyle {
     pub weight: String,
     pub italic: bool,
@@ -165,6 +211,8 @@ pub struct TextBody {
     pub font_style: FontStyle,
     /// Ink color for the box. Missing means black.
     pub color: Option<Rgb>,
+    /// Extra advance after each glyph, in page units. `0` leaves `Tc` unset.
+    pub letter_spacing: f64,
     pub preentered: Option<String>,
     pub content: Option<String>,
 }
@@ -186,6 +234,7 @@ pub struct TextBox {
     pub delimiter_close: String,
     /// Clockwise degrees. `90` turns the text so it reads upward along the box height.
     pub rotation: i32,
+    pub frame: BoxFrame,
     pub text: TextBody,
 }
 
@@ -197,6 +246,7 @@ pub struct ImagePlacement {
     pub pos_y: f64,
     pub width: f64,
     pub height: f64,
+    pub frame: BoxFrame,
     pub resource_name: String,
 }
 
@@ -212,6 +262,7 @@ pub struct Barcode {
     pub template: bool,
     pub delimiter_open: String,
     pub delimiter_close: String,
+    pub frame: BoxFrame,
     pub preentered: Option<String>,
     pub content: Option<String>,
 }
@@ -224,8 +275,29 @@ pub struct Photo {
     pub pos_y: f64,
     pub width: f64,
     pub height: f64,
+    pub frame: BoxFrame,
     pub field: String,
     pub bytes: Option<Vec<u8>>,
+}
+
+impl ContentEntry {
+    pub fn frame(&self) -> &BoxFrame {
+        match self {
+            Self::Text(text) => &text.frame,
+            Self::Image(image) => &image.frame,
+            Self::Barcode(code) => &code.frame,
+            Self::Photo(photo) => &photo.frame,
+        }
+    }
+
+    pub fn bounds(&self) -> (f64, f64, f64, f64) {
+        match self {
+            Self::Text(text) => (text.pos_x, text.pos_y, text.width, text.height),
+            Self::Image(image) => (image.pos_x, image.pos_y, image.width, image.height),
+            Self::Barcode(code) => (code.pos_x, code.pos_y, code.width, code.height),
+            Self::Photo(photo) => (photo.pos_x, photo.pos_y, photo.width, photo.height),
+        }
+    }
 }
 
 pub fn load_page(path: &Path) -> Result<Page, RenderError> {
@@ -507,6 +579,7 @@ fn parse_content(index: usize, value: &Value) -> Result<ContentEntry, RenderErro
     let width = required_finite(obj, "width", &format!("id={id}"), false)?;
     let height = required_finite(obj, "height", &format!("id={id}"), false)?;
     let if_st = parse_if_st(obj, &id)?;
+    let frame = parse_box_frame(obj, &id, width, height)?;
 
     if obj.get("text").is_some_and(|value| !value.is_null()) {
         let text_obj = object(obj.get("text"), &format!("id={id} text"))?;
@@ -527,10 +600,12 @@ fn parse_content(index: usize, value: &Value) -> Result<ContentEntry, RenderErro
             delimiter_open,
             delimiter_close,
             rotation: parse_rotation(obj, &id)?,
+            frame,
             text: parse_text(text_obj, &text_obj_id_from(obj))?,
         }))
     } else if obj.get("barcode").is_some_and(|value| !value.is_null()) {
         let barcode = object(obj.get("barcode"), &format!("id={id} barcode"))?;
+        reject_letter_spacing(barcode, &id)?;
         let template = parse_template(obj, &id)?;
         let (delimiter_open, delimiter_close) = parse_delimiters(obj, &id, template)?;
         Ok(ContentEntry::Barcode(Barcode {
@@ -544,12 +619,14 @@ fn parse_content(index: usize, value: &Value) -> Result<ContentEntry, RenderErro
             template,
             delimiter_open,
             delimiter_close,
+            frame,
             preentered: optional_string(barcode, "preentered"),
             content: optional_content(barcode),
         }))
     } else if obj.get("photo").is_some_and(|value| !value.is_null()) {
         reject_template_keys(obj, &id)?;
         let photo = object(obj.get("photo"), &format!("id={id} photo"))?;
+        reject_letter_spacing(photo, &id)?;
         let field = optional_string(photo, "field").ok_or_else(|| RenderError {
             context: id.clone(),
             message: "field is missing".to_string(),
@@ -561,12 +638,14 @@ fn parse_content(index: usize, value: &Value) -> Result<ContentEntry, RenderErro
             pos_y,
             width,
             height,
+            frame,
             field,
             bytes: None,
         }))
     } else {
         reject_template_keys(obj, &id)?;
         let image_obj = object(obj.get("image"), &format!("id={id} image"))?;
+        reject_letter_spacing(image_obj, &id)?;
         let resource_name =
             optional_string(image_obj, "resource_name").ok_or_else(|| RenderError {
                 context: id.clone(),
@@ -579,9 +658,154 @@ fn parse_content(index: usize, value: &Value) -> Result<ContentEntry, RenderErro
             pos_y,
             width,
             height,
+            frame,
             resource_name,
         }))
     }
+}
+
+fn parse_box_frame(
+    obj: &Map<String, Value>,
+    id: &str,
+    width: f64,
+    height: f64,
+) -> Result<BoxFrame, RenderError> {
+    if obj.contains_key("letter_spacing") {
+        return Err(RenderError {
+            context: id.to_string(),
+            message: "letter_spacing belongs on text".to_string(),
+        });
+    }
+    let background = match obj.get("background") {
+        None => None,
+        Some(value) => Some(parse_rgb(value, &format!("id={id} background"))?),
+    };
+    let border = parse_border(obj, id)?;
+    let border_radius = finite_number(obj, "border_radius", id)?.unwrap_or(0.0);
+    if border_radius < 0.0 {
+        return Err(RenderError {
+            context: id.to_string(),
+            message: "border_radius must be >= 0".to_string(),
+        });
+    }
+    if border_radius > width.min(height) / 2.0 {
+        return Err(RenderError {
+            context: id.to_string(),
+            message: "border_radius is larger than half the shorter side".to_string(),
+        });
+    }
+    let opacity = finite_number(obj, "opacity", id)?.unwrap_or(1.0);
+    if !(0.0..=1.0).contains(&opacity) {
+        return Err(RenderError {
+            context: id.to_string(),
+            message: "opacity must be from 0 to 1".to_string(),
+        });
+    }
+    let scale_x = optional_scale(obj, "scale_x", id)?;
+    let scale_y = optional_scale(obj, "scale_y", id)?;
+    let skew_x = optional_skew(obj, "skew_x", id)?;
+    let skew_y = optional_skew(obj, "skew_y", id)?;
+    Ok(BoxFrame {
+        background,
+        border,
+        border_radius,
+        opacity,
+        scale_x,
+        scale_y,
+        skew_x,
+        skew_y,
+    })
+}
+
+fn parse_border(obj: &Map<String, Value>, id: &str) -> Result<Option<Border>, RenderError> {
+    let Some(value) = obj.get("border") else {
+        return Ok(None);
+    };
+    let border = value.as_object().ok_or_else(|| RenderError {
+        context: id.to_string(),
+        message: "border must be an object".to_string(),
+    })?;
+    if !border.contains_key("color") {
+        return Err(RenderError {
+            context: id.to_string(),
+            message: "border color is missing".to_string(),
+        });
+    }
+    let width = finite_number(border, "width", id)?.ok_or_else(|| RenderError {
+        context: id.to_string(),
+        message: "border width is missing".to_string(),
+    })?;
+    if width <= 0.0 {
+        return Err(RenderError {
+            context: id.to_string(),
+            message: "border width must be > 0".to_string(),
+        });
+    }
+    let color = parse_rgb(
+        border.get("color").expect("color"),
+        &format!("id={id} border.color"),
+    )?;
+    Ok(Some(Border { width, color }))
+}
+
+fn optional_scale(obj: &Map<String, Value>, key: &str, id: &str) -> Result<f64, RenderError> {
+    let value = finite_number(obj, key, id)?.unwrap_or(1.0);
+    if value == 0.0 {
+        return Err(RenderError {
+            context: id.to_string(),
+            message: format!("{key} must not be 0"),
+        });
+    }
+    Ok(value)
+}
+
+fn optional_skew(obj: &Map<String, Value>, key: &str, id: &str) -> Result<f64, RenderError> {
+    let degrees = finite_number(obj, key, id)?.unwrap_or(0.0);
+    let quarter = (degrees / 90.0).rem_euclid(2.0);
+    if (quarter - 1.0).abs() < 1e-6 || !degrees.to_radians().tan().is_finite() {
+        return Err(RenderError {
+            context: id.to_string(),
+            message: format!("{key} has no finite tangent"),
+        });
+    }
+    Ok(degrees)
+}
+
+fn finite_number(
+    obj: &Map<String, Value>,
+    key: &str,
+    id: &str,
+) -> Result<Option<f64>, RenderError> {
+    match obj.get(key) {
+        None => Ok(None),
+        Some(value) => {
+            let number = as_f64(value).ok_or_else(|| RenderError {
+                context: id.to_string(),
+                message: format!("{key} must be a number"),
+            })?;
+            if !number.is_finite() {
+                return Err(RenderError {
+                    context: id.to_string(),
+                    message: format!("{key} must be finite"),
+                });
+            }
+            Ok(Some(number))
+        }
+    }
+}
+
+fn reject_letter_spacing(obj: &Map<String, Value>, id: &str) -> Result<(), RenderError> {
+    if obj.contains_key("letter_spacing") {
+        return Err(RenderError {
+            context: id.to_string(),
+            message: "letter_spacing is only valid on a text box".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn parse_letter_spacing(obj: &Map<String, Value>, id: &str) -> Result<f64, RenderError> {
+    finite_number(obj, "letter_spacing", id).map(|value| value.unwrap_or(0.0))
 }
 
 fn parse_if_st(obj: &Map<String, Value>, id: &str) -> Result<String, RenderError> {
@@ -851,6 +1075,7 @@ fn parse_text(obj: &Map<String, Value>, id: &str) -> Result<TextBody, RenderErro
         line_height,
         font_style: parse_font_style(obj.get("font_style")),
         color,
+        letter_spacing: parse_letter_spacing(obj, id)?,
         preentered: optional_text(obj.get("preentered")),
         content: optional_text(obj.get("content")),
     })

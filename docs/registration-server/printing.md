@@ -141,11 +141,14 @@ A stopped queue, or one that rejects jobs, is resumed when it is first adopted, 
 
 ### The printer record
 
-Finding builds one `Printer` per queue, plus one for each device that could not be installed. The record is memory. Cupsd owns the queue. Two JSON files own what the operator set.
+Finding builds one `Printer` per queue, plus one for each device that could not be installed. The record is memory. Cupsd owns the queue. The address file owns the display name, visibility, the default, and the routing fields the desk edits. Options and the rest of the routing record stay in the YAML files below.
 
 | field | source | kept |
 |---|---|---|
-| `name` | queue name | the id. Routing and settings files use it |
+| address | `device_uri`, or the host, or `name` when both are empty | the id. The desk catalog, `GET /api/printers`, and `PATCH /api/printers/{id}` use it. The file name is the hex of that address |
+| `name` | search, then the address file | the display name. Written from the search only when that address has no file yet |
+| `hidden` | address file | when set, the printer is left out of `GET /api/desk/catalog` |
+| `default` | address file | the desk fallback when the selected printer leaves the list. At most one printer has it |
 | `class` | where the printer lives | `native` for an operating-system queue, including one whose URI is `ipp://` or `ipps://`. `ipp` for a printer with no operating-system queue |
 | `device_uri` | queue, or the device when there is no queue | refreshed on each search |
 | `make`, `model` | `printer-make-and-model`, or the `usb://` URI for a new device | refreshed on each search |
@@ -157,9 +160,11 @@ Finding builds one `Printer` per queue, plus one for each device that could not 
 | `width_in` | kind | 4.1 for ZPL, 2.125 for Evolis. A raster queue takes the layout width when the job is built |
 | `choices` | PPD option list | name to allowed values. `PageSize` is left out. Media size comes from the layout on the job |
 | `values` | `base/printer_conf/{name}.yml` | the operator's saved options. Written when the operator saves. Applied as IPP options on the job |
-| `routing` | `base/{event_id}/pr_{name}.yml` | this event only. See below |
+| `routing` | `base/{event_id}/pr_{name}.yml`, then the address file | this event only. See below. `zone`, `category`, and `print_cert` on the address file replace those three fields from the YAML |
 
-`values` survive an event switch. They describe the printer on this device. `routing` does not. It describes how this event uses that printer. A pick reads the current list. That list gains a printer when a search finds a device it did not already have, and it loses a printer only after both tools finish a search that did not find it. The list is not cleared and refilled as a whole, so a pick never observes a map that was emptied and not yet rebuilt. `getPrintersData` in the Scala client clears that map on every call.
+Search writes `base/printer_conf/{hex}.json` when the event files are set and that address has no file. The file is `id`, `name`, `hidden`, `default`, `zone`, `category`, and `print_cert`. A later search reads it and does not replace `name`. `PATCH /api/printers/{id}` updates an existing file. The path is the address, percent-encoded. An admin desk key is required. An unknown address is 404 and no file is created. `default` true clears that flag on the other files. `GET /api/printers` requires a desk cookie and returns every file, including a hidden printer and one that is not available. Available means connected, accepting jobs, and not stopped. A file whose printer is gone stays in that list with `available` false.
+
+`values` survive an event switch. They describe the printer on this device. The YAML routing file does not: it lives in the event directory. The address file sits next to the credentials, so its name, `hidden`, `default`, `zone`, `category`, and `print_cert` are shared by events. Those three routing fields replace the same fields from the event YAML. The printer settings screen writes them. A pick reads the current list. That list gains a printer when a search finds a device it did not already have, and it loses a printer only after both tools finish a search that did not find it. The list is not cleared and refilled as a whole, so a pick never observes a map that was emptied and not yet rebuilt. `getPrintersData` in the Scala client clears that map on every call.
 
 ZPL `values` are `zeMediaTracking`, `MediaType`, `zePrintMode`, `Speed`, `Darkness`, `zpl_label_shift`, `zpl_label_top`, `zpl_tear_off`. The first three also go out as IPP options. All seven are written into the `^XA` block by the registration server. Evolis stores `InkType`. A raster queue stores the PPD options the operator changed. A missing settings file is written on the first search, from the PPD defaults, the same way `initPrint` writes `{name}.yml` when the file is absent. Both files carry `class`.
 

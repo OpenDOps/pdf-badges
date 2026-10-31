@@ -2,7 +2,7 @@
 
 Build sequence for [design.md](design.md). The service watches a Google Sheet, keeps a UID on each data row, and queues the rows that changed since the last committed scan.
 
-The crate is Rust, `modules/google-tables`, and the release ships one static binary. Steps 1 through 12 do not change excel-tooling. Steps 13 through 16 move it onto the same Rust grid crate. Unit tests are `cargo test -p google-tables` and do not call Google. The live sheet is step 10. It is ignored unless `GOOGLE_TABLES_LIVE=1`.
+The crate is Rust, `modules/google-tables`, and the release ships one static binary. Steps 1 through 12, and step 17, do not change excel-tooling. Steps 13 through 16 move it onto the same Rust grid crate. Unit tests are `cargo test -p google-tables` and do not call Google. The live sheet is step 10. It is ignored unless `GOOGLE_TABLES_LIVE=1`.
 
 Each step is one change. The tests named in the step land with it and stay green. A later step keeps the earlier tests passing.
 
@@ -20,15 +20,15 @@ Redis Streams and Cloud Pub/Sub can carry the same messages. Redis is a second d
 
 | Step | What it covers | Status |
 |---|---|---|
-| [1. Grid rules](#step-1-grid-rules) | Port header, letter, and cell-type rules, checked against the excel fixtures | not started |
-| [2. Package and proto](#step-2-package-and-proto) | google-tables package, stubs, empty server | not started |
-| [3. Recorded grid](#step-3-recorded-grid) | A Sheets payload becomes a header and typed cells | not started |
-| [4. UID and hash](#step-4-uid-and-hash) | Ids, the fingerprint formula, the content hash | not started |
-| [5. LMDB snapshot](#step-5-lmdb-snapshot) | Diff, event append, mass-delete hold | not started |
-| [6. Cycle](#step-6-cycle) | Quiet version, narrow read, backoff, on a fake Google | not started |
-| [7. Setup RPCs](#step-7-setup-rpcs) | Open through ReadTable, still on the fake | not started |
-| [8. Watch and subscribe](#step-8-watch-and-subscribe) | The loop queues events, Subscribe reads them | not started |
-| [9. Container](#step-9-container) | Image, compose, smoke against the fake | not started |
+| [1. Grid rules](#step-1-grid-rules) | Port header, letter, and cell-type rules, checked against the excel fixtures | done |
+| [2. Package and proto](#step-2-package-and-proto) | google-tables package, stubs, empty server | done |
+| [3. Recorded grid](#step-3-recorded-grid) | A Sheets payload becomes a header and typed cells | done |
+| [4. UID and hash](#step-4-uid-and-hash) | Ids, the fingerprint formula, the content hash | done |
+| [5. LMDB snapshot](#step-5-lmdb-snapshot) | Diff, event append, mass-delete hold | done |
+| [6. Cycle](#step-6-cycle) | Quiet version, narrow read, backoff, on a fake Google | done |
+| [7. Setup RPCs](#step-7-setup-rpcs) | Open through ReadTable, still on the fake | done |
+| [8. Watch and subscribe](#step-8-watch-and-subscribe) | The loop queues events, Subscribe reads them | done |
+| [9. Container](#step-9-container) | Image, compose, smoke against the fake | done |
 | [10. Live sheet](#step-10-live-sheet) | A real editable sheet, diffs queued from the last scan | not started |
 | [11. Drive changes](#step-11-drive-changes) | One account feed wakes the watched file | not started |
 | [12. JetStream](#step-12-jetstream) | A second process consumes the same events | not started |
@@ -36,6 +36,9 @@ Redis Streams and Cloud Pub/Sub can carry the same messages. Redis is a second d
 | [14. Calc source](#step-14-calc-source) | Rust drives headless Calc through the UNO libraries | not started |
 | [15. Excel service](#step-15-excel-service) | The excel gRPC server on that crate | not started |
 | [16. Retire the Python reader](#step-16-retire-the-python-reader) | The image is the Rust binary plus LibreOffice | not started |
+| [17. Audit fixes](#step-17-audit-fixes) | Open issues in the steps 1–8 implementation | not started |
+
+Steps 1 through 8 are implemented and their own tests are green. That implementation still has open issues. They are listed in [audit.md](audit.md). The fixes are step 17.
 
 Shared rules:
 
@@ -149,7 +152,7 @@ The diff and the event log exist, with no Google and no gRPC. This is the queue 
 1. Open one LMDB file with sub-databases `idx`, `row`, `evt`, and `watch`.
 2. Sort the scanned UIDs and merge with the `idx` cursor.
 3. One write transaction puts changed rows, deletes missing UIDs, appends one `RowChange` each, and stores `version` only when asked.
-4. Above 30 percent deletes, and at least 10 stored UIDs, commit nothing and set `needs_confirm`.
+4. Above 30 percent deletes, and at least 10 stored UIDs, store a `massive_delete` snapshot of the sheet and then append the `DELETED` events.
 5. `ReadStored` is a read transaction that returns rows and `snapshot_seq`.
 
 ### Test plan
@@ -158,7 +161,7 @@ The diff and the event log exist, with no Google and no gRPC. This is the queue 
 |---|---|
 | `add_update_delete` | A new UID appends `ADDED`. The same fingerprint appends nothing. A new hash appends `UPDATED` and lists the changed name. A UID dropped from the scan appends `DELETED`. |
 | `move_is_quiet` | A new sheet row with the same hash updates `idx` and appends no event. |
-| `mass_delete_holds` | 10 stored UIDs and 4 missing from the scan leave the rows in place, status `needs_confirm`, and the log unchanged. A commit with `confirm` appends 4 `DELETED` events. |
+| `mass_delete_snapshots` | 10 stored UIDs and 4 missing from the scan append 4 `DELETED` events and keep a snapshot of the 10 rows from before the delete. |
 | `snapshot_seq` | The read transaction's sequence equals the last appended event. |
 
 ### Done when
@@ -230,7 +233,7 @@ A caller can open a fixture spreadsheet, pick the header, exclude a column, ensu
 1. `StartWatch` persists the mapping and starts the loop. The test clock fires the 10-second wait.
 2. `Subscribe` yields the log after `after_seq`, then waits for new commits.
 3. A sequence older than the retained window returns `OUT_OF_RANGE`.
-4. `SyncNow` runs one cycle. `confirm` applies a held mass delete.
+4. `SyncNow` runs one cycle. A mass delete stores a snapshot and applies the deletes. `ListSnapshots` and `GetSnapshot` read those copies.
 5. Restart the server object against the same LMDB file and show the watch resumes without `OpenSpreadsheet`.
 
 ### Test plan
@@ -307,6 +310,7 @@ Type this on the first sheet. Row 1 is the header. Leave row 4 empty on purpose.
 1. A live client, skipped unless `GOOGLE_TABLES_LIVE=1`, reads `GOOGLE_TABLES_CREDENTIALS` and `GOOGLE_TABLES_SPREADSHEET_ID`.
 2. It calls `OpenSpreadsheet`, `SelectHeader` on row 1, `SetColumnOptions` for `Clock`, `EnsureIdentity`, and `StartWatch` with push off.
 3. It stays subscribed and prints each queued event as one line: sequence, kind, UID, and the names of the changed columns.
+4. Every Sheets and Drive call goes through the shared `Limiter`: 60 reads and 60 writes per minute per `credentials_ref`, 300 per minute for the project, and one backoff exponent per account. `limiter_caps_reads` and `limiter_shares_backoff` cover the buckets. The live client uses that same limiter.
 
 ### Test plan
 
@@ -466,3 +470,24 @@ The excel image runs the Rust binary next to soffice. The Python package is no l
 ### Done when
 
 The smoke command exits 0. google-tables and excel-tooling both link `sheet-grid`, and a header-rule change is a change to that crate alone.
+
+## Step 17. Audit fixes
+
+[Back to summary](#summary)
+
+Steps 1 through 8 are in the tree. Their tests pass. The behavior still disagrees with the design in the open items of [audit.md](audit.md): GT-11 through GT-18, and GT-22 through GT-35. Items already marked fixed there stay fixed. This step does not start steps 9 through 16.
+
+### Work
+
+1. Take the open audit items in order. Each fix is the one proposed in that item.
+2. When an item's test is green, mark it fixed in [audit.md](audit.md). Record a design rule only when the fix changes one.
+
+### Test plan
+
+| Scenario | Assert |
+|---|---|
+| `audit_suite` | `cargo test -p google-tables` stays green. Each item adds the test its fix names. |
+
+### Done when
+
+Every open item in [audit.md](audit.md) is marked fixed, and `cargo test -p google-tables` passes.

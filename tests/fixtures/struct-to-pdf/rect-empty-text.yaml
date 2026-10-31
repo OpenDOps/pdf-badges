@@ -1,0 +1,39 @@
+page_size:
+  width: 100
+  height: 100
+  units: mm
+  bleeds:
+    top: 0
+    right: 0
+    bottom: 0
+    left: 0
+resources:
+  images: {}
+  fonts:
+    text:
+      font_family: Liberation Serif
+contents:
+  - id: p1-t1
+    posX: 5
+    posY: 5
+    width: 20
+    height: 10
+    preentered: ""
+    content: null
+    background: "#FFFFFF"
+    border:
+      width: 0.2
+      color: "#000000"
+    alignment:
+      horizontal: left
+      vertical: top
+    padding:
+      top: 0
+      right: 0
+      bottom: 0
+      left: 0
+    text:
+      font: text
+      font_size: 4.233
+      leading: 0
+      line_height: 5.08

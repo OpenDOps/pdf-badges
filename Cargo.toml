@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "modules/ticket-render", "modules/ipp-tool"]
+members = [".", "modules/ticket-render", "modules/ipp-tool", "modules/google-tables"]
 exclude = ["desk"]
 
 [package]

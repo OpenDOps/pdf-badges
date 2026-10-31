@@ -348,7 +348,22 @@ impl Search {
         let source = source_of(&badges, request.category, certificate)?;
         let (width_in, height_in) = inches_of(&badges, &source)?;
         let dpi = capped_dpi(i32::from(printer.dpi), width_in, height_in, cap);
-        draw_for_queue(&badges, printer, &source, fields, dpi, width_in, height_in)
+        let drawn = draw_for_queue(&badges, printer, &source, fields, dpi, width_in, height_in)?;
+        let render = match &drawn {
+            Drawn::Pdf(_) => "pdf",
+            Drawn::Job(_) => "raster",
+        };
+        log::debug!(
+            "print draw id={} template={} render={render} formats={:?} preferred={:?} default={:?} printer={} uri={}",
+            request.id,
+            template_of(self, &source),
+            printer.formats.supported,
+            printer.formats.preferred,
+            printer.formats.default,
+            printer.name,
+            printer.device_uri
+        );
+        Ok(drawn)
     }
 
     fn render_offline(
@@ -526,6 +541,9 @@ impl Search {
                 .await
             {
                 Ok(id) => ids.push(id),
+                Err(err) if err.is_still_processing() => {
+                    log::debug!("print left on printer: {err}");
+                }
                 Err(err) => {
                     self.restore(ready.is_zone, &ready.key, ready.slide);
                     return Err(err);
@@ -567,6 +585,10 @@ impl Search {
         };
         match self.submit(&ready.printer, &Page::Pdf { bytes: ready.bytes }) {
             Ok(id) => Ok(id),
+            Err(err) if err.is_still_processing() => {
+                log::debug!("print left on printer: {err}");
+                Err(err)
+            }
             Err(err) => {
                 self.restore(ready.is_zone, &ready.key, ready.slide);
                 Err(err)
@@ -593,6 +615,16 @@ impl Search {
                 return Err(Error::new(message));
             }
         };
+        let kind = if bytes.starts_with(b"%PDF") {
+            "pdf"
+        } else {
+            "other"
+        };
+        log::debug!(
+            "print rendered {kind} bytes={} printer={}",
+            bytes.len(),
+            slide.printer
+        );
         let printer = match self.printer_named(&slide.printer) {
             Ok(printer) => printer,
             Err(err) => {
@@ -672,6 +704,25 @@ fn job_of(request: &PrintRequest) -> Job {
         zone: request.zone.clone(),
         rule: request.rule.clone(),
     }
+}
+
+fn template_of(search: &Search, source: &Source) -> String {
+    let category = match source {
+        Source::Page(category) | Source::Layout(category) => *category,
+    };
+    let Ok(event) = event_dir(search) else {
+        return format!("badge/{category}");
+    };
+    let folder = event.join("badge").join(category.to_string());
+    if matches!(source, Source::Page(_)) {
+        for name in ["page.yaml", "page.yml", "page.json"] {
+            let path = folder.join(name);
+            if path.is_file() {
+                return path.display().to_string();
+            }
+        }
+    }
+    folder.display().to_string()
 }
 
 fn source_of(badges: &Badges, category: i64, certificate: bool) -> Result<Source, Error> {

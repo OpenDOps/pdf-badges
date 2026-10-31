@@ -1,0 +1,75 @@
+{
+  "sheets": [
+    {
+      "properties": {
+        "sheetId": 0,
+        "title": "Visitors",
+        "gridProperties": { "rowCount": 1000, "columnCount": 26 }
+      },
+      "data": [
+        {
+          "startRow": 0,
+          "startColumn": 0,
+          "rowData": [
+            {
+              "values": [
+                {
+                  "formattedValue": "Quarter report",
+                  "effectiveValue": { "stringValue": "Quarter report" }
+                }
+              ]
+            },
+            {
+              "values": [
+                {
+                  "formattedValue": "Name",
+                  "effectiveValue": { "stringValue": "Name" }
+                },
+                {
+                  "formattedValue": "City",
+                  "effectiveValue": { "stringValue": "City" }
+                },
+                {
+                  "formattedValue": "Amount",
+                  "effectiveValue": { "stringValue": "Amount" }
+                }
+              ]
+            },
+            {},
+            {
+              "values": [
+                {
+                  "formattedValue": "Ann",
+                  "effectiveValue": { "stringValue": "Ann" }
+                },
+                {},
+                {
+                  "formattedValue": "2",
+                  "effectiveValue": { "numberValue": 2 },
+                  "effectiveFormat": { "numberFormat": { "type": "NUMBER" } }
+                }
+              ]
+            },
+            {
+              "values": [
+                {
+                  "formattedValue": "Bo",
+                  "effectiveValue": { "stringValue": "Bo" }
+                },
+                {
+                  "formattedValue": "2024-03-15",
+                  "effectiveValue": { "numberValue": 45366 },
+                  "effectiveFormat": { "numberFormat": { "type": "DATE" } }
+                },
+                {
+                  "formattedValue": "note",
+                  "effectiveValue": { "stringValue": "note" }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

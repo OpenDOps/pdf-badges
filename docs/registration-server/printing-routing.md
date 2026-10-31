@@ -2,11 +2,11 @@
 
 How a print job chooses a device. The stored fields are [printing.md](printing.md). A pick reads the current printer list from [Finding](printing.md#finding). Viewers subscribe to that same list. The searching list is internal to the aggregator and is not a routing source. The devices on the current list come from [printing-implementation-plan.md](printing-implementation-plan.md) steps 12 and 13. This routing is implemented in step 15 of that plan. Step 19 holds PDF pages, and a zone uses the one window defined here.
 
-A printer can take a job when it is connected, installed, and used. An explicit queue name returns that printer when it can take a job.
+A printer can take a job when it is connected, installed, and used. An explicit queue name or address returns that printer when it can take a job. The address is `device_uri`. The desk select sends that address. Hiding a printer removes it from the desk catalog. It does not by itself clear `used`.
 
 ## What the job carries
 
-The job names the visitor category. The operator UI can mark the job with a special attribute. Print certificate is that attribute: the visitor screen's "Заказать сертификат". The job can also name a zone. A caller can name a queue.
+The job names the visitor category. The operator UI can mark the job with a special attribute. Print certificate is that attribute: the visitor screen's "Заказать сертификат". The job can also name a zone. A caller can name a queue by its display name or by its address. The printer settings screen stores `print_cert`, `category`, and `zone` on the address file. Those three fields are the ones this pick reads after the file is applied.
 
 `is_internet` on a printer stays a filter. A printer with that flag set stays only when the flag equals the job's internet flag. A printer with the flag empty stays only when no used printer has that flag.
 

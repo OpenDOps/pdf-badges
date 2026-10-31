@@ -1,0 +1,9 @@
+{
+  "id": "ipp://192.168.64.1:631/printers/Kyocera_ECOSYS_M2235dn",
+  "name": "ECOSYS M2235dn-AirPrint",
+  "hidden": false,
+  "default": false,
+  "zone": "",
+  "category": "",
+  "print_cert": false
+}

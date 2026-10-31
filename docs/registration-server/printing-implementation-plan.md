@@ -417,6 +417,8 @@ Settings belong to the device. Routing belongs to the open event. Both files are
 3. `save_routing` writes every field, including when second name is empty, and writes `class`.
 4. Search does not send the file values to cupsd.
 
+The desk id is a third file, `base/printer_conf/{hex}.json`, written the first time that address is seen. It holds `id`, `name`, `hidden`, `default`, `zone`, `category`, and `print_cert`. The searched name is copied only when the file is absent. `zone`, `category`, and `print_cert` in it replace those fields from `pr_{name}.yml`. `PATCH /api/printers/{id}` updates this file and does not create one. [printing.md](printing.md) is the record.
+
 ### Test scenarios
 
 | Scenario | Assert |

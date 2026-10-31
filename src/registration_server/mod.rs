@@ -199,6 +199,14 @@ pub async fn serve(
         "http://127.0.0.1:631",
         std::sync::Arc::new(ipp_tool::MdnsBrowse),
     );
+    {
+        let current = current::CurrentEvent::lock(&app.current);
+        if let Some(event_id) = current.event_id() {
+            let base = current.base_dir();
+            drop(current);
+            search.set_files(&base, &event_id);
+        }
+    }
     *app.search.lock().expect("search") = Some(search.clone());
     tokio::try_join!(
         http::serve(http, app.clone(), http_shutdown),

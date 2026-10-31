@@ -1,0 +1,51 @@
+@import '@fortawesome/fontawesome-free/css/fontawesome.min.css';
+@import '@fortawesome/fontawesome-free/css/solid.min.css';
+@import '@fortawesome/fontawesome-free/css/regular.min.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  // Default the application to a light color theme. This can be changed to
+  // `dark` to enable the dark color theme, or to `light dark` to defer to the
+  // user's system settings.
+  color-scheme: light;
+
+  // Set a default background, font and text colors for the application using
+  // Angular Material's system-level CSS variables. Learn more about these
+  // variables at https://material.angular.dev/guide/system-variables
+  margin: 0;
+  // Reset the user agent margin.
+  margin: 0;
+}
+/* You can add global styles to this file, and also import other style files */
+
+html, body { height: 100%; }
+body { margin: 0; font-family: Roboto, "Helvetica Neue", sans-serif; }
+
+/* GrapesJS (визуальный редактор макетов, operator/templates/visual-editor):
+   светлая тема вместо встроенной тёмной и холст на всю область — по умолчанию
+   GrapesJS оставляет 15% справа и 40px сверху под собственные панели, которых
+   здесь нет (менеджеры свойств/стилей/слоёв вынесены в свои контейнеры). */
+app-visual-editor {
+  --gjs-main-color: #ffffff;
+  --gjs-primary-color: #ffffff;
+  --gjs-secondary-color: #1f2937;
+  --gjs-tertiary-color: #296df2;
+  --gjs-quaternary-color: #296df2;
+  --gjs-font-color: #374151;
+  --gjs-font-color-active: #111827;
+  --gjs-main-dark-color: rgba(0, 0, 0, 0.05);
+  --gjs-secondary-dark-color: rgba(0, 0, 0, 0.04);
+  --gjs-main-light-color: rgba(0, 0, 0, 0.04);
+  --gjs-secondary-light-color: rgba(0, 0, 0, 0.45);
+  --gjs-soft-light-color: rgba(0, 0, 0, 0.02);
+  --gjs-left-width: 0px;
+  --gjs-canvas-top: 0px;
+
+  .gjs-editor,
+  .gjs-cv-canvas-bg {
+    background-color: #e5e7eb;
+  }
+}

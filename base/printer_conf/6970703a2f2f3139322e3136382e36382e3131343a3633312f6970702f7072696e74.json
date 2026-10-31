@@ -1,0 +1,9 @@
+{
+  "id": "ipp://192.168.68.114:631/ipp/print",
+  "name": "ECOSYS P5026cdw",
+  "hidden": false,
+  "default": false,
+  "zone": "",
+  "category": "",
+  "print_cert": false
+}

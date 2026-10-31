@@ -1,0 +1,103 @@
+page_size:
+  width: 210
+  height: 297
+  units: mm
+  bleeds:
+    top: 0
+    right: 0
+    bottom: 0
+    left: 0
+resources:
+  images:
+    ticket_visitor_pirexpo2026:
+      name: ticket_visitor_pirexpo2026
+      extracted_path: files/56_a4e54ef7-ce30-45b3-8352-4e92aa7c6ab7.jpg
+      file_format: jpg
+      width: 1240
+      height: 1753
+  fonts:
+    text:
+      name: text
+      font_family: Liberation Serif
+      weight: normal
+      italic: false
+      embedded: true
+      source_path: fonts/LiberationSerif-Regular.ttf
+contents:
+  - id: p1-i1
+    posX: 0
+    posY: 0
+    width: 210
+    height: 297
+    image:
+      resource_name: ticket_visitor_pirexpo2026
+  - id: p1-t1
+    posX: 110
+    posY: 100
+    width: 100
+    height: 7
+    alignment:
+      horizontal: center
+      vertical: top
+    padding:
+      top: 0
+      right: 0
+      bottom: 0
+      left: 0
+    text:
+      font: text
+      font_size: 4.233
+      leading: 0
+      line_height: 5.08
+      preentered: "Mayorova Ann"
+      content: null
+      font_style:
+        weight: bold
+        italic: false
+        underline: false
+    template: true
+  - id: p1-t2
+    posX: 110
+    posY: 107
+    width: 100
+    height: 5.08
+    alignment:
+      horizontal: center
+      vertical: top
+    padding:
+      top: 0
+      right: 0
+      bottom: 0
+      left: 0
+    text:
+      font: text
+      font_size: 4.233
+      leading: 0
+      line_height: 5.08
+      preentered: "PIR Expo"
+      content: null
+      font_style:
+        weight: bold
+        italic: false
+        underline: false
+    template: true
+  - id: p1-b1
+    posX: 140
+    posY: 122
+    width: 40
+    height: 15
+    template: true
+    barcode:
+      type: ean13
+      preentered: "5901234123457"
+      content: null
+  - id: p1-b2
+    posX: 10
+    posY: 5
+    width: 31
+    height: 31
+    template: true
+    barcode:
+      type: qr
+      preentered: "PIR visitor"
+      content: null
