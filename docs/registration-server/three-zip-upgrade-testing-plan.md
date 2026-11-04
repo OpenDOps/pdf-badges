@@ -6,7 +6,7 @@ Each step below is one change (or one manual matrix). The tests named in the ste
 
 This plan is done when steps 1 through 13 are `done`.
 
-**Not ready to run the Mac/Linux matrices until steps 1–6 (and marker steps 7–9 for a full proof) are done.** Steps 1–4 are in tree; CI publish (step 5) and the full parts suite gate (step 6) remain before marker packs.
+**Not ready to run the Mac/Linux matrices until steps 1–6 (and marker steps 7–9 for a full proof) are done.** Steps 1–5 are in tree; step 6 (parts suite gate) and marker packs remain before the Mac/Linux proof.
 
 ## Summary
 
@@ -16,7 +16,7 @@ This plan is done when steps 1 through 13 are `done`.
 | [2. Select zips by digest](#step-2-select-zips-by-digest) | `POST /api/update` fetches only zips whose installed file digest differs | [§ Test](#step-2-select-zips-by-digest) | done |
 | [3. Unpack parts](#step-3-unpack-parts) | Server / wrapper / tray zips land in `versions/<to>/` (or live tree copy on skip) | [§ Test](#step-3-unpack-parts) | done |
 | [4. Replace tray](#step-4-replace-tray) | After `current`, replace `bin/rust-reg-desk` (and macOS app binary) like the wrapper | [§ Test](#step-4-replace-tray) | done |
-| [5. Publish assets](#step-5-publish-assets) | CI / release upload three zips; drop the single `*-linux.zip` / `*-macos.zip` upgrade asset | [§ Test](#step-5-publish-assets) | not started |
+| [5. Publish assets](#step-5-publish-assets) | CI / release upload three zips; drop the single `*-linux.zip` / `*-macos.zip` upgrade asset | [§ Test](#step-5-publish-assets) | done |
 | [6. Automated parts suite](#step-6-automated-parts-suite) | `cargo test --lib registration_server::update::tests::parts` | [§ Test](#step-6-automated-parts-suite) | not started |
 | [7. Probe logs](#step-7-probe-logs) | Wrapper and server log `upgrade-probe-*-{LETTER}` | [§ Test](#step-7-probe-logs) | not started |
 | [8. Tray markers](#step-8-tray-markers) | Distinct icon + menu item **Upgrade probe** (B); removed or changed in C | [§ Test](#step-8-tray-markers) | not started |
@@ -194,7 +194,7 @@ Done. `replace_tray` runs with the wrapper after phase `current` (supervise + `n
 
 [Back to summary](#summary)
 
-**Status:** not started  
+**Status:** done  
 **Depends on:** [1](#step-1-pack-three-zips)  
 **Unlocks:** live GitHub offers for [11](#step-11-macos-proof) (optional local static server also OK)
 
@@ -214,6 +214,8 @@ Done. `replace_tray` runs with the wrapper after phase `current` (supervise + `n
 ### Done when
 
 CI or local pack+upload checklist passes. Status → `done`.
+
+Done. `release.yml` asserts each platform packed the three `*-server/wrapper/tray.zip` files, rejects legacy single upgrade zips, merges `linux-arm64` into `SHA256SUMS`, and deletes leftover single-zip assets when re-uploading a tag. `porting.md` publish/install tables name the three zips (including arm64).
 
 ---
 

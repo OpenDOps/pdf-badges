@@ -279,27 +279,28 @@ The credential file and the event directory stay in `data/`. A swap, a rollback,
 
 `.github/workflows/release.yml` runs on a tag `release-X.Y.Z`, or from a manual run that types `X.Y.Z` and checks Linux, macOS, and Windows. The workflow writes `X.Y.Z` into `Cargo.toml` and `Cargo.lock` and pushes that commit when the version changed. One Ubuntu job builds `registration-admin` and `registration-form` once. The checked runners then build that commit in parallel, reuse those files, and bake `vX.Y.Z` into `rust-reg` and `rust-reg-run`. Each runner first tests `registration_server::native_print` for its own system: Linux and macOS compile the CUPS client, and Windows compiles the spooler client. Then it tests the desk tray crate. Checking Linux builds both amd64 and arm64. Checking macOS builds both Apple silicon and Intel. Linux runners install `dpkg-dev` and `libdbus-1-dev` so `pack.sh` can build the desk tray and the `.deb`. One later job creates or updates the GitHub release `release-X.Y.Z` and uploads the built assets and `SHA256SUMS`. A version with `-alpha`, `-beta`, or `-rc` is marked pre-release. A version without that suffix is not. A manual run that leaves a system unchecked does not rebuild that asset, and the previous file of that name stays on the release.
 
-| Runner | Installer | Upgrade zip |
+| Runner | Installer | Upgrade zips (server / wrapper / tray) |
 |---|---|---|
-| `ubuntu-latest` | `rust-reg_<version>_amd64.deb` | `rust-reg-<version>-linux.zip` |
-| `ubuntu-24.04-arm` | `rust-reg_<version>_arm64.deb` | `rust-reg-<version>-linux-arm64.zip` |
-| `macos-latest` | `rust-reg-<version>.pkg` | `rust-reg-<version>-macos.zip` |
-| `macos-15-intel` | `rust-reg-<version>-intel.pkg` | `rust-reg-<version>-macos-intel.zip` |
-| `windows-latest` | `rust-reg-<version>.exe` | `rust-reg-<version>-windows.zip` |
+| `ubuntu-latest` | `rust-reg_<version>_amd64.deb` | `…-linux-server.zip`, `…-linux-wrapper.zip`, `…-linux-tray.zip` |
+| `ubuntu-24.04-arm` | `rust-reg_<version>_arm64.deb` | `…-linux-arm64-server.zip`, `…-linux-arm64-wrapper.zip`, `…-linux-arm64-tray.zip` |
+| `macos-latest` | `rust-reg-<version>.pkg` | `…-macos-server.zip`, `…-macos-wrapper.zip`, `…-macos-tray.zip` |
+| `macos-15-intel` | `rust-reg-<version>-intel.pkg` | `…-macos-intel-server.zip`, `…-macos-intel-wrapper.zip`, `…-macos-intel-tray.zip` |
+| `windows-latest` | `rust-reg-<version>.exe` | `…-windows-server.zip`, `…-windows-wrapper.zip`, `…-windows-tray.zip` |
 
-The deb is `dpkg-deb` (Architecture follows the host: `amd64` or `arm64`). Desk icons are vendored from `desk/icons`; the `.desktop` `Icon=` path is content-hashed so GNOME picks up mark changes. Each pkg is `pkgbuild`. The exe is the server binary with a ustar of the install tree appended. A local pack follows the CPU: Apple silicon uses `stable-aarch64-apple-darwin`, and an Intel Mac uses `stable-x86_64-apple-darwin`. `SHA256SUMS` is one line per installer and one line per zip: lowercase hex, two spaces, the file name.
+The deb is `dpkg-deb` (Architecture follows the host: `amd64` or `arm64`). Desk icons are vendored from `desk/icons`; the `.desktop` `Icon=` path is content-hashed so GNOME picks up mark changes. Each pkg is `pkgbuild`. The exe is the server binary with a ustar of the install tree appended. A local pack follows the CPU: Apple silicon uses `stable-aarch64-apple-darwin`, and an Intel Mac uses `stable-x86_64-apple-darwin`. `SHA256SUMS` lists each installer, each of the three zips, and each installed file key (`rust-reg-linux`, `rust-reg-run-macos`, …): lowercase hex, two spaces, the name. The single `rust-reg-<version>-<os>.zip` upgrade asset is no longer published.
 
-The first install uses the package. It copies `versions/<version>/rust-reg-run` to `bin/rust-reg-run` and registers the service. A later update downloads the zip. It does not run maintainer scripts, `installer`, or the exe's start-the-service path, and it does not rewrite the unit, the launchd plist, or the Windows service. Each of them starts `bin/rust-reg-run`. That supervisor is the parent of the server. It starts `versions/<live>/rust-reg registration-server` and passes `--credentials <prefix>/data/credentials.yml`, `--dist <prefix>/versions/<live>/admin`, and `--form <prefix>/versions/<live>/form`.
+The first install uses the package. It copies `versions/<version>/rust-reg-run` to `bin/rust-reg-run` and registers the service. A later update downloads only the zips whose file digests differ. It does not run maintainer scripts, `installer`, or the exe's start-the-service path, and it does not rewrite the unit, the launchd plist, or the Windows service. Each of them starts `bin/rust-reg-run`. That supervisor is the parent of the server. It starts `versions/<live>/rust-reg registration-server` and passes `--credentials <prefix>/data/credentials.yml`, `--dist <prefix>/versions/<live>/admin`, and `--form <prefix>/versions/<live>/form`.
 
 Which tree is live is one file, `updates/live`, holding a version. `updates/live` and `state.yml` are written as a temporary file in the same directory, then fsync, rename, and fsync the directory. Version directories are not renamed onto each other.
 
 ```text
 <prefix>/
   bin/rust-reg-run                      first install; an update replaces this file in place
-  bin/rust-reg-desk                     tray; first install; an update leaves this file
+  bin/rust-reg-desk                     tray; first install; replaced after current when its digest differs
   versions/<version>/
     rust-reg                            rust-reg.exe on Windows
-    rust-reg-run                        rust-reg-run.exe on Windows; same tag as rust-reg
+    rust-reg-run                        rust-reg-run.exe on Windows; present when that zip was fetched
+    rust-reg-desk                       rust-reg-desk.exe on Windows; present when that zip was fetched
     admin/                              registration-admin dist
     form/                               registration-form build
     RELEASE                             one line, the baked tag
@@ -328,9 +329,9 @@ Two checks are still open. An older binary, started against a scratch prefix, re
 
 `POST /api/update` requires the desk cookie. A job on the print channel, or the gate's print flag, returns `409` `print_busy` and leaves the process running.
 
-1. Download this machine's upgrade zip next to `versions/` as `<name>.partial`. The file is `rust-reg-<version>-linux.zip` on Linux amd64, `rust-reg-<version>-linux-arm64.zip` on Linux aarch64, `rust-reg-<version>-macos.zip` on Apple silicon, `rust-reg-<version>-macos-intel.zip` on Intel, or `rust-reg-<version>-windows.zip`. macOS reads `hw.optional.arm64`, so an Intel build running under Rosetta on Apple silicon still takes the Apple silicon zip. The download waits until the gate has no print in progress and no local request other than this one.
-2. Download `SHA256SUMS` from that release and compare the digest. A mismatch deletes the file and returns `409` `checksum_mismatch`. `updates/live` stays the running version.
-3. Unpack into `versions/<new>.partial`, fsync, then rename that directory to `versions/<new>/`. The payload is `rust-reg` (`rust-reg.exe` on Windows), `rust-reg-run`, `admin/`, `form/`, and `RELEASE`. A ustar of those same entries is accepted too. The rename is the moment the tree is complete. A failed copy removes `.partial`. `bin/rust-reg-run` is left as it is.
+1. Download `SHA256SUMS` first, then only the upgrade zips whose installed file digests differ (`…-<platform>-server.zip` / `-wrapper.zip` / `-tray.zip`; platform is `linux`, `linux-arm64`, `macos`, `macos-intel`, or `windows`). macOS reads `hw.optional.arm64`, so an Intel build running under Rosetta on Apple silicon still takes the Apple silicon zips. The download waits until the gate has no print in progress and no local request other than this one.
+2. Check each fetched zip against its `SHA256SUMS` line. A mismatch deletes that temporary zip and returns `409` `checksum_mismatch`. `updates/live` stays the running version.
+3. Unpack into `versions/<new>.partial`, fsync, then rename that directory to `versions/<new>/`. The server zip (or a copy of the live server tree) supplies `rust-reg`, `admin/`, `form/`, and `RELEASE`. Wrapper and tray zips add those binaries when fetched. A failed copy removes `.partial`. `bin/rust-reg-run` and `bin/rust-reg-desk` stay until phase `current` replaces them.
 4. Write `state.yml` with phase `staged`, `from` the running version, and `to` the new version. Delete `updates/started` if it remains. `updates/live` still names `from`.
 5. Return `200` and `{ "version": "<to>" }`, then exit. The supervisor points `live` at the new tree.
 

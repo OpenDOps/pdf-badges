@@ -566,7 +566,8 @@ All three ship under the one release tag. Only `rust-reg` contains it. The wrapp
 
 | Platform | Server | Wrapper | Tray |
 |---|---|---|---|
-| Linux | `rust-reg-<version>-linux-server.zip` | `rust-reg-<version>-linux-wrapper.zip` | `rust-reg-<version>-linux-tray.zip` |
+| Linux amd64 | `rust-reg-<version>-linux-server.zip` | `rust-reg-<version>-linux-wrapper.zip` | `rust-reg-<version>-linux-tray.zip` |
+| Linux arm64 | `rust-reg-<version>-linux-arm64-server.zip` | `rust-reg-<version>-linux-arm64-wrapper.zip` | `rust-reg-<version>-linux-arm64-tray.zip` |
 | Apple silicon | `rust-reg-<version>-macos-server.zip` | `rust-reg-<version>-macos-wrapper.zip` | `rust-reg-<version>-macos-tray.zip` |
 | Intel macOS | `rust-reg-<version>-macos-intel-server.zip` | `rust-reg-<version>-macos-intel-wrapper.zip` | `rust-reg-<version>-macos-intel-tray.zip` |
 | Windows | `rust-reg-<version>-windows-server.zip` | `rust-reg-<version>-windows-wrapper.zip` | `rust-reg-<version>-windows-tray.zip` |

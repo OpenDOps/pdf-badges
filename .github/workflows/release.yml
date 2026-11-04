@@ -236,10 +236,12 @@ jobs:
         env:
           REGISTRATION_RELEASE_TAG: v${{ needs.select.outputs.version }}
           REGISTRATION_SKIP_FRONT: "1"
+          VERSION: ${{ needs.select.outputs.version }}
+          PLATFORM: ${{ matrix.platform }}
         run: |
           set -euo pipefail
           mkdir -p target/release/packed
-          bash scripts/release/pack.sh | tee "target/release/packed/sha256-${{ matrix.platform }}.txt"
+          bash scripts/release/pack.sh | tee "target/release/packed/sha256-${PLATFORM}.txt"
           # Zip and installer lines name real files. File-digest lines
           # (rust-reg-macos, …) are keys only — skip missing paths.
           while read -r _ name; do
@@ -247,8 +249,28 @@ jobs:
             if [[ -f "target/release/$name" ]]; then
               cp "target/release/$name" "target/release/packed/$name"
             fi
-          done < "target/release/packed/sha256-${{ matrix.platform }}.txt"
-          echo "packed platform=${{ matrix.platform }} runner=$(uname -s)-$(uname -m)"
+          done < "target/release/packed/sha256-${PLATFORM}.txt"
+          # Step 16: three upgrade zips per platform; no single *-linux.zip / *-macos.zip.
+          for part in server wrapper tray; do
+            zip="rust-reg-${VERSION}-${PLATFORM}-${part}.zip"
+            [[ -f "target/release/packed/$zip" ]] || {
+              echo "missing upgrade zip: $zip" >&2
+              exit 1
+            }
+          done
+          for legacy in \
+            "rust-reg-${VERSION}-linux.zip" \
+            "rust-reg-${VERSION}-linux-arm64.zip" \
+            "rust-reg-${VERSION}-macos.zip" \
+            "rust-reg-${VERSION}-macos-intel.zip" \
+            "rust-reg-${VERSION}-windows.zip"
+          do
+            if [[ -f "target/release/packed/$legacy" || -f "target/release/$legacy" ]]; then
+              echo "legacy single upgrade zip must not ship: $legacy" >&2
+              exit 1
+            fi
+          done
+          echo "packed platform=${PLATFORM} runner=$(uname -s)-$(uname -m) three-zips=ok"
           ls -la target/release/packed/
       - uses: actions/upload-artifact@v7
         with:
@@ -280,13 +302,45 @@ jobs:
             fi
           done
           rm -f dist/sha256-*.txt
+          # Drop any pre-step-16 single upgrade zip left from an earlier pack.
+          rm -f \
+            dist/rust-reg-*-linux.zip \
+            dist/rust-reg-*-linux-arm64.zip \
+            dist/rust-reg-*-macos.zip \
+            dist/rust-reg-*-macos-intel.zip \
+            dist/rust-reg-*-windows.zip
+          # Keep only names that match a real file under dist/ (not bare globs).
+          shopt -s nullglob
           files=(dist/*)
+          shopt -u nullglob
+          if [[ ${#files[@]} -eq 0 ]]; then
+            echo "no release files under dist/" >&2
+            exit 1
+          fi
+          if ! grep -E '  rust-reg-.+-(server|wrapper|tray)\.zip$' dist/SHA256SUMS >/dev/null; then
+            echo "SHA256SUMS missing three-zip lines" >&2
+            exit 1
+          fi
+          if grep -E '  rust-reg-.+-(linux|linux-arm64|macos|macos-intel|windows)\.zip$' dist/SHA256SUMS >/dev/null; then
+            echo "SHA256SUMS still lists a legacy single upgrade zip" >&2
+            exit 1
+          fi
+          echo "publish files:"
+          printf '  %s\n' "${files[@]}"
           if [[ "$VERSION" == *-alpha.* || "$VERSION" == *-beta.* || "$VERSION" == *-rc.* ]]; then
             mark=(--prerelease)
           else
             mark=(--prerelease=false)
           fi
           if gh release view "$TAG" >/dev/null 2>&1; then
+            # Remove leftover single-zip assets from an earlier upload of this tag.
+            while read -r asset; do
+              case "$asset" in
+                rust-reg-*-linux.zip|rust-reg-*-linux-arm64.zip|rust-reg-*-macos.zip|rust-reg-*-macos-intel.zip|rust-reg-*-windows.zip)
+                  gh release delete-asset "$TAG" "$asset" --yes || true
+                  ;;
+              esac
+            done < <(gh release view "$TAG" --json assets --jq '.assets[].name')
             gh release upload "$TAG" "${files[@]}" --clobber
             gh release edit "$TAG" "${mark[@]}"
           else
