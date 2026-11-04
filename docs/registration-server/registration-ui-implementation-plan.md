@@ -19,9 +19,9 @@ The operator screens are done when steps 1 through 12 are done. Tests fetch the 
 | [7. Print confirm](#step-7-print-confirm) | Packets, enqueue, then `/print` | not started |
 | [8. Print progress](#step-8-print-progress) | The running job, pause, stop | not started |
 | [9. Import](#step-9-import) | Column mapping and the CSV file on one screen | not started |
-| [10. Settings](#step-10-settings) | The two settings links | not started |
+| [10. Settings](#step-10-settings) | United with registration settings on `/settings` | done |
 | [11. Printers](#step-11-printers) | Address, name, visibility, default, routing | done |
-| [12. Registration settings](#step-12-registration-settings) | The six switches, barcode pools, sync | not started |
+| [12. Registration settings](#step-12-registration-settings) | Six switches, barcode pools, sync — on the same `/settings` screen | done |
 
 Shared rules:
 
@@ -291,25 +291,13 @@ The "Печать" dialog on the visitor list. Confirming it opens `/print`.
 
 [Back to summary](#summary)
 
-`settings.mustache`, without the clock row.
-
-### Work
-
-1. Two links: "Настройки принтеров" to `/printers`, and "Настройки регистрации" to `/settings/registration`.
-2. The screen has no "Установить текущее время на роутере" control.
-3. Back points at `/`.
-
-### Test scenarios
-
-| Scenario | Assert |
-|---|---|
-| `settings_links_the_two_screens` | The two labels are links to `/printers` and `/settings/registration`. |
-| `settings_has_no_clock` | There is no control named "Установить текущее время на роутере". |
-| `settings_back_is_the_menu` | Back points at `/`. |
+Status: done. Settings and registration settings are united on `/settings` (no separate `/settings/registration` hub). Printers stay a link from the menu / settings area to `/printers`. There is no "Установить текущее время на роутере" control.
 
 ### Done when
 
 `npm test -- settings_` passes, and steps 1 through 9 stay green.
+
+Done. `/settings` carries the registration switches and barcode pools (step 12). A separate two-link settings index is not shipped.
 
 ## Step 11. Printers
 
@@ -345,9 +333,9 @@ The "Печать" dialog on the visitor list. Confirming it opens `/print`.
 
 [Back to summary](#summary)
 
-`settingsRegistration.mustache`. The six switches are fields of the settings object from the HTTP plan. "Перезапуск системы" stays off this screen.
+Status: done. Shipped on the united `/settings` screen (step 10), not as a separate route. The six switches are fields of the settings object from the HTTP plan. "Перезапуск системы" stays off this screen.
 
-### Work
+### Work (as shipped)
 
 1. `GET /api/settings` sets the switches. Each change patches `PATCH /api/settings` with that one field:
 
@@ -364,7 +352,7 @@ The "Печать" dialog on the visitor list. Confirming it opens `/print`.
 3. The row opens "Минимум" and "Добавить". "ок" patches `PATCH /api/barcodes` with those two counts for that category. "отмена" closes the dialog and does not patch.
 4. "Перезапуск синхронизации" posts `POST /api/sync`.
 5. The screen has no "Перезапуск системы" control.
-6. Back points at `/settings`.
+6. Back points at `/`.
 
 ### Test scenarios
 
@@ -374,8 +362,10 @@ The "Печать" dialog on the visitor list. Confirming it opens `/print`.
 | `regset_patch_is_one_field` | Turning on "Делать ФИО с заглавной буквы" patches `{ "capitalize_names": true }` and no other field. |
 | `regset_barcode_min_and_add` | A category row shows its remaining count and pool size. "ок" with minimum 5 and add 10 patches that category. "отмена" sends no patch. |
 | `regset_restarts_sync` | "Перезапуск синхронизации" posts `POST /api/sync`. The screen has no "Перезапуск системы" control. |
-| `regset_back_is_settings` | Back points at `/settings`. |
+| `settings_back_is_the_menu` | Back from `/settings` points at `/`. |
 
 ### Done when
 
-`npm test -- regset_` passes, and steps 1 through 11 stay green.
+`npm test -- settings_` / `regset_` coverage for these behaviours passes, and steps 1 through 11 stay green.
+
+Done. Registration settings live on `/settings` with the united settings screen.

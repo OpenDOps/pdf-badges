@@ -19,18 +19,18 @@ The remote API stays. The Scala session scraper, the properties-file side effect
 | [9. Local HTTP API](#step-9--local-http-api) | The `/api` routes the floor and the desk call | done |
 | [10. Registration UI](#step-10--registration-ui) | The form, then the operator screens around it | in progress |
 | [11. Release and update](#step-11--release-and-update) | GitHub release packages, then a checked swap with rollback | in progress |
-| [12. Tray wrapper](#step-12--tray-wrapper) | Open the tray on Linux, macOS, and Windows | not started |
+| [12. Tray wrapper](#step-12--tray-wrapper) | Open the tray on Linux, macOS, and Windows | nearly done |
 | [13. Google Sheet source](#step-13--google-sheet-source) | Admin binds a sheet; the sync thread applies its row events | not started |
 
-Step 8 is done. Steps 1 through 19 of the printing plan are done.
+Step 8 is done for steps 1 through 19 of the printing plan. An extra check remains: step 20 (PDF batching — several print tasks become one multi-page PDF).
 
 Step 9 is done. Steps 1 through 6 of the HTTP plan are done. The scan API and the leadgen API are not ported.
 
-Step 10's form plan is done. Its operator-screen plan is done through the form path (step 5). Visitors, print, import, settings, and printers are not started.
+Step 10's form plan is done. On the operator-screen plan, settings and registration settings are united on `/settings` and done. Visitors and printers are done. Print confirm, print progress, and import are still open.
 
-Step 11 is checked on macOS. The Linux deb and the Windows exe have been published and have not been installed or updated on those machines. The step is accepted when that manual test has passed on both, and when an older binary has read a release from `api.github.com`.
+Step 11's next work is [release-implementation-plan.md](release-implementation-plan.md) step 16 (three zips: server, wrapper, tray, and verifying those upgrades). The live check against `api.github.com` and the three-zip device matrix (step 17) are still open.
 
-Step 12's tray code is in `desk/`. The icon has not been opened on Linux, macOS, or Windows. `cargo test --manifest-path desk/Cargo.toml` does not open a display. The step is accepted when the checks in [tray-wrapper-testing-plan.md](tray-wrapper-testing-plan.md) have passed on all three.
+Step 12 is nearly done. Linux and macOS tray checks in [tray-wrapper-testing-plan.md](tray-wrapper-testing-plan.md) have passed ([linux-tray-parity-plan.md](linux-tray-parity-plan.md) is done). Windows tray testing is still open. The step is accepted when Windows passes too.
 
 Step 13 is not started. The watcher it consumes is [google-tables/implementation-plan.md](../google-tables/implementation-plan.md). This step is the admin choice, the local processes, and the sync-thread consumer.
 
@@ -225,7 +225,7 @@ Uploads follow the Scala order. A batch that the server accepts is marked synced
 
 ## Step 8 — Printing
 
-Status: done. Steps 1 through 19 of [printing-implementation-plan.md](printing-implementation-plan.md) are done.
+Status: done for steps 1 through 19 of [printing-implementation-plan.md](printing-implementation-plan.md). Step 20 (PDF batching — multiple tasks → one multi-page PDF) is an extra test still open.
 
 The design is [printing.md](printing.md). The build sequence is [printing-implementation-plan.md](printing-implementation-plan.md).
 
@@ -251,7 +251,7 @@ This is the last server step. It replaces the Scala `RegApp` routes the floor an
 
 ## Step 10 — Registration UI
 
-Status: in progress. The form plan is done. The operator screens are done through the form path. Visitors onward are not started.
+Status: in progress. The form plan is done. Operator settings and registration settings are united on `/settings` and done. Visitors and printers are done. Print confirm, print progress, and import are still open.
 
 The form is [form-design.md](form-design.md), and its build sequence is [form-implementation-plan.md](form-implementation-plan.md). The other operator screens are [registration-ui-design.md](registration-ui-design.md), and their build sequence is [registration-ui-implementation-plan.md](registration-ui-implementation-plan.md).
 
@@ -267,7 +267,7 @@ The form reads one document, `GET /forms/form.json`. Vite builds that response f
 
 ## Step 11 — Release and update
 
-Status: in progress. The macOS pack and the updater tests are done. The Linux and Windows install and update are step 16 of the release plan, and they have not been run. The live check against `api.github.com` has not been run. The step is accepted only after both.
+Status: in progress. Pack, publish, updater tests through the wrapper replace (step 15), and Linux arm64 assets are in place. **Next is step 16 of the release plan:** three upgrade zips (server, wrapper, tray) and the marker proof in [three-zip-upgrade-testing-plan.md](three-zip-upgrade-testing-plan.md) (Mac full, then Linux tray + wrapper). Step 17 (install/update on devices) and step 14 (live `api.github.com`) stay after that.
 
 The build sequence is [release-implementation-plan.md](release-implementation-plan.md). It does not wait on a printer. `print_busy` is a job already on the print channel, or a print the worker has started.
 
@@ -277,16 +277,17 @@ The credential file and the event directory stay in `data/`. A swap, a rollback,
 
 ### Publish
 
-`.github/workflows/release.yml` runs on a tag `release-X.Y.Z`, or from a manual run that types `X.Y.Z` and checks Linux, macOS, and Windows. The workflow writes `X.Y.Z` into `Cargo.toml` and `Cargo.lock` and pushes that commit when the version changed. One Ubuntu job builds `registration-admin` and `registration-form` once. The checked runners then build that commit in parallel, reuse those files, and bake `vX.Y.Z` into `rust-reg` and `rust-reg-run`. Each runner first tests `registration_server::native_print` for its own system: Linux and macOS compile the CUPS client, and Windows compiles the spooler client. Checking macOS builds both Apple silicon and Intel. One later job creates or updates the GitHub release `release-X.Y.Z` and uploads the built assets and `SHA256SUMS`. A version with `-alpha`, `-beta`, or `-rc` is marked pre-release. A version without that suffix is not. A manual run that leaves a system unchecked does not rebuild that asset, and the previous file of that name stays on the release.
+`.github/workflows/release.yml` runs on a tag `release-X.Y.Z`, or from a manual run that types `X.Y.Z` and checks Linux, macOS, and Windows. The workflow writes `X.Y.Z` into `Cargo.toml` and `Cargo.lock` and pushes that commit when the version changed. One Ubuntu job builds `registration-admin` and `registration-form` once. The checked runners then build that commit in parallel, reuse those files, and bake `vX.Y.Z` into `rust-reg` and `rust-reg-run`. Each runner first tests `registration_server::native_print` for its own system: Linux and macOS compile the CUPS client, and Windows compiles the spooler client. Then it tests the desk tray crate. Checking Linux builds both amd64 and arm64. Checking macOS builds both Apple silicon and Intel. Linux runners install `dpkg-dev` and `libdbus-1-dev` so `pack.sh` can build the desk tray and the `.deb`. One later job creates or updates the GitHub release `release-X.Y.Z` and uploads the built assets and `SHA256SUMS`. A version with `-alpha`, `-beta`, or `-rc` is marked pre-release. A version without that suffix is not. A manual run that leaves a system unchecked does not rebuild that asset, and the previous file of that name stays on the release.
 
 | Runner | Installer | Upgrade zip |
 |---|---|---|
 | `ubuntu-latest` | `rust-reg_<version>_amd64.deb` | `rust-reg-<version>-linux.zip` |
+| `ubuntu-24.04-arm` | `rust-reg_<version>_arm64.deb` | `rust-reg-<version>-linux-arm64.zip` |
 | `macos-latest` | `rust-reg-<version>.pkg` | `rust-reg-<version>-macos.zip` |
 | `macos-15-intel` | `rust-reg-<version>-intel.pkg` | `rust-reg-<version>-macos-intel.zip` |
 | `windows-latest` | `rust-reg-<version>.exe` | `rust-reg-<version>-windows.zip` |
 
-The deb is `dpkg-deb`. Each pkg is `pkgbuild`. The exe is the server binary with a ustar of the install tree appended. A local pack follows the CPU: Apple silicon uses `stable-aarch64-apple-darwin`, and an Intel Mac uses `stable-x86_64-apple-darwin`. `SHA256SUMS` is one line per installer and one line per zip: lowercase hex, two spaces, the file name.
+The deb is `dpkg-deb` (Architecture follows the host: `amd64` or `arm64`). Desk icons are vendored from `desk/icons`; the `.desktop` `Icon=` path is content-hashed so GNOME picks up mark changes. Each pkg is `pkgbuild`. The exe is the server binary with a ustar of the install tree appended. A local pack follows the CPU: Apple silicon uses `stable-aarch64-apple-darwin`, and an Intel Mac uses `stable-x86_64-apple-darwin`. `SHA256SUMS` is one line per installer and one line per zip: lowercase hex, two spaces, the file name.
 
 The first install uses the package. It copies `versions/<version>/rust-reg-run` to `bin/rust-reg-run` and registers the service. A later update downloads the zip. It does not run maintainer scripts, `installer`, or the exe's start-the-service path, and it does not rewrite the unit, the launchd plist, or the Windows service. Each of them starts `bin/rust-reg-run`. That supervisor is the parent of the server. It starts `versions/<live>/rust-reg registration-server` and passes `--credentials <prefix>/data/credentials.yml`, `--dist <prefix>/versions/<live>/admin`, and `--form <prefix>/versions/<live>/form`.
 
@@ -327,7 +328,7 @@ Two checks are still open. An older binary, started against a scratch prefix, re
 
 `POST /api/update` requires the desk cookie. A job on the print channel, or the gate's print flag, returns `409` `print_busy` and leaves the process running.
 
-1. Download this machine's upgrade zip next to `versions/` as `<name>.partial`. The file is `rust-reg-<version>-linux.zip`, `rust-reg-<version>-macos.zip` on Apple silicon, `rust-reg-<version>-macos-intel.zip` on Intel, or `rust-reg-<version>-windows.zip`. macOS reads `hw.optional.arm64`, so an Intel build running under Rosetta on Apple silicon still takes the Apple silicon zip. The download waits until the gate has no print in progress and no local request other than this one.
+1. Download this machine's upgrade zip next to `versions/` as `<name>.partial`. The file is `rust-reg-<version>-linux.zip` on Linux amd64, `rust-reg-<version>-linux-arm64.zip` on Linux aarch64, `rust-reg-<version>-macos.zip` on Apple silicon, `rust-reg-<version>-macos-intel.zip` on Intel, or `rust-reg-<version>-windows.zip`. macOS reads `hw.optional.arm64`, so an Intel build running under Rosetta on Apple silicon still takes the Apple silicon zip. The download waits until the gate has no print in progress and no local request other than this one.
 2. Download `SHA256SUMS` from that release and compare the digest. A mismatch deletes the file and returns `409` `checksum_mismatch`. `updates/live` stays the running version.
 3. Unpack into `versions/<new>.partial`, fsync, then rename that directory to `versions/<new>/`. The payload is `rust-reg` (`rust-reg.exe` on Windows), `rust-reg-run`, `admin/`, `form/`, and `RELEASE`. A ustar of those same entries is accepted too. The rename is the moment the tree is complete. A failed copy removes `.partial`. `bin/rust-reg-run` is left as it is.
 4. Write `state.yml` with phase `staged`, `from` the running version, and `to` the new version. Delete `updates/started` if it remains. `updates/live` still names `from`.
@@ -352,9 +353,9 @@ Once the phase is `current`, the running wrapper is compared with `versions/<to>
 
 ## Step 12 — Tray wrapper
 
-Status: not started.
+Status: nearly done. Linux and macOS manual checks passed ([linux-tray-parity-plan.md](linux-tray-parity-plan.md) is done). Windows testing is left.
 
-This step is the manual check. The tray code is already in `desk/`. The check is [tray-wrapper-testing-plan.md](tray-wrapper-testing-plan.md). `cargo test --manifest-path desk/Cargo.toml` covers the listen line, which binary an installed path starts, and the macOS icon pixels. It does not open a display. A pass on one machine does not cover the other two.
+This step is the manual check. The tray code is in `desk/`. The check is [tray-wrapper-testing-plan.md](tray-wrapper-testing-plan.md). `cargo test --manifest-path desk/Cargo.toml` covers the listen line, which binary an installed path starts, and the icon helpers. It does not open a display. A pass on one machine does not cover the others.
 
 The server process has no window. `rust-reg-desk` starts it and shows a tray icon: a status icon on Linux, a menu-bar item on macOS, and a notification-area icon on Windows. The menu shows the listen address and Quit. A second launch exits. Quit stops the server this tray started, or the installed service when that service already held the port.
 

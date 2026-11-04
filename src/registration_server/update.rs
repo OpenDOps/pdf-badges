@@ -598,30 +598,99 @@ fn sha256_hex(bytes: &[u8]) -> String {
     hex
 }
 
-/// Upgrade archive step 12 packs for this operating system. `version` is `MAJOR.MINOR.PATCH`.
-/// On macOS the name follows the processor: Apple silicon uses `macos`, Intel uses `macos-intel`.
-/// The pkg, the deb, and the exe stay the first-install packages.
-#[allow(dead_code)]
-pub(crate) fn asset_name(version: &str) -> String {
-    #[cfg(target_os = "linux")]
-    {
-        format!("rust-reg-{version}-linux.zip")
+/// One of the three upgrade zips from release step 16.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UpgradePart {
+    Server,
+    Wrapper,
+    Tray,
+}
+
+impl UpgradePart {
+    fn zip_suffix(self) -> &'static str {
+        match self {
+            Self::Server => "server",
+            Self::Wrapper => "wrapper",
+            Self::Tray => "tray",
+        }
     }
-    #[cfg(target_os = "macos")]
-    {
-        macos_upgrade_archive(version, host_is_apple_silicon())
+
+    fn file_stem(self) -> &'static str {
+        match self {
+            Self::Server => "rust-reg",
+            Self::Wrapper => "rust-reg-run",
+            Self::Tray => "rust-reg-desk",
+        }
     }
-    #[cfg(target_os = "windows")]
-    {
-        format!("rust-reg-{version}-windows.zip")
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-    {
-        format!("rust-reg-{version}.zip")
+
+    fn all() -> [Self; 3] {
+        [Self::Server, Self::Wrapper, Self::Tray]
     }
 }
 
-/// `rust-reg-<version>-macos.zip` on Apple silicon, `rust-reg-<version>-macos-intel.zip` on Intel.
+/// Platform segment in zip and file-key names: `linux`, `linux-arm64`, `macos`, `macos-intel`, `windows`.
+#[allow(dead_code)]
+pub(crate) fn upgrade_platform_tag() -> &'static str {
+    #[cfg(target_os = "linux")]
+    {
+        if cfg!(target_arch = "aarch64") {
+            "linux-arm64"
+        } else {
+            "linux"
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if host_is_apple_silicon() {
+            "macos"
+        } else {
+            "macos-intel"
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        "windows"
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    {
+        "linux"
+    }
+}
+
+/// `rust-reg-<version>-<platform>-server.zip` (and wrapper / tray).
+#[allow(dead_code)]
+pub(crate) fn part_zip_name(version: &str, part: UpgradePart) -> String {
+    format!(
+        "rust-reg-{version}-{}-{}.zip",
+        upgrade_platform_tag(),
+        part.zip_suffix()
+    )
+}
+
+/// File digest key in `SHA256SUMS`: `rust-reg-macos`, `rust-reg-run-linux`, …
+#[allow(dead_code)]
+pub(crate) fn part_file_key(part: UpgradePart) -> String {
+    format!("{}-{}", part.file_stem(), upgrade_platform_tag())
+}
+
+/// Server zip name for this OS (step 16). Prefer [`part_zip_name`] for wrapper/tray.
+#[allow(dead_code)]
+pub(crate) fn asset_name(version: &str) -> String {
+    part_zip_name(version, UpgradePart::Server)
+}
+
+/// `rust-reg-<version>-linux.zip` on amd64, `…-linux-arm64.zip` on aarch64 (pre–step-16 name).
+#[allow(dead_code)]
+pub(crate) fn linux_upgrade_archive(version: &str, aarch64: bool) -> String {
+    if aarch64 {
+        format!("rust-reg-{version}-linux-arm64.zip")
+    } else {
+        format!("rust-reg-{version}-linux.zip")
+    }
+}
+
+/// `rust-reg-<version>-macos.zip` on Apple silicon, `…-macos-intel.zip` on Intel (pre–step-16).
+#[allow(dead_code)]
 pub(crate) fn macos_upgrade_archive(version: &str, apple_silicon: bool) -> String {
     if apple_silicon {
         format!("rust-reg-{version}-macos.zip")
@@ -664,6 +733,16 @@ pub(crate) fn wrapper_binary_name() -> &'static str {
         "rust-reg-run.exe"
     } else {
         "rust-reg-run"
+    }
+}
+
+/// `rust-reg-desk` in `<prefix>/bin`, or `rust-reg-desk.exe` on Windows.
+#[allow(dead_code)]
+pub(crate) fn desk_binary_name() -> &'static str {
+    if cfg!(windows) {
+        "rust-reg-desk.exe"
+    } else {
+        "rust-reg-desk"
     }
 }
 
@@ -795,16 +874,33 @@ fn parent_executable() -> Option<PathBuf> {
 /// Temporary asset, next to `versions/`, not inside it.
 #[allow(dead_code)]
 pub(crate) fn asset_temp_path(prefix: &Path, version: &str) -> PathBuf {
-    prefix.join(format!("{}.partial", asset_name(version)))
+    part_temp_path(prefix, version, UpgradePart::Server)
 }
 
-/// The checked asset and, when this call dropped a request guard, the guard taken again.
+fn part_temp_path(prefix: &Path, version: &str, part: UpgradePart) -> PathBuf {
+    prefix.join(format!("{}.partial", part_zip_name(version, part)))
+}
+
+/// Fetched upgrade zips (only parts whose digests differed) and the re-taken request guard.
 #[allow(dead_code)]
 pub(crate) struct Downloaded {
-    pub path: PathBuf,
+    pub server_zip: Option<PathBuf>,
+    pub wrapper_zip: Option<PathBuf>,
+    pub tray_zip: Option<PathBuf>,
     /// Taken again after the download. Step 9 keeps it for the rest of the request.
     #[allow(dead_code)]
     pub held: Option<RequestGuard>,
+}
+
+impl Downloaded {
+    fn remove_temps(&self) {
+        for path in [&self.server_zip, &self.wrapper_zip, &self.tray_zip]
+            .into_iter()
+            .flatten()
+        {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }
 
 #[allow(dead_code)]
@@ -831,7 +927,7 @@ impl DownloadFailed {
     }
 }
 
-/// Downloads this machine's asset and `SHA256SUMS` from the same release.
+/// Downloads `SHA256SUMS`, then only the upgrade zips whose installed file digests differ.
 /// Drops `held` before waiting, and takes a request guard again when the download returns.
 /// Does not create a directory under `versions/` and does not exit.
 #[allow(dead_code)]
@@ -848,48 +944,147 @@ pub(crate) async fn download_release(
     let resume = held.is_some();
     drop(held);
     gate.wait_until_idle().await;
-    let fetched = fetch_asset(prefix, client, base, repo, version, progress).await;
+    let fetched = fetch_parts(prefix, client, base, repo, version, progress).await;
     let held = resume.then(|| gate.enter_request());
     match fetched {
-        Ok(path) => Ok(Downloaded { path, held }),
+        Ok(parts) => Ok(Downloaded {
+            server_zip: parts.server_zip,
+            wrapper_zip: parts.wrapper_zip,
+            tray_zip: parts.tray_zip,
+            held,
+        }),
         Err(kind) => Err(DownloadFailed { kind, held }),
     }
 }
 
+struct FetchedParts {
+    server_zip: Option<PathBuf>,
+    wrapper_zip: Option<PathBuf>,
+    tray_zip: Option<PathBuf>,
+}
+
+fn digest_in_sums(sums: &str, name: &str) -> Option<String> {
+    for raw in sums.split('\n') {
+        let line = raw.trim_end_matches('\r');
+        if line.is_empty() {
+            continue;
+        }
+        if let Some((hex, file)) = line.split_once("  ") {
+            if file == name {
+                return Some(hex.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn file_sha256(path: &Path) -> Option<String> {
+    std::fs::read(path).ok().map(|bytes| sha256_hex(&bytes))
+}
+
+/// True when `SHA256SUMS` names this part's file key and the installed digest differs (or is missing).
+fn part_needed(sums: &str, part: UpgradePart, installed: Option<&Path>) -> bool {
+    let Some(expected) = digest_in_sums(sums, &part_file_key(part)) else {
+        return false;
+    };
+    match installed.and_then(file_sha256) {
+        Some(have) => have != expected,
+        None => true,
+    }
+}
+
+fn installed_server_path(prefix: &Path) -> Option<PathBuf> {
+    let live = read_version_line(&prefix.join("updates").join("live"))?;
+    let path = version_dir(prefix, &live).join(version_binary_name());
+    path.is_file().then_some(path)
+}
+
+fn installed_wrapper_path(prefix: &Path) -> Option<PathBuf> {
+    let bin = prefix.join("bin").join(wrapper_binary_name());
+    if bin.is_file() {
+        return Some(bin);
+    }
+    server_wrapper_path().filter(|path| path.is_file())
+}
+
+fn installed_tray_path(prefix: &Path) -> Option<PathBuf> {
+    let path = prefix.join("bin").join(desk_binary_name());
+    path.is_file().then_some(path)
+}
+
+fn installed_path_for(prefix: &Path, part: UpgradePart) -> Option<PathBuf> {
+    match part {
+        UpgradePart::Server => installed_server_path(prefix),
+        UpgradePart::Wrapper => installed_wrapper_path(prefix),
+        UpgradePart::Tray => installed_tray_path(prefix),
+    }
+}
+
 #[allow(dead_code)]
-async fn fetch_asset(
+async fn fetch_parts(
     prefix: &Path,
     client: &reqwest::Client,
     base: &str,
     repo: &str,
     version: &str,
     progress: Option<&ReleaseCheck>,
-) -> Result<PathBuf, DownloadKind> {
-    let name = asset_name(version);
-    let path = asset_temp_path(prefix, version);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|_| DownloadKind::Failed)?;
-    }
-    let asset_url = release_file_url(base, repo, version, &name);
-    if write_download(client, &asset_url, &path, progress)
-        .await
-        .is_err()
-    {
-        let _ = std::fs::remove_file(&path);
-        return Err(DownloadKind::Failed);
-    }
+) -> Result<FetchedParts, DownloadKind> {
     let sums_url = release_file_url(base, repo, version, "SHA256SUMS");
-    let sums = match read_download(client, &sums_url).await {
-        Ok(text) => text,
-        Err(()) => {
+    let sums = read_download(client, &sums_url)
+        .await
+        .map_err(|_| DownloadKind::Failed)?;
+
+    let mut needed = Vec::new();
+    for part in UpgradePart::all() {
+        let installed = installed_path_for(prefix, part);
+        if part_needed(&sums, part, installed.as_deref()) {
+            needed.push(part);
+        }
+    }
+
+    let mut fetched = FetchedParts {
+        server_zip: None,
+        wrapper_zip: None,
+        tray_zip: None,
+    };
+    let mut downloaded: Vec<PathBuf> = Vec::new();
+
+    for part in needed {
+        let name = part_zip_name(version, part);
+        let path = part_temp_path(prefix, version, part);
+        if let Some(parent) = path.parent() {
+            if std::fs::create_dir_all(parent).is_err() {
+                for prior in &downloaded {
+                    let _ = std::fs::remove_file(prior);
+                }
+                return Err(DownloadKind::Failed);
+            }
+        }
+        let asset_url = release_file_url(base, repo, version, &name);
+        if write_download(client, &asset_url, &path, progress)
+            .await
+            .is_err()
+        {
             let _ = std::fs::remove_file(&path);
+            for prior in &downloaded {
+                let _ = std::fs::remove_file(prior);
+            }
             return Err(DownloadKind::Failed);
         }
-    };
-    if verify_asset(&path, &sums, &name).is_err() {
-        return Err(DownloadKind::ChecksumMismatch);
+        if verify_asset(&path, &sums, &name).is_err() {
+            for prior in &downloaded {
+                let _ = std::fs::remove_file(prior);
+            }
+            return Err(DownloadKind::ChecksumMismatch);
+        }
+        downloaded.push(path.clone());
+        match part {
+            UpgradePart::Server => fetched.server_zip = Some(path),
+            UpgradePart::Wrapper => fetched.wrapper_zip = Some(path),
+            UpgradePart::Tray => fetched.tray_zip = Some(path),
+        }
     }
-    Ok(path)
+    Ok(fetched)
 }
 
 #[allow(dead_code)]
@@ -983,39 +1178,132 @@ fn unpack_with(
         let _ = std::fs::remove_dir_all(&partial);
         return Err(UnpackError::from(err));
     }
-    // A previous install of this same version leaves the destination in place.
-    // Rename onto that directory fails, so the old tree goes away first.
+    publish_partial(versions, &partial, &published)
+}
+
+/// Assemble `versions/<version>/` from the three upgrade zips (step 16).
+/// A missing server zip copies `rust-reg`, `admin/`, `form/`, and `RELEASE` from `versions/<live>/`.
+/// Wrapper and tray zips add only those binaries when present.
+#[allow(dead_code)]
+pub(crate) fn unpack_parts(
+    prefix: &Path,
+    version: &str,
+    live: &str,
+    server_zip: Option<&Path>,
+    wrapper_zip: Option<&Path>,
+    tray_zip: Option<&Path>,
+) -> Result<(), UnpackError> {
+    unpack_parts_with(
+        prefix,
+        version,
+        live,
+        server_zip,
+        wrapper_zip,
+        tray_zip,
+        &mut |_| {},
+    )
+}
+
+fn unpack_parts_with(
+    prefix: &Path,
+    version: &str,
+    live: &str,
+    server_zip: Option<&Path>,
+    wrapper_zip: Option<&Path>,
+    tray_zip: Option<&Path>,
+    note: &mut dyn FnMut(u64),
+) -> Result<(), UnpackError> {
+    let versions = prefix.join("versions");
+    let partial = versions.join(format!("{version}.partial"));
+    let published = versions.join(version);
+    let scratch = prefix.join("updates").join("part-scratch");
+    let _ = std::fs::remove_dir_all(&scratch);
+    if let Err(err) = std::fs::create_dir_all(&partial) {
+        let _ = std::fs::remove_dir_all(&partial);
+        return Err(UnpackError::from(err));
+    }
+    let result = (|| -> Result<(), UnpackError> {
+        if let Some(zip) = server_zip {
+            let dest = scratch.join("server");
+            extract_zip_tree(zip, &dest)?;
+            copy_payload(&dest, &partial, note)?;
+        } else {
+            copy_live_server(prefix, live, &partial, note)?;
+        }
+        if let Some(zip) = wrapper_zip {
+            let dest = scratch.join("wrapper");
+            extract_zip_tree(zip, &dest)?;
+            let src = dest.join(wrapper_binary_name());
+            let out = partial.join(wrapper_binary_name());
+            let mut copied = 0u64;
+            copy_file(&src, &out, &mut copied, note)?;
+            mark_executable(&out)?;
+        }
+        if let Some(zip) = tray_zip {
+            let dest = scratch.join("tray");
+            extract_zip_tree(zip, &dest)?;
+            let src = dest.join(desk_binary_name());
+            let out = partial.join(desk_binary_name());
+            let mut copied = 0u64;
+            copy_file(&src, &out, &mut copied, note)?;
+            mark_executable(&out)?;
+        }
+        Ok(())
+    })();
+    let _ = std::fs::remove_dir_all(&scratch);
+    if let Err(err) = result {
+        let _ = std::fs::remove_dir_all(&partial);
+        return Err(err);
+    }
+    if let Err(err) = sync_dir(&partial) {
+        let _ = std::fs::remove_dir_all(&partial);
+        return Err(UnpackError::from(err));
+    }
+    publish_partial(versions, &partial, &published)
+}
+
+fn publish_partial(
+    versions: PathBuf,
+    partial: &Path,
+    published: &Path,
+) -> Result<(), UnpackError> {
+    let _ = versions;
     if published.exists() {
         let remove = if published.is_dir() {
-            std::fs::remove_dir_all(&published)
+            std::fs::remove_dir_all(published)
         } else {
-            std::fs::remove_file(&published)
+            std::fs::remove_file(published)
         };
         if let Err(err) = remove {
-            let _ = std::fs::remove_dir_all(&partial);
+            let _ = std::fs::remove_dir_all(partial);
             return Err(UnpackError::from(err));
         }
     }
-    if let Err(err) = std::fs::rename(&partial, &published) {
-        let _ = std::fs::remove_dir_all(&partial);
+    if let Err(err) = std::fs::rename(partial, published) {
+        let _ = std::fs::remove_dir_all(partial);
         return Err(UnpackError::from(err));
     }
     Ok(())
 }
 
-#[derive(Debug)]
-#[allow(dead_code)]
-pub(crate) struct UnpackError;
-
-impl UnpackError {
-    #[allow(dead_code)]
-    fn from(_err: std::io::Error) -> Self {
-        Self
+fn copy_live_server(
+    prefix: &Path,
+    live: &str,
+    partial: &Path,
+    note: &mut dyn FnMut(u64),
+) -> Result<(), UnpackError> {
+    let live_tree = version_dir(prefix, live);
+    if !live_tree.is_dir() {
+        return Err(UnpackError::from(io::Error::new(
+            io::ErrorKind::NotFound,
+            "live version",
+        )));
     }
+    // Skipped server zip: only the four server entries. Wrapper/tray stay absent unless their zips land.
+    copy_server_entries(&live_tree, partial, note)
 }
 
-#[allow(dead_code)]
-fn copy_payload(
+fn copy_server_entries(
     payload: &Path,
     partial: &Path,
     note: &mut dyn FnMut(u64),
@@ -1043,9 +1331,39 @@ fn copy_payload(
         &mut copied,
         note,
     )?;
+    Ok(())
+}
+
+fn extract_zip_tree(zip: &Path, dest: &Path) -> Result<(), UnpackError> {
+    if dest.exists() {
+        std::fs::remove_dir_all(dest).map_err(UnpackError::from)?;
+    }
+    std::fs::create_dir_all(dest).map_err(UnpackError::from)?;
+    unzip(zip, dest, None).map_err(UnpackError::from)
+}
+
+#[derive(Debug)]
+#[allow(dead_code)]
+pub(crate) struct UnpackError;
+
+impl UnpackError {
+    #[allow(dead_code)]
+    fn from(_err: std::io::Error) -> Self {
+        Self
+    }
+}
+
+#[allow(dead_code)]
+fn copy_payload(
+    payload: &Path,
+    partial: &Path,
+    note: &mut dyn FnMut(u64),
+) -> Result<(), UnpackError> {
+    copy_server_entries(payload, partial, note)?;
     let wrapper = wrapper_binary_name();
     let wrapper_src = payload.join(wrapper);
     if wrapper_src.is_file() {
+        let mut copied = 0u64;
         let wrapper_path = partial.join(wrapper);
         copy_file(&wrapper_src, &wrapper_path, &mut copied, note)?;
         mark_executable(&wrapper_path)?;
@@ -1226,59 +1544,46 @@ pub(crate) async fn install(
             };
         }
     };
-    let bytes = std::fs::metadata(&downloaded.path)
+    let bytes = [&downloaded.server_zip, &downloaded.wrapper_zip, &downloaded.tray_zip]
+        .into_iter()
+        .flatten()
+        .filter_map(|path| std::fs::metadata(path).ok())
         .map(|meta| meta.len())
-        .unwrap_or(0);
+        .sum::<u64>();
     eprintln!(
         "registration-server update: downloaded {bytes} bytes {}ms",
         download_started.elapsed().as_millis()
     );
     app.updates.begin_extract();
-    let held = downloaded.held;
-    let scratch = app.prefix.join("updates").join("payload");
-    eprintln!("registration-server update: extract");
-    let extract_started = Instant::now();
-    let payload = match extract_payload(&downloaded.path, &scratch, Some(&app.updates)) {
-        Ok(path) => path,
-        Err(err) => {
-            eprintln!(
-                "registration-server update: extract failed {err} {}ms",
-                extract_started.elapsed().as_millis()
-            );
-            let _ = std::fs::remove_dir_all(&scratch);
-            let _ = std::fs::remove_file(&downloaded.path);
-            app.updates.finish_install();
-            return InstallOutcome {
-                held,
-                result: Err(StageFailure::Failed),
-            };
-        }
-    };
-    eprintln!(
-        "registration-server update: extracted {}ms",
-        extract_started.elapsed().as_millis()
-    );
+    let live = read_version_line(&app.prefix.join("updates").join("live"))
+        .unwrap_or_else(|| release_version().to_string());
     eprintln!("registration-server update: unpack {version}");
     let unpack_started = Instant::now();
-    let payload_len = tree_bytes(&payload).max(1);
-    if let Err(err) = unpack_with(&app.prefix, &version, &payload, &mut |copied| {
-        note_stage(
-            &app.updates,
-            copied,
-            payload_len,
-            EXTRACT_UNITS,
-            UNPACK_UNITS,
-        );
-    }) {
+    if let Err(err) = unpack_parts_with(
+        &app.prefix,
+        &version,
+        &live,
+        downloaded.server_zip.as_deref(),
+        downloaded.wrapper_zip.as_deref(),
+        downloaded.tray_zip.as_deref(),
+        &mut |copied| {
+            note_stage(
+                &app.updates,
+                copied,
+                bytes.max(1),
+                EXTRACT_UNITS,
+                UNPACK_UNITS,
+            );
+        },
+    ) {
         eprintln!(
             "registration-server update: unpack failed {err:?} {}ms",
             unpack_started.elapsed().as_millis()
         );
-        let _ = std::fs::remove_dir_all(&scratch);
-        let _ = std::fs::remove_file(&downloaded.path);
+        downloaded.remove_temps();
         app.updates.finish_install();
         return InstallOutcome {
-            held,
+            held: downloaded.held,
             result: Err(StageFailure::Failed),
         };
     }
@@ -1289,8 +1594,7 @@ pub(crate) async fn install(
     app.updates
         .note_extract(EXTRACT_UNITS + UNPACK_UNITS, EXTRACT_UNITS + UNPACK_UNITS);
     app.updates.begin_apply();
-    let _ = std::fs::remove_dir_all(&scratch);
-    let _ = std::fs::remove_file(&downloaded.path);
+    downloaded.remove_temps();
     eprintln!("registration-server update: stage");
     let stage_started = Instant::now();
     if let Err(err) = write_staged(
@@ -1306,7 +1610,7 @@ pub(crate) async fn install(
         );
         app.updates.finish_install();
         return InstallOutcome {
-            held,
+            held: downloaded.held,
             result: Err(StageFailure::Failed),
         };
     }
@@ -1316,7 +1620,7 @@ pub(crate) async fn install(
         stage_started.elapsed().as_millis()
     );
     InstallOutcome {
-        held,
+        held: downloaded.held,
         result: Ok(version),
     }
 }
@@ -1900,21 +2204,31 @@ pub(crate) fn supervise(
                 return Err(err);
             }
         };
-        let mut wrapper_checked = false;
+        let mut extras_checked = false;
         loop {
             if stop.load(Ordering::Acquire) {
                 let _ = child.kill();
                 let _ = child.wait();
                 return Ok(());
             }
-            if !wrapper_checked && phase_is(prefix, "current") {
-                wrapper_checked = true;
+            if !extras_checked && phase_is(prefix, "current") {
+                extras_checked = true;
                 if let Err(err) = replace_wrapper(prefix, own_wrapper_path().as_deref()) {
                     eprintln!("rust-reg-run: wrapper {err}");
                 }
+                if let Err(err) = replace_tray(prefix) {
+                    eprintln!("rust-reg-run: tray {err}");
+                }
             }
             match child.try_wait() {
-                Ok(Some(_)) => break,
+                Ok(Some(_)) => {
+                    // A process-group TERM can kill the server before this
+                    // wrapper's stop flag is set. Do not start another copy.
+                    if stop.load(Ordering::Acquire) {
+                        return Ok(());
+                    }
+                    break;
+                }
                 Ok(None) => std::thread::sleep(Duration::from_millis(10)),
                 Err(err) => {
                     let _ = child.kill();
@@ -1946,15 +2260,22 @@ pub(crate) fn run_supervisor(prefix: &Path) -> io::Result<()> {
 }
 
 fn spawn_registration(prefix: &Path, version_dir: &Path) -> io::Result<Child> {
-    Command::new(version_dir.join(version_binary_name()))
+    let mut command = Command::new(version_dir.join(version_binary_name()));
+    command
         .arg("registration-server")
         .arg("--credentials")
         .arg(prefix.join("data").join("credentials.yml"))
         .arg("--dist")
         .arg(version_dir.join("admin"))
         .arg("--form")
-        .arg(version_dir.join("form"))
-        .spawn()
+        .arg(version_dir.join("form"));
+    // The tray sets this when the menu asks for a listen port.
+    if let Ok(http) = std::env::var("RUST_REG_HTTP") {
+        if !http.is_empty() {
+            command.arg("--http").arg(http);
+        }
+    }
+    command.spawn()
 }
 
 #[cfg(unix)]
@@ -2395,6 +2716,59 @@ pub(crate) fn replace_wrapper(prefix: &Path, detected: Option<&Path>) -> io::Res
     write_replaced(detected, &new_bytes)
 }
 
+/// After the phase is `current`, copy `versions/<to>/rust-reg-desk` onto `<prefix>/bin/` when
+/// that new file is present and the digests differ. A missing new file leaves the installed tray.
+/// On macOS the same bytes also replace `/Applications/reg-server.app/Contents/MacOS/reg-server`
+/// when that path exists. Any other phase leaves the tray alone.
+pub(crate) fn replace_tray(prefix: &Path) -> io::Result<()> {
+    replace_tray_with(prefix, macos_tray_app_path().as_deref())
+}
+
+/// Same as [`replace_tray`], with an optional extra destination (used for the macOS app binary).
+pub(crate) fn replace_tray_with(prefix: &Path, app: Option<&Path>) -> io::Result<()> {
+    let Some(state) = read_state(prefix) else {
+        return Ok(());
+    };
+    if state.phase != "current" || state.to.is_empty() {
+        return Ok(());
+    }
+    let source = version_dir(prefix, &state.to).join(desk_binary_name());
+    if !source.is_file() {
+        return Ok(());
+    }
+    let new_bytes = std::fs::read(&source)?;
+    let bin = prefix.join("bin").join(desk_binary_name());
+    replace_dest_if_newer(&bin, &new_bytes)?;
+    if let Some(app) = app.filter(|path| path.is_file()) {
+        replace_dest_if_newer(app, &new_bytes)?;
+    }
+    Ok(())
+}
+
+fn replace_dest_if_newer(dest: &Path, new_bytes: &[u8]) -> io::Result<()> {
+    if dest.is_file() {
+        let old_bytes = std::fs::read(dest)?;
+        if sha256_hex(new_bytes) == sha256_hex(&old_bytes) {
+            return Ok(());
+        }
+    } else if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    write_replaced(dest, new_bytes)
+}
+
+fn macos_tray_app_path() -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        let path = PathBuf::from("/Applications/reg-server.app/Contents/MacOS/reg-server");
+        path.is_file().then_some(path)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
 /// Write `bytes` beside `dest`, fsync that file, rename it onto `dest`, then fsync the directory.
 fn write_replaced(dest: &Path, bytes: &[u8]) -> io::Result<()> {
     let parent = match dest.parent() {
@@ -2442,6 +2816,9 @@ pub(crate) fn note_listening_on(prefix: &Path, today: Day) -> io::Result<()> {
     }
     if let Err(err) = replace_wrapper(prefix, server_wrapper_path().as_deref()) {
         eprintln!("registration-server update: wrapper {err}");
+    }
+    if let Err(err) = replace_tray(prefix) {
+        eprintln!("registration-server update: tray {err}");
     }
     Ok(())
 }
@@ -2715,6 +3092,18 @@ mod tests {
             assert_eq!(
                 super::super::macos_upgrade_archive("2.0.0-alpha.2", false),
                 "rust-reg-2.0.0-alpha.2-macos-intel.zip"
+            );
+        }
+
+        #[test]
+        fn the_linux_upgrade_follows_the_processor() {
+            assert_eq!(
+                super::super::linux_upgrade_archive("2.0.0-alpha.2", false),
+                "rust-reg-2.0.0-alpha.2-linux.zip"
+            );
+            assert_eq!(
+                super::super::linux_upgrade_archive("2.0.0-alpha.2", true),
+                "rust-reg-2.0.0-alpha.2-linux-arm64.zip"
             );
         }
     }
@@ -3561,6 +3950,7 @@ mod tests {
     }
 
     mod download {
+        use std::collections::HashMap;
         use std::path::PathBuf;
         use std::sync::{Arc, Mutex};
         use std::time::Duration;
@@ -3568,18 +3958,16 @@ mod tests {
         use axum::extract::Request;
         use axum::routing::get;
         use axum::Router;
-        use sha2::{Digest, Sha256};
         use tokio::net::TcpListener;
 
         use crate::registration_server::gate::Gate;
 
         use super::super::{
-            asset_name, asset_temp_path, download_release, github_client, UPDATE_REPO,
+            asset_name, asset_temp_path, download_release, github_client, part_file_key,
+            payload_zip, sha256_hex, version_binary_name, UpgradePart, UPDATE_REPO,
         };
 
         const VERSION: &str = "0.2.0";
-        const BYTES: &[u8] = b"rust-reg-asset";
-        const DIGEST: &str = "74df8ebebf381ce387cbafe365f4a8ac43d67ce1b3dbbe8b027abf94250b4ce4";
 
         struct TempDir(PathBuf);
 
@@ -3603,23 +3991,28 @@ mod tests {
             }
         }
 
-        fn hex(bytes: &[u8]) -> String {
-            let digest = Sha256::digest(bytes);
-            let mut out = String::with_capacity(digest.len() * 2);
-            for byte in digest {
-                out.push_str(&format!("{byte:02x}"));
-            }
-            out
+        fn server_bytes() -> Vec<u8> {
+            payload_zip(&[
+                (version_binary_name(), b"new-server"),
+                ("admin/index.html", b"admin"),
+                ("form/index.html", b"form"),
+                ("RELEASE", b"v0.2.0\n"),
+            ])
         }
 
-        async fn stand_in(sums: String) -> (String, Arc<Mutex<Vec<String>>>) {
+        async fn stand_in(
+            files: HashMap<String, Vec<u8>>,
+            sums: String,
+        ) -> (String, Arc<Mutex<Vec<String>>>) {
             let hits = Arc::new(Mutex::new(Vec::new()));
             let recorded = Arc::clone(&hits);
+            let files = Arc::new(files);
             let sums = Arc::new(sums);
             let app = Router::new().route(
                 "/repos/{owner}/{repo}/releases/download/{tag}/{file}",
                 get(move |request: Request| {
                     let recorded = Arc::clone(&recorded);
+                    let files = Arc::clone(&files);
                     let sums = Arc::clone(&sums);
                     async move {
                         let path = request.uri().path().to_string();
@@ -3627,7 +4020,9 @@ mod tests {
                         if path.ends_with("/SHA256SUMS") {
                             (axum::http::StatusCode::OK, sums.as_bytes().to_vec())
                         } else {
-                            (axum::http::StatusCode::OK, BYTES.to_vec())
+                            let name = path.rsplit('/').next().unwrap_or("");
+                            let body = files.get(name).cloned().unwrap_or_default();
+                            (axum::http::StatusCode::OK, body)
                         }
                     }
                 }),
@@ -3640,10 +4035,24 @@ mod tests {
             (format!("http://{addr}"), hits)
         }
 
+        fn server_only_sums(zip: &[u8]) -> (String, String) {
+            let name = asset_name(VERSION);
+            let key = part_file_key(UpgradePart::Server);
+            let sums = format!(
+                "{}  {name}\n{}  {key}\n",
+                sha256_hex(zip),
+                sha256_hex(b"new-server")
+            );
+            (name, sums)
+        }
+
         #[tokio::test]
         async fn the_asset_for_this_os_is_downloaded() {
-            let name = asset_name(VERSION);
-            let (base, hits) = stand_in(format!("{DIGEST}  {name}\n")).await;
+            let zip = server_bytes();
+            let (name, sums) = server_only_sums(&zip);
+            let mut files = HashMap::new();
+            files.insert(name.clone(), zip.clone());
+            let (base, hits) = stand_in(files, sums).await;
             let dir = TempDir::new();
             let versions = dir.0.join("versions");
             std::fs::create_dir_all(&versions).unwrap();
@@ -3663,15 +4072,21 @@ mod tests {
             assert!(seen.iter().any(|path| path.contains(&name)));
             assert!(seen.iter().any(|path| path.ends_with("/SHA256SUMS")));
             drop(seen);
-            let bytes = std::fs::read(&loaded.path).unwrap();
-            assert_eq!(hex(&bytes), DIGEST);
+            let path = loaded.server_zip.expect("server zip");
+            let bytes = std::fs::read(&path).unwrap();
+            assert_eq!(sha256_hex(&bytes), sha256_hex(&zip));
+            assert!(loaded.wrapper_zip.is_none());
+            assert!(loaded.tray_zip.is_none());
             assert!(std::fs::read_dir(&versions).unwrap().next().is_none());
         }
 
         #[tokio::test]
         async fn the_download_waits_out_a_print() {
-            let name = asset_name(VERSION);
-            let (base, hits) = stand_in(format!("{DIGEST}  {name}\n")).await;
+            let zip = server_bytes();
+            let (name, sums) = server_only_sums(&zip);
+            let mut files = HashMap::new();
+            files.insert(name.clone(), zip);
+            let (base, hits) = stand_in(files, sums).await;
             let dir = TempDir::new();
             let gate = Arc::new(Gate::new());
             let guard = gate.enter_print();
@@ -3708,9 +4123,14 @@ mod tests {
 
         #[tokio::test]
         async fn a_bad_digest_leaves_no_file() {
+            let zip = server_bytes();
             let name = asset_name(VERSION);
+            let key = part_file_key(UpgradePart::Server);
             let wrong = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-            let (base, _) = stand_in(format!("{wrong}  {name}\n")).await;
+            let sums = format!("{wrong}  {name}\n{}  {key}\n", sha256_hex(b"new-server"));
+            let mut files = HashMap::new();
+            files.insert(name, zip);
+            let (base, _) = stand_in(files, sums).await;
             let dir = TempDir::new();
             let updates = dir.0.join("updates");
             std::fs::create_dir_all(&updates).unwrap();
@@ -3870,6 +4290,590 @@ mod tests {
         }
     }
 
+    mod parts {
+        use std::collections::HashMap;
+        use std::path::{Path, PathBuf};
+        use std::sync::{Arc, Mutex};
+        use std::time::Duration;
+
+        use axum::extract::Request;
+        use axum::routing::get;
+        use axum::Router;
+        use tokio::net::TcpListener;
+
+        use crate::registration_server::gate::Gate;
+
+        use super::super::{
+            desk_binary_name, download_release, github_client, part_file_key, part_temp_path,
+            part_zip_name, payload_zip, replace_tray, replace_tray_with, sha256_hex, unpack_parts,
+            version_binary_name, wrapper_binary_name, UpgradePart, UPDATE_REPO,
+        };
+
+        const VERSION: &str = "0.2.0";
+        const LIVE: &str = "0.1.0";
+
+        struct TempDir(PathBuf);
+
+        impl TempDir {
+            fn new() -> Self {
+                use std::sync::atomic::{AtomicU64, Ordering};
+                static NEXT: AtomicU64 = AtomicU64::new(0);
+                let path = std::env::temp_dir().join(format!(
+                    "reg-parts-{}-{}",
+                    std::process::id(),
+                    NEXT.fetch_add(1, Ordering::Relaxed)
+                ));
+                std::fs::create_dir_all(&path).unwrap();
+                Self(path)
+            }
+        }
+
+        impl Drop for TempDir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        fn server_zip_bytes(server: &[u8]) -> Vec<u8> {
+            payload_zip(&[
+                (version_binary_name(), server),
+                ("admin/index.html", b"admin-new"),
+                ("form/index.html", b"form-new"),
+                ("RELEASE", b"v0.2.0\n"),
+            ])
+        }
+
+        fn wrapper_zip_bytes(bytes: &[u8]) -> Vec<u8> {
+            payload_zip(&[(wrapper_binary_name(), bytes)])
+        }
+
+        fn tray_zip_bytes(bytes: &[u8]) -> Vec<u8> {
+            payload_zip(&[(desk_binary_name(), bytes)])
+        }
+
+        fn plant_live(prefix: &Path, server: &[u8]) {
+            let updates = prefix.join("updates");
+            std::fs::create_dir_all(&updates).unwrap();
+            std::fs::write(updates.join("live"), format!("{LIVE}\n")).unwrap();
+            let tree = prefix.join("versions").join(LIVE);
+            std::fs::create_dir_all(tree.join("admin")).unwrap();
+            std::fs::create_dir_all(tree.join("form")).unwrap();
+            std::fs::write(tree.join(version_binary_name()), server).unwrap();
+            std::fs::write(tree.join("admin").join("index.html"), b"admin-live").unwrap();
+            std::fs::write(tree.join("form").join("index.html"), b"form-live").unwrap();
+            std::fs::write(tree.join("RELEASE"), b"v0.1.0\n").unwrap();
+        }
+
+        fn plant_bin(prefix: &Path, wrapper: Option<&[u8]>, tray: Option<&[u8]>) {
+            let bin = prefix.join("bin");
+            std::fs::create_dir_all(&bin).unwrap();
+            if let Some(bytes) = wrapper {
+                std::fs::write(bin.join(wrapper_binary_name()), bytes).unwrap();
+            }
+            if let Some(bytes) = tray {
+                std::fs::write(bin.join(desk_binary_name()), bytes).unwrap();
+            }
+        }
+
+        fn write_phase(prefix: &Path, phase: &str, from: &str, to: &str) {
+            std::fs::create_dir_all(prefix.join("updates")).unwrap();
+            std::fs::write(
+                prefix.join("updates").join("state.yml"),
+                format!("phase: {phase}\nfrom: \"{from}\"\nto: \"{to}\"\nrejected: []\n"),
+            )
+            .unwrap();
+        }
+
+        fn plant_version_tray(prefix: &Path, version: &str, bytes: &[u8]) {
+            let tree = prefix.join("versions").join(version);
+            std::fs::create_dir_all(&tree).unwrap();
+            std::fs::write(tree.join(desk_binary_name()), bytes).unwrap();
+        }
+
+        fn sums_lines(entries: &[(&str, &[u8])]) -> String {
+            let mut out = String::new();
+            for (name, bytes) in entries {
+                out.push_str(&format!("{}  {name}\n", sha256_hex(bytes)));
+            }
+            out
+        }
+
+        async fn stand_in(
+            files: HashMap<String, Vec<u8>>,
+            sums: String,
+        ) -> (String, Arc<Mutex<Vec<String>>>) {
+            let hits = Arc::new(Mutex::new(Vec::new()));
+            let recorded = Arc::clone(&hits);
+            let files = Arc::new(files);
+            let sums = Arc::new(sums);
+            let app = Router::new().route(
+                "/repos/{owner}/{repo}/releases/download/{tag}/{file}",
+                get(move |request: Request| {
+                    let recorded = Arc::clone(&recorded);
+                    let files = Arc::clone(&files);
+                    let sums = Arc::clone(&sums);
+                    async move {
+                        let path = request.uri().path().to_string();
+                        recorded.lock().expect("hits").push(path.clone());
+                        if path.ends_with("/SHA256SUMS") {
+                            (axum::http::StatusCode::OK, sums.as_bytes().to_vec())
+                        } else {
+                            let name = path.rsplit('/').next().unwrap_or("");
+                            let body = files.get(name).cloned().unwrap_or_default();
+                            (axum::http::StatusCode::OK, body)
+                        }
+                    }
+                }),
+            );
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            (format!("http://{addr}"), hits)
+        }
+
+        fn zip_hit(hits: &[String], part: UpgradePart) -> bool {
+            let name = part_zip_name(VERSION, part);
+            hits.iter().any(|path| path.ends_with(&format!("/{name}")))
+        }
+
+        async fn fetch(
+            prefix: &Path,
+            base: &str,
+        ) -> Result<super::super::Downloaded, super::super::DownloadFailed> {
+            download_release(
+                prefix,
+                &Arc::new(Gate::new()),
+                None,
+                &github_client(Duration::from_secs(5)),
+                base,
+                UPDATE_REPO,
+                VERSION,
+                None,
+            )
+            .await
+        }
+
+        #[tokio::test]
+        async fn a_matching_tray_is_not_downloaded() {
+            let dir = TempDir::new();
+            plant_live(&dir.0, b"old-server");
+            plant_bin(&dir.0, Some(b"old-wrapper"), Some(b"same-tray"));
+            let server = server_zip_bytes(b"new-server");
+            let wrapper = wrapper_zip_bytes(b"new-wrapper");
+            let tray = tray_zip_bytes(b"same-tray");
+            let server_name = part_zip_name(VERSION, UpgradePart::Server);
+            let wrapper_name = part_zip_name(VERSION, UpgradePart::Wrapper);
+            let tray_name = part_zip_name(VERSION, UpgradePart::Tray);
+            let sums = sums_lines(&[
+                (&server_name, server.as_slice()),
+                (&wrapper_name, wrapper.as_slice()),
+                (&tray_name, tray.as_slice()),
+                (&part_file_key(UpgradePart::Server), b"new-server"),
+                (&part_file_key(UpgradePart::Wrapper), b"new-wrapper"),
+                (&part_file_key(UpgradePart::Tray), b"same-tray"),
+            ]);
+            let mut files = HashMap::new();
+            files.insert(server_name, server);
+            files.insert(wrapper_name, wrapper);
+            files.insert(tray_name, tray);
+            let (base, hits) = stand_in(files, sums).await;
+            let before = std::fs::read(dir.0.join("bin").join(desk_binary_name())).unwrap();
+            let loaded = fetch(&dir.0, &base).await.unwrap_or_else(|err| panic!("{}", err.code()));
+            let seen = hits.lock().expect("hits");
+            assert!(seen.iter().any(|path| path.ends_with("/SHA256SUMS")));
+            assert!(!zip_hit(&seen, UpgradePart::Tray));
+            assert!(zip_hit(&seen, UpgradePart::Server));
+            assert!(zip_hit(&seen, UpgradePart::Wrapper));
+            drop(seen);
+            assert!(loaded.tray_zip.is_none());
+            assert_eq!(
+                std::fs::read(dir.0.join("bin").join(desk_binary_name())).unwrap(),
+                before
+            );
+        }
+
+        #[tokio::test]
+        async fn a_new_tray_is_downloaded() {
+            let dir = TempDir::new();
+            plant_live(&dir.0, b"same-server");
+            plant_bin(&dir.0, Some(b"same-wrapper"), Some(b"old-tray"));
+            let server = server_zip_bytes(b"same-server");
+            let wrapper = wrapper_zip_bytes(b"same-wrapper");
+            let tray = tray_zip_bytes(b"new-tray");
+            let server_name = part_zip_name(VERSION, UpgradePart::Server);
+            let wrapper_name = part_zip_name(VERSION, UpgradePart::Wrapper);
+            let tray_name = part_zip_name(VERSION, UpgradePart::Tray);
+            let sums = sums_lines(&[
+                (&server_name, server.as_slice()),
+                (&wrapper_name, wrapper.as_slice()),
+                (&tray_name, tray.as_slice()),
+                (&part_file_key(UpgradePart::Server), b"same-server"),
+                (&part_file_key(UpgradePart::Wrapper), b"same-wrapper"),
+                (&part_file_key(UpgradePart::Tray), b"new-tray"),
+            ]);
+            let mut files = HashMap::new();
+            files.insert(server_name, server);
+            files.insert(wrapper_name, wrapper);
+            files.insert(tray_name.clone(), tray.clone());
+            let (base, hits) = stand_in(files, sums).await;
+            let loaded = fetch(&dir.0, &base).await.unwrap_or_else(|err| panic!("{}", err.code()));
+            let seen = hits.lock().expect("hits");
+            assert!(zip_hit(&seen, UpgradePart::Tray));
+            assert!(!zip_hit(&seen, UpgradePart::Wrapper));
+            assert!(!zip_hit(&seen, UpgradePart::Server));
+            drop(seen);
+            let path = loaded.tray_zip.expect("tray zip");
+            assert_eq!(std::fs::read(&path).unwrap(), tray);
+            assert!(loaded.wrapper_zip.is_none());
+            assert!(loaded.server_zip.is_none());
+
+            // Step 4 finish: after `current`, bin matches the new version tree.
+            unpack_parts(&dir.0, VERSION, LIVE, None, None, Some(&path)).unwrap();
+            write_phase(&dir.0, "current", LIVE, VERSION);
+            replace_tray(&dir.0).unwrap();
+            assert_eq!(
+                std::fs::read(dir.0.join("bin").join(desk_binary_name())).unwrap(),
+                b"new-tray"
+            );
+            assert_eq!(
+                std::fs::read(
+                    dir.0
+                        .join("versions")
+                        .join(VERSION)
+                        .join(desk_binary_name())
+                )
+                .unwrap(),
+                b"new-tray"
+            );
+        }
+
+        #[tokio::test]
+        async fn a_matching_wrapper_is_not_downloaded() {
+            let dir = TempDir::new();
+            plant_live(&dir.0, b"old-server");
+            plant_bin(&dir.0, Some(b"same-wrapper"), Some(b"old-tray"));
+            let server = server_zip_bytes(b"new-server");
+            let wrapper = wrapper_zip_bytes(b"same-wrapper");
+            let tray = tray_zip_bytes(b"new-tray");
+            let server_name = part_zip_name(VERSION, UpgradePart::Server);
+            let wrapper_name = part_zip_name(VERSION, UpgradePart::Wrapper);
+            let tray_name = part_zip_name(VERSION, UpgradePart::Tray);
+            let sums = sums_lines(&[
+                (&server_name, server.as_slice()),
+                (&wrapper_name, wrapper.as_slice()),
+                (&tray_name, tray.as_slice()),
+                (&part_file_key(UpgradePart::Server), b"new-server"),
+                (&part_file_key(UpgradePart::Wrapper), b"same-wrapper"),
+                (&part_file_key(UpgradePart::Tray), b"new-tray"),
+            ]);
+            let mut files = HashMap::new();
+            files.insert(server_name, server);
+            files.insert(wrapper_name, wrapper);
+            files.insert(tray_name, tray);
+            let (base, hits) = stand_in(files, sums).await;
+            let loaded = fetch(&dir.0, &base).await.unwrap_or_else(|err| panic!("{}", err.code()));
+            let seen = hits.lock().expect("hits");
+            assert!(!zip_hit(&seen, UpgradePart::Wrapper));
+            assert!(zip_hit(&seen, UpgradePart::Server));
+            assert!(zip_hit(&seen, UpgradePart::Tray));
+            drop(seen);
+            assert!(loaded.wrapper_zip.is_none());
+        }
+
+        #[tokio::test]
+        async fn the_server_zip_skips_when_the_binary_matches() {
+            let dir = TempDir::new();
+            plant_live(&dir.0, b"same-server");
+            plant_bin(&dir.0, Some(b"old-wrapper"), None);
+            let server = server_zip_bytes(b"same-server");
+            let wrapper = wrapper_zip_bytes(b"new-wrapper");
+            let server_name = part_zip_name(VERSION, UpgradePart::Server);
+            let wrapper_name = part_zip_name(VERSION, UpgradePart::Wrapper);
+            let sums = sums_lines(&[
+                (&server_name, server.as_slice()),
+                (&wrapper_name, wrapper.as_slice()),
+                (&part_file_key(UpgradePart::Server), b"same-server"),
+                (&part_file_key(UpgradePart::Wrapper), b"new-wrapper"),
+            ]);
+            let mut files = HashMap::new();
+            files.insert(server_name, server);
+            files.insert(wrapper_name, wrapper);
+            let (base, hits) = stand_in(files, sums).await;
+            let loaded = fetch(&dir.0, &base).await.unwrap_or_else(|err| panic!("{}", err.code()));
+            let seen = hits.lock().expect("hits");
+            assert!(!zip_hit(&seen, UpgradePart::Server));
+            assert!(zip_hit(&seen, UpgradePart::Wrapper));
+            drop(seen);
+            assert!(loaded.server_zip.is_none());
+            assert!(loaded.wrapper_zip.is_some());
+        }
+
+        #[tokio::test]
+        async fn a_bad_zip_digest_downloads_nothing_else() {
+            let dir = TempDir::new();
+            plant_live(&dir.0, b"same-server");
+            plant_bin(&dir.0, Some(b"old-wrapper"), Some(b"old-tray"));
+            let server = server_zip_bytes(b"same-server");
+            let wrapper = wrapper_zip_bytes(b"new-wrapper");
+            let tray = tray_zip_bytes(b"new-tray");
+            let server_name = part_zip_name(VERSION, UpgradePart::Server);
+            let wrapper_name = part_zip_name(VERSION, UpgradePart::Wrapper);
+            let tray_name = part_zip_name(VERSION, UpgradePart::Tray);
+            let wrong = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+            let sums = format!(
+                "{}  {server_name}\n{}  {wrapper_name}\n{wrong}  {tray_name}\n{}  {}\n{}  {}\n{}  {}\n",
+                sha256_hex(&server),
+                sha256_hex(&wrapper),
+                sha256_hex(b"same-server"),
+                part_file_key(UpgradePart::Server),
+                sha256_hex(b"new-wrapper"),
+                part_file_key(UpgradePart::Wrapper),
+                sha256_hex(b"new-tray"),
+                part_file_key(UpgradePart::Tray),
+            );
+            let mut files = HashMap::new();
+            files.insert(server_name, server);
+            files.insert(wrapper_name.clone(), wrapper);
+            files.insert(tray_name, tray);
+            let (base, hits) = stand_in(files, sums).await;
+            let err = fetch(&dir.0, &base)
+                .await
+                .err()
+                .unwrap_or_else(|| panic!("download succeeded"));
+            assert_eq!(err.code(), "checksum_mismatch");
+            let seen = hits.lock().expect("hits");
+            assert!(!zip_hit(&seen, UpgradePart::Server));
+            assert!(zip_hit(&seen, UpgradePart::Wrapper));
+            assert!(zip_hit(&seen, UpgradePart::Tray));
+            // Failure stops the loop: nothing is left to fetch after tray.
+            assert_eq!(
+                seen
+                    .iter()
+                    .filter(|path| path.contains(".zip"))
+                    .count(),
+                2
+            );
+            drop(seen);
+            assert!(!part_temp_path(&dir.0, VERSION, UpgradePart::Wrapper).exists());
+            assert!(!part_temp_path(&dir.0, VERSION, UpgradePart::Tray).exists());
+            assert!(!part_temp_path(&dir.0, VERSION, UpgradePart::Server).exists());
+        }
+
+        #[test]
+        fn server_unpack_without_tray_wrapper() {
+            let dir = TempDir::new();
+            plant_live(&dir.0, b"old-server");
+            let zip_path = dir.0.join("server.zip");
+            std::fs::write(&zip_path, server_zip_bytes(b"new-server")).unwrap();
+            unpack_parts(&dir.0, VERSION, LIVE, Some(&zip_path), None, None).unwrap();
+            let tree = dir.0.join("versions").join(VERSION);
+            assert_eq!(
+                std::fs::read(tree.join(version_binary_name())).unwrap(),
+                b"new-server"
+            );
+            assert_eq!(
+                std::fs::read(tree.join("admin").join("index.html")).unwrap(),
+                b"admin-new"
+            );
+            assert_eq!(
+                std::fs::read(tree.join("form").join("index.html")).unwrap(),
+                b"form-new"
+            );
+            assert_eq!(std::fs::read_to_string(tree.join("RELEASE")).unwrap(), "v0.2.0\n");
+            assert!(!tree.join(wrapper_binary_name()).exists());
+            assert!(!tree.join(desk_binary_name()).exists());
+        }
+
+        #[test]
+        fn wrapper_zip_only_adds_run() {
+            let dir = TempDir::new();
+            plant_live(&dir.0, b"live-server");
+            let server = dir.0.join("server.zip");
+            let wrapper = dir.0.join("wrapper.zip");
+            std::fs::write(&server, server_zip_bytes(b"new-server")).unwrap();
+            std::fs::write(&wrapper, wrapper_zip_bytes(b"new-wrapper")).unwrap();
+            unpack_parts(
+                &dir.0,
+                VERSION,
+                LIVE,
+                Some(&server),
+                Some(&wrapper),
+                None,
+            )
+            .unwrap();
+            let tree = dir.0.join("versions").join(VERSION);
+            assert_eq!(
+                std::fs::read(tree.join(wrapper_binary_name())).unwrap(),
+                b"new-wrapper"
+            );
+            assert!(!tree.join(desk_binary_name()).exists());
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = std::fs::metadata(tree.join(wrapper_binary_name()))
+                    .unwrap()
+                    .permissions()
+                    .mode();
+                assert_ne!(mode & 0o111, 0);
+            }
+        }
+
+        #[test]
+        fn tray_zip_only_adds_desk() {
+            let dir = TempDir::new();
+            plant_live(&dir.0, b"live-server");
+            let server = dir.0.join("server.zip");
+            let tray = dir.0.join("tray.zip");
+            std::fs::write(&server, server_zip_bytes(b"new-server")).unwrap();
+            std::fs::write(&tray, tray_zip_bytes(b"new-desk")).unwrap();
+            unpack_parts(&dir.0, VERSION, LIVE, Some(&server), None, Some(&tray)).unwrap();
+            let tree = dir.0.join("versions").join(VERSION);
+            assert_eq!(
+                std::fs::read(tree.join(desk_binary_name())).unwrap(),
+                b"new-desk"
+            );
+            assert!(!tree.join(wrapper_binary_name()).exists());
+        }
+
+        #[test]
+        fn skipped_server_copies_live_tree() {
+            let dir = TempDir::new();
+            plant_live(&dir.0, b"live-server");
+            // Live also has a wrapper; skipped server must not copy it into the new tree.
+            std::fs::write(
+                dir.0
+                    .join("versions")
+                    .join(LIVE)
+                    .join(wrapper_binary_name()),
+                b"should-not-copy",
+            )
+            .unwrap();
+            let wrapper = dir.0.join("wrapper.zip");
+            std::fs::write(&wrapper, wrapper_zip_bytes(b"new-wrapper")).unwrap();
+            unpack_parts(&dir.0, VERSION, LIVE, None, Some(&wrapper), None).unwrap();
+            let tree = dir.0.join("versions").join(VERSION);
+            assert_eq!(
+                std::fs::read(tree.join(version_binary_name())).unwrap(),
+                b"live-server"
+            );
+            assert_eq!(
+                std::fs::read(tree.join("admin").join("index.html")).unwrap(),
+                b"admin-live"
+            );
+            assert_eq!(
+                std::fs::read(tree.join("form").join("index.html")).unwrap(),
+                b"form-live"
+            );
+            assert_eq!(std::fs::read_to_string(tree.join("RELEASE")).unwrap(), "v0.1.0\n");
+            assert_eq!(
+                std::fs::read(tree.join(wrapper_binary_name())).unwrap(),
+                b"new-wrapper"
+            );
+        }
+
+        #[test]
+        fn rollback_does_not_replace_the_tray() {
+            let dir = TempDir::new();
+            write_phase(&dir.0, "rolled_back", LIVE, VERSION);
+            plant_version_tray(&dir.0, VERSION, b"new-tray");
+            plant_bin(&dir.0, None, Some(b"old-tray"));
+            replace_tray(&dir.0).unwrap();
+            assert_eq!(
+                std::fs::read(dir.0.join("bin").join(desk_binary_name())).unwrap(),
+                b"old-tray"
+            );
+        }
+
+        #[test]
+        fn matching_tray_digest_leaves_bin() {
+            let dir = TempDir::new();
+            write_phase(&dir.0, "current", LIVE, VERSION);
+            plant_version_tray(&dir.0, VERSION, b"same-tray");
+            plant_bin(&dir.0, None, Some(b"same-tray"));
+            let bin = dir.0.join("bin").join(desk_binary_name());
+            #[cfg(unix)]
+            let inode = {
+                use std::os::unix::fs::MetadataExt;
+                std::fs::metadata(&bin).unwrap().ino()
+            };
+            replace_tray(&dir.0).unwrap();
+            assert_eq!(std::fs::read(&bin).unwrap(), b"same-tray");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                assert_eq!(std::fs::metadata(&bin).unwrap().ino(), inode);
+            }
+        }
+
+        #[test]
+        fn a_missing_tray_in_the_version_tree_leaves_bin() {
+            let dir = TempDir::new();
+            write_phase(&dir.0, "current", LIVE, VERSION);
+            plant_bin(&dir.0, None, Some(b"old-tray"));
+            std::fs::create_dir_all(dir.0.join("versions").join(VERSION)).unwrap();
+            replace_tray(&dir.0).unwrap();
+            assert_eq!(
+                std::fs::read(dir.0.join("bin").join(desk_binary_name())).unwrap(),
+                b"old-tray"
+            );
+        }
+
+        #[test]
+        fn a_failed_tray_copy_leaves_the_old_bin() {
+            let dir = TempDir::new();
+            write_phase(&dir.0, "current", LIVE, VERSION);
+            plant_version_tray(&dir.0, VERSION, b"new-tray");
+            plant_bin(&dir.0, None, Some(b"old-tray"));
+            let bin = dir.0.join("bin").join(desk_binary_name());
+            std::fs::create_dir(
+                bin.parent()
+                    .unwrap()
+                    .join(format!("{}.new", desk_binary_name())),
+            )
+            .unwrap();
+            assert!(replace_tray(&dir.0).is_err());
+            assert_eq!(std::fs::read(&bin).unwrap(), b"old-tray");
+            assert_eq!(
+                std::fs::read(
+                    dir.0
+                        .join("versions")
+                        .join(VERSION)
+                        .join(desk_binary_name())
+                )
+                .unwrap(),
+                b"new-tray"
+            );
+            let text = std::fs::read_to_string(dir.0.join("updates").join("state.yml")).unwrap();
+            let state: serde_yaml::Value = serde_yaml::from_str(&text).unwrap();
+            assert_eq!(state["phase"].as_str(), Some("current"));
+        }
+
+        #[test]
+        fn macos_app_path_is_replaced_when_present() {
+            let dir = TempDir::new();
+            write_phase(&dir.0, "current", LIVE, VERSION);
+            plant_version_tray(&dir.0, VERSION, b"new-tray");
+            plant_bin(&dir.0, None, Some(b"old-tray"));
+            let app = dir
+                .0
+                .join("Applications")
+                .join("reg-server.app")
+                .join("Contents")
+                .join("MacOS")
+                .join("reg-server");
+            std::fs::create_dir_all(app.parent().unwrap()).unwrap();
+            std::fs::write(&app, b"old-app").unwrap();
+            replace_tray_with(&dir.0, Some(&app)).unwrap();
+            assert_eq!(
+                std::fs::read(dir.0.join("bin").join(desk_binary_name())).unwrap(),
+                b"new-tray"
+            );
+            assert_eq!(std::fs::read(&app).unwrap(), b"new-tray");
+        }
+    }
+
     mod stage {
         use std::path::PathBuf;
         use std::sync::{Arc, Mutex};
@@ -3888,7 +4892,10 @@ mod tests {
         use crate::registration_server::print_queue::PrintJob;
         use crate::registration_server::App;
 
-        use super::super::{asset_name, release_version, sha256_hex, version_binary_name};
+        use super::super::{
+            asset_name, part_file_key, release_version, sha256_hex, version_binary_name,
+            UpgradePart,
+        };
 
         struct TempDir(PathBuf);
 
@@ -3979,6 +4986,12 @@ mod tests {
             ])
         }
 
+        fn server_sums(zip: &[u8]) -> String {
+            let name = asset_name("0.2.0");
+            let key = part_file_key(UpgradePart::Server);
+            format!("{}  {name}\n{}  {key}\n", sha256_hex(zip), sha256_hex(b"new-server"))
+        }
+
         async fn stand_in(asset: Vec<u8>, sums: String) -> (String, Arc<Mutex<Vec<String>>>) {
             let hits = Arc::new(Mutex::new(Vec::new()));
             let recorded = Arc::clone(&hits);
@@ -4025,7 +5038,8 @@ mod tests {
             let prefix = TempDir::new();
             venue.app.prefix = prefix.0.clone();
             plant(&prefix.0);
-            let (base, hits) = stand_in(archive(), "unused\n".into()).await;
+            let zip = archive();
+            let (base, hits) = stand_in(zip.clone(), server_sums(&zip)).await;
             venue.app.updates.set_api_base(&base);
             venue.app.updates.store_offer(Some("0.2.0".into()));
             venue
@@ -4061,7 +5075,8 @@ mod tests {
             let prefix = TempDir::new();
             venue.app.prefix = prefix.0.clone();
             plant(&prefix.0);
-            let (base, hits) = stand_in(archive(), "unused\n".into()).await;
+            let zip = archive();
+            let (base, hits) = stand_in(zip.clone(), server_sums(&zip)).await;
             venue.app.updates.set_api_base(&base);
             venue.app.updates.store_offer(Some("0.2.0".into()));
             let printing = venue.app.gate.enter_print();
@@ -4099,9 +5114,7 @@ mod tests {
         #[tokio::test]
         async fn stage_keeps_live_and_exits() {
             let bytes = archive();
-            let name = asset_name("0.2.0");
-            let sums = format!("{}  {name}\n", sha256_hex(&bytes));
-            let (base, _hits) = stand_in(bytes.clone(), sums).await;
+            let (base, _hits) = stand_in(bytes.clone(), server_sums(&bytes)).await;
             let mut venue = desk();
             let prefix = TempDir::new();
             venue.app.prefix = prefix.0.clone();

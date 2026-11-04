@@ -74,6 +74,7 @@ jobs:
             fi
           }
           selected "$INPUT_LINUX" linux ubuntu-latest
+          selected "$INPUT_LINUX" linux-arm64 ubuntu-24.04-arm
           selected "$INPUT_MAC" macos macos-latest
           selected "$INPUT_MAC" macos-intel macos-15-intel
           selected "$INPUT_WINDOWS" windows windows-latest
@@ -171,6 +172,13 @@ jobs:
         with:
           ref: ${{ needs.select.outputs.sha }}
       - uses: dtolnay/rust-toolchain@stable
+      - name: Install Linux pack dependencies
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          # dpkg-deb for the .deb; libdbus for rust-reg-desk (ksni).
+          sudo apt-get install -y dpkg-dev libdbus-1-dev pkg-config
       - name: Install protoc
         shell: bash
         run: |
@@ -178,6 +186,7 @@ jobs:
           version=29.3
           case "$(uname -s)-$(uname -m)" in
             Linux-x86_64) asset="protoc-${version}-linux-x86_64.zip" ;;
+            Linux-aarch64) asset="protoc-${version}-linux-aarch_64.zip" ;;
             Darwin-arm64) asset="protoc-${version}-osx-aarch_64.zip" ;;
             Darwin-x86_64) asset="protoc-${version}-osx-x86_64.zip" ;;
             MINGW*-*|MSYS*-*|CYGWIN*-*) asset="protoc-${version}-win64.zip" ;;
@@ -212,6 +221,12 @@ jobs:
               ;;
           esac
           cargo test --lib registration_server::native_print
+      - name: Test desk wrapper
+        shell: bash
+        run: |
+          set -euo pipefail
+          unset CARGO_TARGET_DIR
+          cargo test --manifest-path desk/Cargo.toml
       - uses: actions/download-artifact@v8
         with:
           name: frontend
@@ -225,9 +240,16 @@ jobs:
           set -euo pipefail
           mkdir -p target/release/packed
           bash scripts/release/pack.sh | tee "target/release/packed/sha256-${{ matrix.platform }}.txt"
+          # Zip and installer lines name real files. File-digest lines
+          # (rust-reg-macos, …) are keys only — skip missing paths.
           while read -r _ name; do
-            cp "target/release/$name" "target/release/packed/$name"
+            [[ -n "$name" ]] || continue
+            if [[ -f "target/release/$name" ]]; then
+              cp "target/release/$name" "target/release/packed/$name"
+            fi
           done < "target/release/packed/sha256-${{ matrix.platform }}.txt"
+          echo "packed platform=${{ matrix.platform }} runner=$(uname -s)-$(uname -m)"
+          ls -la target/release/packed/
       - uses: actions/upload-artifact@v7
         with:
           name: release-${{ matrix.platform }}
@@ -251,7 +273,7 @@ jobs:
         run: |
           set -euo pipefail
           : > dist/SHA256SUMS
-          for name in linux macos macos-intel windows; do
+          for name in linux linux-arm64 macos macos-intel windows; do
             line="dist/sha256-${name}.txt"
             if [[ -f "$line" ]]; then
               cat "$line" >> dist/SHA256SUMS

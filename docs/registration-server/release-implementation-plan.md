@@ -4,7 +4,9 @@ Build sequence for [porting.md](porting.md) step 11. The desk menu that gains th
 
 Two tracks. The build track compiles a release tag into the binary and publishes the packages. The auto-updater is the registration server and `rust-reg-run`: it reads that compiled tag, asks GitHub if a newer release exists, and swaps the tree after the operator agrees.
 
-The build track is steps 1, 12, and 13. Step 1 is the value the binary carries. Steps 12 and 13 are the pack script and the GitHub Actions run that pass the tag in and upload the assets. The auto-updater is steps 2 through 11. Those steps run on the device. They do not run the workflow. Step 14 is where a release from that workflow is what the updater reads on `https://api.github.com`. Step 16 installs that release and runs the swap on a Linux machine and on a Windows machine. The macOS pack was checked in step 12. Linux and Windows assets have been uploaded, and they have not been installed.
+The build track is steps 1, 12, and 13. Step 1 is the value the binary carries. Steps 12 and 13 are the pack script and the GitHub Actions run that pass the tag in and upload the assets. The auto-updater is steps 2 through 11. Those steps run on the device. They do not run the workflow. Step 14 is where a release from that workflow is what the updater reads on `https://api.github.com`. Step 16 builds the three upgrade zips. Step 17 installs a published release and runs that swap on Linux, macOS, and Windows, after step 16. The macOS pack was opened in step 12. That open is not this upgrade. Linux amd64/arm64 and Windows assets have been published; device install/update of the three-zip layout waits on step 16.
+
+**Next:** [step 16 — Three zips](#step-16-three-zips) (server / wrapper / tray archives, skip when digests match, and replace wrapper + tray after `current`).
 
 A start that never opens the listen socket is rolled back. A start that does open it keeps the previous tree as a dated backup. The updater installs a release only after the operator agrees and the file matches `SHA256SUMS`.
 
@@ -12,9 +14,9 @@ It does not wait on a printer. Printing's queue, routing, and worker can stay un
 
 Each step is one change. The tests named in the step land with it and stay green. A later step keeps the earlier tests passing. Set **Status** to `not started`, `in progress`, or `done`.
 
-Steps 1 through 11 and step 15 are `cargo test` and `npm test`. Steps 12, 13, 14, and 16 are manual. `cargo test` does not call `api.github.com`. Step 14 is the check that uses a release the workflow published: an older binary asks `https://api.github.com` and the desk shows that tag. Step 16 is the same published release installed and updated by hand on Linux and on Windows.
+Steps 1 through 11, step 15, and step 16 are `cargo test` and `npm test`. Steps 12, 13, 14, and 17 are manual. `cargo test` does not call `api.github.com`. Step 14 is the check that uses a release the workflow published: an older binary asks `https://api.github.com` and the desk shows that tag. Step 17 is that three-zip release installed and updated by hand on Linux, macOS, and Windows. It runs after step 16.
 
-Step 11 of [porting.md](porting.md) is done when steps 1 through 16 are done. The macOS checks do not accept the Linux or Windows package.
+Step 11 of [porting.md](porting.md) is done when steps 1 through 17 are done. The macOS checks do not accept the Linux or Windows package.
 
 ## Summary
 
@@ -45,15 +47,16 @@ The registration server compares the baked tag with a release, then the desk con
 | [10. Supervisor](#step-10-supervisor) | The parent reads the phase and starts the next tree | done |
 | [11. Started](#step-11-started) | The socket marker, the dated backup, seven days | done |
 | [15. Wrapper](#step-15-wrapper) | The version directory carries `rust-reg-run`. After the new version is current, that binary replaces the running wrapper where it was found, when the SHA-256 differs | done |
+| [16. Three zips](#step-16-three-zips) | Each platform publishes a tray zip, a wrapper zip, and a server zip. A file whose SHA-256 already matches is not downloaded. The tray is replaced the same way as the wrapper | **next** (not started) |
 
 ### Both
 
-Step 14 reads a published release from `https://api.github.com`. Step 16 installs the older of two published releases on Linux and on Windows, then updates each machine to the newer release.
+Step 14 reads a published release from `https://api.github.com`. Step 17 installs release A and updates that machine through the later releases. It runs after step 16.
 
 | Step | What it covers | Status |
 |---|---|---|
 | [14. Live](#step-14-live) | A published release is what an older binary offers | not started |
-| [16. Devices](#step-16-devices) | Install and update by hand on Linux and on Windows | not started |
+| [17. Devices](#step-17-devices) | Install and update by hand on Linux, macOS, and Windows. Fetch only the zips whose files differ. Run after step 16 | not started |
 
 Shared rules:
 
@@ -67,9 +70,11 @@ Shared rules:
 ```text
 <prefix>/
   bin/rust-reg-run                      where the first install puts the wrapper; an update replaces the running wrapper
+  bin/rust-reg-desk                     tray; first install. Step 16 replaces it when its SHA-256 differs
   versions/<version>/
     rust-reg                            rust-reg.exe on Windows
     rust-reg-run                        rust-reg-run.exe on Windows; same tag as rust-reg
+    rust-reg-desk                       rust-reg-desk.exe on Windows; step 16, only when that zip was downloaded
     admin/                              registration-admin dist
     form/                               registration-form build
     RELEASE                             one line, the baked tag
@@ -85,7 +90,8 @@ Shared rules:
 - The credential file and the event directory stay in `data/`. A swap, a rollback, and a backup move do not rename, delete, or rewrite them. The supervisor passes the same `--credentials <prefix>/data/credentials.yml` and `--dist <prefix>/versions/<live>/admin` on every start.
 - The service starts `bin/rust-reg-run` and leaves it running. That process is the parent of the server. It starts `versions/<live>/rust-reg registration-server` and waits. When the child exits and the service has not been asked to stop, the parent reads `state.yml` and starts the next child. A stop of the service stops the child and the parent exits. Version directories are not renamed onto each other.
 - The first install copies `bin/rust-reg-run` from the version directory and registers the service. The unit, the launchd plist, and the Windows service definition are not rewritten by an update.
-- Each release builds `rust-reg-run` with the same `REGISTRATION_RELEASE_TAG` as `rust-reg` and stores that binary in the version directory. After step 11 has set the phase to `current`, step 15 reads the path of the running wrapper and compares its SHA-256 with `versions/<to>/rust-reg-run`. A different digest replaces that file. The same digest leaves it. The path is the one the process was started from, which is `<prefix>/bin/rust-reg-run` only when that is where it is running. The wrapper process that is already running keeps its old image until it exits. The service starts that same path again, and that start is the new binary.
+- Each release builds `rust-reg-run` in the same build as `rust-reg` and stores that binary in the version directory. The wrapper does not contain the release tag. Its SHA-256 is what says whether it changed, so a release that leaves the wrapper's code alone produces the same bytes. After step 11 has set the phase to `current`, step 15 reads the path of the running wrapper and compares its SHA-256 with `versions/<to>/rust-reg-run`. A different digest replaces that file. The same digest leaves it. The path is the one the process was started from, which is `<prefix>/bin/rust-reg-run` only when that is where it is running. The wrapper process that is already running keeps its old image until it exits. The service starts that same path again, and that start is the new binary.
+- Steps 7, 8, 12, and 15 ship one upgrade zip per platform and do not replace `bin/rust-reg-desk`. Step 16 splits that zip into three and replaces the tray when its digest differs. Until step 16 lands, an update still downloads the one zip and leaves the tray as the first install wrote it.
 - `GET /updatecheck`, `GET /version`, `GET /update`, and `GET /need_update` stay unserved.
 - The gate tests stay green: `cargo test --lib registration_server::gate`.
 
@@ -98,7 +104,7 @@ Track: build. The release tag is part of the binary. The pack script and the wor
 ### Work
 
 1. `build.rs` reads `REGISTRATION_RELEASE_TAG`. When it is set, the value is `v` plus the `Cargo.toml` version. Any other value fails the build. The baked string is that tag. When the variable is unset, the baked tag is `v` plus `CARGO_PKG_VERSION`.
-2. `release_tag()` returns the baked tag. `rust-reg version` prints that tag and exits 0. `rust-reg-run version` prints the same tag.
+2. `release_tag()` returns the baked tag. `rust-reg version` prints that tag and exits 0. `rust-reg-run` has no `version` command and does not reference the tag.
 3. The version directory and the asset names use the numbers from this tag. The payload includes `RELEASE`, one line, the same tag.
 4. This step does not call GitHub and does not pack a deb, pkg, or exe. Steps 12 and 13 pass the tag into this build.
 
@@ -113,7 +119,7 @@ Track: build. The release tag is part of the binary. The pack script and the wor
 
 `cargo test --lib registration_server::update::tests::stamp` passes. `cargo run -- version` prints the baked tag.
 
-Done. `build.rs` bakes `REGISTRATION_RELEASE_TAG`. Unset, the tag is `v` plus the `Cargo.toml` version. A different value fails the build. `release_tag()` returns that tag. `release_version()` is the numbers used for a version directory and an asset name. `release_file_contents()` is the one line for `RELEASE`. `rust-reg version` and `rust-reg-run version` print the tag. This step does not pack a package.
+Done. `build.rs` bakes `REGISTRATION_RELEASE_TAG`. Unset, the tag is `v` plus the `Cargo.toml` version. A different value fails the build. `release_tag()` returns that tag. `release_version()` is the numbers used for a version directory and an asset name. `release_file_contents()` is the one line for `RELEASE`. `rust-reg version` prints the tag. `rust-reg-run` carries no tag: its binary does not contain the tag string, and `rust-reg-run version` prints the usage line and exits 1. This step does not pack a package.
 
 ## Step 2. Compare
 
@@ -267,7 +273,7 @@ Track: auto-updater. The machine downloads its own asset. The download waits unt
 
 ### Work
 
-1. The upgrade archive for the offer `X.Y.Z` is `rust-reg-X.Y.Z-linux.zip`, `rust-reg-X.Y.Z-macos.zip` on Apple silicon, `rust-reg-X.Y.Z-macos-intel.zip` on Intel, or `rust-reg-X.Y.Z-windows.zip`. macOS reads `hw.optional.arm64`, so an Intel build running under Rosetta on Apple silicon still takes the Apple silicon archive. The pkg, the deb, and the exe stay the first-install packages. The same names are the ones step 12 packs and step 13 uploads.
+1. The upgrade archive for the offer `X.Y.Z` is `rust-reg-X.Y.Z-linux.zip` on Linux amd64, `rust-reg-X.Y.Z-linux-arm64.zip` on Linux aarch64, `rust-reg-X.Y.Z-macos.zip` on Apple silicon, `rust-reg-X.Y.Z-macos-intel.zip` on Intel, or `rust-reg-X.Y.Z-windows.zip`. macOS reads `hw.optional.arm64`, so an Intel build running under Rosetta on Apple silicon still takes the Apple silicon archive. The pkg, the deb, and the exe stay the first-install packages. The same names are the ones step 12 packs and step 13 uploads.
 2. The file is written next to `versions/` under a temporary name. `SHA256SUMS` is downloaded from the same release and checked with step 6. A mismatch deletes the temporary file and returns `checksum_mismatch`.
 3. Before the first byte, the download waits until the gate has no print in progress and no local request other than this one. The update request drops its own guard for that wait and takes it again when the download returns. Between chunks the task yields, so the accept loop can take a request that arrived during the download.
 4. The stand-in records the paths. This step does not rename a directory under `versions/` and does not exit.
@@ -284,7 +290,7 @@ Track: auto-updater. The machine downloads its own asset. The download waits unt
 
 `cargo test --lib registration_server::update::tests::download` passes, `cargo test --lib registration_server::gate` stays green, and steps 1 through 6 stay green.
 
-Done. The upgrade archive is `rust-reg-X.Y.Z-linux.zip` on Linux, `rust-reg-X.Y.Z-macos.zip` on Apple silicon, `rust-reg-X.Y.Z-macos-intel.zip` on Intel, and `rust-reg-X.Y.Z-windows.zip` on Windows. It is written next to `versions/` as `<name>.partial`. `SHA256SUMS` from the same release is checked with step 6. A mismatch deletes that file and returns `checksum_mismatch`. The download waits until the gate is idle, dropping the caller's request guard for the wait and taking it again when the call returns. `versions/` gains no directory. The process does not exit.
+Done. The upgrade archive is `rust-reg-X.Y.Z-linux.zip` on Linux amd64, `rust-reg-X.Y.Z-linux-arm64.zip` on Linux aarch64, `rust-reg-X.Y.Z-macos.zip` on Apple silicon, `rust-reg-X.Y.Z-macos-intel.zip` on Intel, and `rust-reg-X.Y.Z-windows.zip` on Windows. It is written next to `versions/` as `<name>.partial`. `SHA256SUMS` from the same release is checked with step 6. A mismatch deletes that file and returns `checksum_mismatch`. The download waits until the gate is idle, dropping the caller's request guard for the wait and taking it again when the call returns. `versions/` gains no directory. The process does not exit.
 
 ## Step 8. Unpack
 
@@ -424,11 +430,11 @@ Track: build. One script builds the asset for the OS it is run on and passes the
 
 ### Work
 
-1. `scripts/release/pack.sh` reads `REGISTRATION_RELEASE_TAG`. When it is unset, the script sets it to `v` plus the `Cargo.toml` version. `cargo build --release --bin rust-reg --bin rust-reg-run` runs with that variable set, so both binaries bake the tag. The script also runs `npm run build` in `registration-admin/` and `registration-form/`. The version directory is `rust-reg` (`rust-reg.exe` on Windows), `admin/` from `registration-admin/dist`, `form/` from `registration-form/build/client`, and `RELEASE` containing the tag. `bin/` holds `rust-reg-run`.
+1. `scripts/release/pack.sh` reads `REGISTRATION_RELEASE_TAG`. When it is unset, the script sets it to `v` plus the `Cargo.toml` version. `cargo build --release --bin rust-reg --bin rust-reg-run` runs with that variable set. `rust-reg` bakes the tag. `rust-reg-run` does not reference it. The script also runs `npm run build` in `registration-admin/` and `registration-form/`. The version directory is `rust-reg` (`rust-reg.exe` on Windows), `admin/` from `registration-admin/dist`, `form/` from `registration-form/build/client`, and `RELEASE` containing the tag. `bin/` holds `rust-reg-run`.
 2. On Linux the installer is a deb built with `dpkg-deb`. The version directory lives once under `opt/rust-reg/versions/<version>/`. `opt/rust-reg/bin/rust-reg-run` and the systemd unit are in the archive. `DEBIAN/postinst` enables the unit. The unit starts `<prefix>/bin/rust-reg-run` and restarts it when the process exits. An operator stop of the unit does not start it again.
-3. On macOS the installer is a pkg built with `pkgbuild`. Apple silicon is `macos-latest` and writes `rust-reg-<version>.pkg`. Intel is `macos-15-intel` and writes `rust-reg-<version>-intel.pkg`. Each payload is one copy of the version directory under `/Library/rust-reg/versions/<version>/`, plus `bin/rust-reg-run` and the launchd plist.
+3. On macOS the installer is a pkg built with `pkgbuild`, and a disk image. Apple silicon is `macos-latest` and writes `rust-reg-<version>.pkg` and `rust-reg-<version>.dmg`. Intel is `macos-15-intel` and writes `rust-reg-<version>-intel.pkg` and `rust-reg-<version>-intel.dmg`. The pkg payload is one copy of the version directory under `/Library/rust-reg/versions/<version>/`, plus `bin/rust-reg-run` and the launchd plist. The disk image window shows `reg-server.app` beside a shortcut to Applications. Dragging the app onto Applications is the install. That app carries the wrapper and the version tree. The first open copies them to `~/Library/Application Support/rust-reg` and starts the wrapper there.
 4. On Windows the installer is `rust-reg-<version>.exe`: the server binary with a ustar of `tree/` appended. `tree/` is `bin/` and one `versions/<version>/`. A double-click extracts `tree/` into `C:\Program Files\rust-reg` and registers the service. An upgrade does not run this exe.
-5. Each system also writes an upgrade zip of the version directory alone, deflated: `rust-reg-<version>-linux.zip`, `rust-reg-<version>-macos.zip`, `rust-reg-<version>-macos-intel.zip`, or `rust-reg-<version>-windows.zip`. The script prints a `SHA256SUMS` line for the installer and a line for the zip: lowercase hex, two spaces, the file name. The updater downloads the zip for the processor it detects.
+5. Each system also writes an upgrade zip of the version directory alone, deflated: `rust-reg-<version>-linux.zip` (amd64), `rust-reg-<version>-linux-arm64.zip` (aarch64), `rust-reg-<version>-macos.zip`, `rust-reg-<version>-macos-intel.zip`, or `rust-reg-<version>-windows.zip`. The script prints a `SHA256SUMS` line for the installer and a line for the zip: lowercase hex, two spaces, the file name. The updater downloads the zip for the processor it detects.
 6. The first install copies `versions/<version>/rust-reg-run` to `bin/rust-reg-run`. An update does not rewrite the service definition. Step 15 is what replaces the bytes of the running wrapper, and only after the new version is current.
 
 ### Check
@@ -437,9 +443,9 @@ Run this on the OS you have. The workflow in step 13 runs it on the other two.
 
 | Check | Result |
 |---|---|
-| `scripts/release/pack.sh` | The asset name matches step 7 for this OS. `shasum -a 256 -c` accepts the printed `SHA256SUMS` line. The version payload contains `rust-reg`, `rust-reg-run`, `admin/`, `form/`, and `RELEASE`. `rust-reg version` and `rust-reg-run version` print the tag in `RELEASE`. |
+| `scripts/release/pack.sh` | The asset name matches step 7 for this OS. `shasum -a 256 -c` accepts the printed `SHA256SUMS` line. The version payload contains `rust-reg`, `rust-reg-run`, `admin/`, `form/`, and `RELEASE`. `rust-reg version` prints the tag in `RELEASE`. |
 | First install into a scratch prefix | `bin/rust-reg-run` exists and its bytes match `versions/<version>/rust-reg-run`. The service definition starts that binary. `versions/<version>/` has the payload. `data/` is empty of a version tree. |
-| Update extract of a second version | `versions/<new>/` has the new payload, including `rust-reg-run`. The service definition is unchanged. `versions/<new>/rust-reg version` and `versions/<new>/rust-reg-run version` print the new tag. `bin/rust-reg-run` still has the previous bytes until step 15. |
+| Update extract of a second version | `versions/<new>/` has the new payload, including `rust-reg-run`. The service definition is unchanged. `versions/<new>/rust-reg version` prints the new tag. `bin/rust-reg-run` still has the previous bytes until step 15. |
 
 ### Done when
 
@@ -501,7 +507,7 @@ Track: both. The workflow has published a release, and a binary baked with an ol
 | `gh api repos/OpenDOps/pdf-badges/releases/latest` | `tag_name` is `v` plus B. The step 13 run for that tag is green. |
 | `GET /api/update` on the tag A binary | `version` is A and `newer` is B. The request host is `api.github.com`. |
 | `POST /api/update` | The asset digest matches `SHA256SUMS` on the release. `state.yml` is `staged` from A to B. `data/credentials.yml` is unchanged. |
-| `rust-reg-run --prefix` the scratch prefix | `updates/live` is B. The child that starts is `versions/B/rust-reg`, and `rust-reg version` prints `v` plus B. After the phase is `current`, the wrapper that was started matches `versions/B/rust-reg-run`, and `rust-reg-run version` prints `v` plus B. |
+| `rust-reg-run --prefix` the scratch prefix | `updates/live` is B. The child that starts is `versions/B/rust-reg`, and `rust-reg version` prints `v` plus B. After the phase is `current`, the wrapper that was started matches `versions/B/rust-reg-run`. |
 
 ### Done when
 
@@ -515,11 +521,11 @@ Track: auto-updater. The wrapper is built with the server and travels in the ver
 
 ### Work
 
-1. `scripts/release/pack.sh` builds `rust-reg-run` in the same `cargo build --release` as `rust-reg`, with the same `REGISTRATION_RELEASE_TAG`. The version payload gains `rust-reg-run` (`rust-reg-run.exe` on Windows) next to `rust-reg`. `unpack` copies it into `versions/<new>/` with the rest of the payload. Unpack still does not write the running wrapper.
+1. `scripts/release/pack.sh` builds `rust-reg-run` in the same `cargo build --release` as `rust-reg`. The wrapper does not reference the release tag. The version payload gains `rust-reg-run` (`rust-reg-run.exe` on Windows) next to `rust-reg`. `unpack` copies it into `versions/<new>/` with the rest of the payload. Unpack still does not write the running wrapper.
 2. The first install copies `versions/<version>/rust-reg-run` to the path the service will start. On the packages from step 12 that path is `<prefix>/bin/rust-reg-run`. The service definition is unchanged by a later update.
 3. The path to replace is the running wrapper. The wrapper reads its own executable path. The server reads the parent executable when that file is named `rust-reg-run` or `rust-reg-run.exe`. A test passes the path. `<prefix>/bin/rust-reg-run` is used only when that is the path just found. A missing path does not fall back to `<prefix>/bin/`.
 4. After step 11 has set the phase to `current`, SHA-256 the detected file and `versions/<to>/rust-reg-run`. Equal digests leave the detected file unchanged. Different digests copy `versions/<to>/rust-reg-run` onto the detected path, fsync the file, then fsync the directory that contains it. A phase that is still `staged`, `trying`, or `rolled_back` does not compare and does not copy.
-5. The wrapper process that performed the switch keeps the image it was started with. The file at the detected path is the new binary. The service starts that same path when the process exits, and that next start is the new wrapper. `rust-reg-run version` then prints the tag in `versions/<to>/RELEASE`.
+5. The wrapper process that performed the switch keeps the image it was started with. The file at the detected path is the new binary. The service starts that same path when the process exits, and that next start is the new wrapper. Its bytes match `versions/<to>/rust-reg-run`.
 6. A failed copy leaves the previous file at the detected path. `versions/<to>/` stays. The phase stays `current`. The unit, the launchd plist, and the Windows service definition are not rewritten.
 7. `data/credentials.yml` and the event directory are not moved.
 
@@ -536,39 +542,105 @@ Track: auto-updater. The wrapper is built with the server and travels in the ver
 
 ### Done when
 
-`cargo test --lib registration_server::update::tests::wrapper` passes, and steps 1 through 14 stay green. `versions/<to>/rust-reg-run version` and, after a copy, the wrapper at the detected path print the same tag.
+`cargo test --lib registration_server::update::tests::wrapper` passes, and steps 1 through 14 stay green. After a copy, the wrapper at the detected path has the SHA-256 of `versions/<to>/rust-reg-run`.
 
 Done. `scripts/release/pack.sh` puts `rust-reg-run` in the version directory and copies that file to `bin/rust-reg-run` for the first install. Unpack copies it into `versions/<new>/` and does not write the running wrapper. After the phase is `current`, the detected wrapper path is replaced when its SHA-256 differs from `versions/<to>/rust-reg-run`. The same digest, a phase that is still `trying`, a missing path, and a failed copy leave the previous file. `<prefix>/bin/rust-reg-run` is not created as a fallback. `cargo test --lib registration_server::update::tests::wrapper` passes.
 
-## Step 16. Devices
+## Step 16. Three zips
 
 [Back to summary](#summary)
 
-Track: both. The Linux deb and the Windows exe from a published release are installed on those machines, and the running install then takes the newer release's upgrade zip. The workflow upload in step 13 is not this check. The macOS pkg was opened in step 12. This step does not repeat it.
+Status: **next** — not started. This is the next release-plan work: pack three zips per platform and prove wrapper + tray upgrade (and skip) behaviour.
 
-Two tags, both built by the step 13 workflow. Tag A is the older one. Tag B is newer. The file under test is the asset on the GitHub release, not a tree packed on that machine.
+Ordered implementation + proof (summary with **Status**, each step’s work and test plan, Mac then Linux) is [three-zip-upgrade-testing-plan.md](three-zip-upgrade-testing-plan.md) steps 1–13.
+
+Track: both. An upgrade no longer downloads one archive per platform. Each platform publishes three zips. The updater hashes the installed file before it downloads, and it fetches a zip only when that digest differs. The tray is replaced when its zip was fetched, the same way step 15 replaces the wrapper.
+
+`rust-reg-desk` and `rust-reg-run` stay two binaries. The tray is the menu-bar or notification-area program from `desk/`. The wrapper is the supervisor from `src/bin/rust-reg-run.rs`. The server is `rust-reg`.
+
+All three ship under the one release tag. Only `rust-reg` contains it. The wrapper and the tray do not, so a release that leaves their code and dependencies alone builds them with the same bytes, and their file lines in `SHA256SUMS` match what is already installed.
 
 ### Work
 
-1. On Linux, install `rust-reg_<A>_amd64.deb` with `dpkg -i`. On Windows, run `rust-reg-<A>.exe` with no arguments. The first install is the package. The upgrade zip is not how the first tree is written.
-2. Linux registers `rust-reg.service`. The unit starts `/opt/rust-reg/bin/rust-reg-run --prefix /opt/rust-reg`. Start the unit. `systemctl stop rust-reg` leaves it stopped, and a later `systemctl start rust-reg` brings it back. Windows registers the service `rust-reg` with `start= auto` and `binPath` `"C:\Program Files\rust-reg\bin\rust-reg-run.exe" --prefix "C:\Program Files\rust-reg"`. Start that service. `sc stop rust-reg` leaves it stopped, and a later `sc start rust-reg` brings it back.
-3. On both machines `versions/<A>/` contains `rust-reg` (`rust-reg.exe` on Windows), `rust-reg-run` (`rust-reg-run.exe` on Windows), `admin/`, `form/`, and `RELEASE`. `rust-reg version` and `rust-reg-run version` print `v` plus A, the line in `RELEASE`. `bin/rust-reg-run` matches `versions/<A>/rust-reg-run`. `data/` has no version tree.
-4. With the service running and the listen socket open, `GET /api/update` with the desk cookie returns `version` A and `newer` B. The request host is `api.github.com`.
-5. `POST /api/update` downloads this machine's zip: `rust-reg-<B>-linux.zip` or `rust-reg-<B>-windows.zip`. The digest matches that name in the release's `SHA256SUMS`. `state.yml` is `staged`, `from` A, `to` B. `updates/live` still names A. `data/credentials.yml` is unchanged. The server process exits. The service starts `bin/rust-reg-run` again. The unit file and the Windows `binPath` are the same text as after the first install.
-6. After the new process opens the listen socket, the phase is `current`, `updates/live` is B, and `versions/<B>/rust-reg version` prints `v` plus B. The wrapper that is running matches `versions/<B>/rust-reg-run`, and `rust-reg-run version` prints `v` plus B. `versions/<A>/` is `backup/<A>-<YYYYMMDD>/`. `data/credentials.yml` still has the bytes from before the post.
+1. `scripts/release/pack.sh` writes three deflated zips for the OS it is run on, beside the installer. Apple silicon and Intel each get their own three. The names use the version without `v`:
 
-### Check
+| Platform | Server | Wrapper | Tray |
+|---|---|---|---|
+| Linux | `rust-reg-<version>-linux-server.zip` | `rust-reg-<version>-linux-wrapper.zip` | `rust-reg-<version>-linux-tray.zip` |
+| Apple silicon | `rust-reg-<version>-macos-server.zip` | `rust-reg-<version>-macos-wrapper.zip` | `rust-reg-<version>-macos-tray.zip` |
+| Intel macOS | `rust-reg-<version>-macos-intel-server.zip` | `rust-reg-<version>-macos-intel-wrapper.zip` | `rust-reg-<version>-macos-intel-tray.zip` |
+| Windows | `rust-reg-<version>-windows-server.zip` | `rust-reg-<version>-windows-wrapper.zip` | `rust-reg-<version>-windows-tray.zip` |
 
-Run the same list on Linux and on Windows. A pass on one machine does not cover the other.
+2. The server zip is `rust-reg` (`rust-reg.exe` on Windows), `admin/`, `form/`, and `RELEASE`. The wrapper zip is `rust-reg-run` (`rust-reg-run.exe` on Windows) and nothing else. The tray zip is `rust-reg-desk` (`rust-reg-desk.exe` on Windows) and nothing else. The deb, the pkg, and the exe stay the first-install packages. They still install `bin/rust-reg-run` and `bin/rust-reg-desk`. On macOS the pkg also installs `reg-server.app` with that same tray binary at `Contents/MacOS/reg-server`.
+3. `SHA256SUMS` has one line per zip and one line per installed file. A zip digest is not the digest of the file inside it, so the skip decision uses the file line. The updater hashes the installed file and compares that with the file line before any zip is fetched. The zip line is what step 6 checks after a download. A file line is lowercase hex, two spaces, and a name that carries the platform: `rust-reg-linux`, `rust-reg-run-linux`, `rust-reg-desk-linux`, and the same three with `macos`, `macos-intel`, or `windows`. On Windows the installed files are `rust-reg.exe`, `rust-reg-run.exe`, and `rust-reg-desk.exe`. The `.exe` stays inside the zip. It is not part of the checksum name.
+4. `POST /api/update` downloads `SHA256SUMS` first. It hashes the installed server, wrapper, and tray. The server file is `versions/<live>/rust-reg`. The wrapper file is the path step 15 already detects. The tray file is `<prefix>/bin/rust-reg-desk`. A digest that matches the file line skips that zip: nothing is written for it and the installed file stays. A digest that differs downloads only that zip, then step 6 checks the zip line. A mismatch deletes that temporary zip and returns `checksum_mismatch`. The other zips that already matched are not fetched.
+5. The server zip unpacks into `versions/<new>/` as step 8 does, without `rust-reg-run` and without `rust-reg-desk`. When the server file already matched, those four entries are copied from the live tree into `versions/<new>/` and the server zip is not downloaded. The wrapper zip, when fetched, unpacks to `versions/<new>/rust-reg-run` only. The tray zip, when fetched, unpacks to `versions/<new>/rust-reg-desk` only. A skipped wrapper or tray zip leaves that name absent in the new tree.
+6. After the phase is `current`, step 15 still replaces the running wrapper from `versions/<to>/rust-reg-run` when that file is present and the digests differ. The same pass replaces the tray. `<prefix>/bin/rust-reg-desk` is compared with `versions/<to>/rust-reg-desk`. A missing new file leaves the installed tray. A matching digest leaves it. A different digest replaces it, fsyncs the file, and fsyncs the directory. On macOS the same bytes also replace `/Applications/reg-server.app/Contents/MacOS/reg-server` when that file exists. The tray process keeps the image it was started with. The next time the operator opens it, that path is the new binary.
+7. A rolled-back phase does not copy the wrapper or the tray. A failed copy of either file leaves the previous file, leaves `versions/<to>/` in place, and leaves the phase `current`. The service definition is not rewritten. `data/credentials.yml` and the event directory stay put.
+8. Step 13 uploads the three zips for each system it packs. The single `rust-reg-<version>-<os>.zip` asset is no longer built. Step 17's download is these three zips, and its "after the socket opens" check includes `bin/rust-reg-desk` matching `versions/<B>/rust-reg-desk` when that file was fetched, or matching its previous bytes when the digest already agreed.
 
-| Check | Result |
+### Test scenarios
+
+| Scenario | Assert |
 |---|---|
-| First install of tag A | The service is registered and running. `bin/rust-reg-run` matches `versions/<A>/rust-reg-run`. Both version commands print `v` plus A. `RELEASE` is that line. `data/` has no version tree. |
-| Stop and start | After a stop the process is down and the phase is unchanged. After a start the listen socket is open again. |
-| `GET /api/update` | `version` is A and `newer` is B. The request host is `api.github.com`. |
-| `POST /api/update` | The zip digest matches `SHA256SUMS`. `state.yml` is `staged` from A to B. The service definition is the text from the first install. `data/credentials.yml` is unchanged. |
-| After the socket opens | The phase is `current`. `updates/live` is B. `versions/<B>/rust-reg version` and the running `rust-reg-run version` print `v` plus B. The wrapper bytes match `versions/<B>/rust-reg-run`. `versions/<A>/` is the dated backup. |
+| `a_matching_tray_is_not_downloaded` | The installed `rust-reg-desk` digest is the file line. The stand-in sees `SHA256SUMS`. It does not see the tray zip. `bin/rust-reg-desk` is unchanged. |
+| `a_new_tray_is_downloaded` | The installed tray digest differs. The stand-in sees the tray zip and not the wrapper zip, whose digest matches. After the phase is `current`, `bin/rust-reg-desk` matches `versions/<to>/rust-reg-desk`. |
+| `a_matching_wrapper_is_not_downloaded` | The detected wrapper digest is the file line. The wrapper zip is not requested. The detected file is not rewritten. |
+| `the_server_zip_skips_when_the_binary_matches` | `versions/<live>/rust-reg` matches the file line. The server zip is not requested. `versions/<to>/rust-reg`, `admin/`, `form/`, and `RELEASE` are the live tree's bytes. |
+| `a_bad_zip_digest_downloads_nothing_else` | The tray zip's line does not match its bytes. The error is `checksum_mismatch`. The wrapper and server zips that were not yet fetched are not fetched. The installed tray is unchanged. |
+| `rollback_does_not_replace_the_tray` | Phase `rolled_back`. `bin/rust-reg-desk` still has the previous bytes even though `versions/<to>/rust-reg-desk` differs. |
 
 ### Done when
 
-The five checks have been run on Linux and the five checks have been run on Windows, and steps 1 through 15 stay green.
+`cargo test --lib registration_server::update::tests::parts` passes, and steps 1 through 15 stay green. `scripts/release/pack.sh` prints a `SHA256SUMS` line for each of the three zips and each of the three files. `shasum -a 256 -c` accepts those lines. The marker matrix in [three-zip-upgrade-testing-plan.md](three-zip-upgrade-testing-plan.md) is `done` on macOS (full) and on Linux (tray + wrapper). Step 17 is the broader device matrix after that.
+
+## Step 17. Devices
+
+[Back to summary](#summary)
+
+Track: both. The hand check of the three zips from step 16. Run it after `cargo test --lib registration_server::update::tests::parts` passes. The workflow upload in step 13 is not this check. Step 12 opened the macOS pkg. That open is not this upgrade.
+
+The file under test is the asset on the GitHub release, not a tree packed on the machine. Six releases, A through F, each newer than the last, each built by the step 13 workflow with the three zips and the three file lines in `SHA256SUMS`. A pre-release needs `REGISTRATION_UPDATE_PRERELEASE=1` on the service. Delete the six releases when the check is done.
+
+| Release | What changed besides the version | Zips the upgrade fetches |
+|---|---|---|
+| A | the first install | none |
+| B | version only | server |
+| C | version, plus one comment in `desk/src/main.rs` | server and tray |
+| D | version, plus one comment in `src/bin/rust-reg-run.rs` | server and wrapper |
+| E | the tray zip bytes do not match its zip line | the update stops |
+| F | the server exits before it binds; the wrapper and tray file lines differ from the installed files | the update rolls back |
+
+The wrapper source stays untouched for A, B, and C. The tray source stays untouched for A, B, and D. The same Rust toolchain packs all six. The release tag is inside `rust-reg`, so B, C, and D always fetch the server zip. A matching wrapper or tray is not fetched.
+
+`<prefix>` is `/opt/rust-reg` on Linux, `/Library/rust-reg` on macOS, and `C:\Program Files\rust-reg` on Windows. The tray binary is `bin/rust-reg-desk` (`rust-reg-desk.exe` on Windows). On macOS the pkg also installs `/Applications/reg-server.app`, and `Contents/MacOS/reg-server` is that same binary.
+
+### Work
+
+1. Install A from the package. Linux uses `dpkg -i rust-reg_<A>_amd64.deb` or `rust-reg_<A>_arm64.deb` for the machine. macOS uses the pkg that matches that Mac. Windows runs `rust-reg-<A>.exe` with no arguments. The first install is the package. The upgrade zips are not how the first tree is written.
+2. Start the service. Linux starts `rust-reg.service`, and the unit runs `<prefix>/bin/rust-reg-run --prefix <prefix>`. `systemctl stop rust-reg` leaves it stopped, and a later `systemctl start rust-reg` brings it back. macOS bootstraps `system /Library/LaunchDaemons/com.opendops.rust-reg.plist`. Windows starts the service `rust-reg`. `sc stop rust-reg` leaves it stopped, and a later `sc start rust-reg` brings it back. The job has `REGISTRATION_UPDATE_PRERELEASE=1` when A is a pre-release. Open the tray once. On macOS that is `/Applications/reg-server.app`.
+3. Record the SHA-256 of `versions/<A>/rust-reg`, `bin/rust-reg-run`, and `bin/rust-reg-desk`. On macOS record `Contents/MacOS/reg-server` too. Record the pid of `rust-reg-run` and the pid of the tray. `bin/rust-reg-run` matches `versions/<A>/rust-reg-run`. On macOS the app binary matches `bin/rust-reg-desk`. `versions/<A>/rust-reg version` prints `v` plus A, the line in `RELEASE`. `data/credentials.yml` has an open event. Keep a copy of that file.
+4. With the desk cookie, `GET /api/update`, then `POST /api/update/check`, then `POST /api/update`. The GET returns `version` A and `newer` B. The request host is `api.github.com`. The POST returns `200` and `{ "version": "B" }`, and the server process exits. The wrapper pid from step 3 stays alive.
+5. After B opens the listen socket, `state.yml` is `phase: current`, `from` A, `to` B, and `updates/live` is B. `versions/<B>/` has `rust-reg`, `admin/`, `form/`, and `RELEASE`. It has no `rust-reg-run` and no `rust-reg-desk`. `versions/<B>/rust-reg version` prints `v` plus B. `bin/rust-reg-run`, `bin/rust-reg-desk`, and on macOS the app binary, still have the hashes from step 3. `versions/<A>/` is `backup/<A>-<YYYYMMDD>/`. `data/credentials.yml` is the copy from step 3. The service definition is the text from the first install. The server log names the server zip and does not name the wrapper zip or the tray zip.
+6. Repeat the three requests for C. `newer` is C. After the socket opens, `versions/<C>/rust-reg-desk` exists and `versions/<C>/rust-reg-run` does not. `bin/rust-reg-desk` matches `versions/<C>/rust-reg-desk`. On macOS the app binary matches it too. `bin/rust-reg-run` still has the hash from step 3. The tray pid from step 3 is still alive. Quit the tray and open it again. The new pid is the new binary, and the menu shows the listen address.
+7. Repeat the three requests for D. `newer` is D. After the socket opens, `versions/<D>/rust-reg-run` exists and `versions/<D>/rust-reg-desk` does not. `bin/rust-reg-run` matches `versions/<D>/rust-reg-run`. `bin/rust-reg-desk`, and on macOS the app binary, still match `versions/<C>/rust-reg-desk`. The `rust-reg-run` pid from step 3 is still alive, and the file on disk is the new wrapper. Restart the service. The new pid is the parent of the server, and the listen socket is open again.
+8. Repeat the POST for E. The response is `409` `checksum_mismatch`. The process stays up. `bin/rust-reg-run`, `bin/rust-reg-desk`, and on macOS the app binary, still have the hashes from step 7. `updates/live` is D. `versions/<E>/` is absent.
+9. Repeat the POST for F. The server exits. The wrapper starts F, finds no `updates/started`, and rolls back. `phase` is `rolled_back`. `updates/live` is D. `versions/<F>/` is gone. `bin/rust-reg-run`, `bin/rust-reg-desk`, and on macOS the app binary, still have the hashes from step 7. The listen socket is the D server. `data/credentials.yml` is the copy from step 3.
+
+### Check
+
+Run the same list on Linux, on macOS, and on Windows. A pass on one machine does not cover the others. macOS uses the pkg that matches that Mac.
+
+| Check | Result |
+|---|---|
+| First install of A | The service is registered and running. `bin/rust-reg-run` matches `versions/<A>/rust-reg-run`. On macOS the app binary matches `bin/rust-reg-desk`. `rust-reg version` prints `v` plus A. `data/` has no version tree. |
+| Stop and start | After a stop the process is down and the phase is unchanged. After a start the listen socket is open again. |
+| A to B | `newer` is B. After the socket opens, `versions/<B>/` has no wrapper and no tray. `bin/rust-reg-run` and `bin/rust-reg-desk` have the hashes from the first install. The wrapper pid is unchanged. `versions/<A>/` is the dated backup. `data/credentials.yml` is unchanged. |
+| B to C | `versions/<C>/rust-reg-desk` is the new tray. `bin/rust-reg-desk` matches it, and on macOS the app binary matches it. `bin/rust-reg-run` is unchanged. The tray pid from the first install stays until Quit, and the next open is the new binary. |
+| C to D | `versions/<D>/rust-reg-run` is the new wrapper. `bin/rust-reg-run` matches it. The tray files still match `versions/<C>/rust-reg-desk`. The wrapper pid from the first install stays until the service is restarted. |
+| E | `409` `checksum_mismatch`. The process stays up. The binaries keep the hashes from D. `updates/live` is D. `versions/<E>/` is absent. |
+| F | `phase` is `rolled_back`. `updates/live` is D. `versions/<F>/` is gone. The binaries keep the hashes from D. The listen socket is the D server. |
+
+### Done when
+
+The seven checks have been run on Linux, the seven checks have been run on macOS, and the seven checks have been run on Windows. Step 16 is done before this run.

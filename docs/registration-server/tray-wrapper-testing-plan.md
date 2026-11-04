@@ -12,9 +12,11 @@ Set **Status** to `not started`, `in progress`, or `done` on each machine after 
 
 | Machine | How the operator opens the tray | Status |
 |---|---|---|
-| [Linux](#linux) | The `reg-server` application menu runs `/opt/rust-reg/bin/rust-reg-desk` | not started |
-| [macOS](#macos) | `/Applications/reg-server.app` | not started |
+| [Linux](#linux) | The `reg-server` application menu runs `/opt/rust-reg/bin/rust-reg-desk` | done |
+| [macOS](#macos) | `/Applications/reg-server.app` | done |
 | [Windows](#windows) | Start Menu shortcut `reg-server` | not started |
+
+Linux and macOS checks have been run: start, Quit, port switch, and the Applications / menu-bar icon work. Windows is still open.
 
 The session has to show a tray. A Linux machine with no status area, a Mac remote session with no menu bar, or a Windows session that cannot show the notification area cannot complete this plan.
 
@@ -35,7 +37,7 @@ The server process has no window. The tray starts it when port 8080 is closed, a
 
 [Back to summary](#summary)
 
-Install `rust-reg_<version>_amd64.deb` with `dpkg -i` on a machine whose session shows a status icon. Log in to that graphical session. Open **reg-server** from the application menu. That runs `/usr/share/applications/rust-reg.desktop`.
+Install `rust-reg_<version>_amd64.deb` or `rust-reg_<version>_arm64.deb` (matching `dpkg --print-architecture`) with `dpkg -i` on a machine whose session shows a status icon. Log in to that graphical session. Open **reg-server** from the application menu. That runs `/usr/share/applications/rust-reg.desktop`.
 
 ### Check
 
@@ -87,4 +89,4 @@ Run `rust-reg-<version>.exe` with no arguments. It extracts into `C:\Program Fil
 
 ## Done when
 
-The seven checks have been run on Linux, the seven checks have been run on macOS, and the seven checks have been run on Windows. Each machine's row in the summary is `done`. Step 12 of [porting.md](porting.md) is accepted only then.
+The seven checks have been run on Linux, the seven checks have been run on macOS, and the seven checks have been run on Windows. Each machine's row in the summary is `done`. Step 12 of [porting.md](porting.md) is nearly done once Linux and macOS are `done`; it is accepted only when Windows is `done` too.

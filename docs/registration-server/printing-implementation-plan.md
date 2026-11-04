@@ -6,7 +6,7 @@ This plan adds the `ticket-render` crate and the print clients on the server thr
 
 Each step is one change. The tests named in the step land with it and stay green. A later step keeps the earlier tests passing. Set **Status** to `not started`, `in progress`, or `done`.
 
-Step 8 is done when steps 1 through 19 are done.
+Steps 1 through 19 are done. Step 20 is an extra check that several print tasks still become one multi-page PDF on a real (or stand-in) queue. Porting step 8 stays accepted for 1–19; close step 20 before treating PDF batching as fully proven.
 
 ## Summary
 
@@ -31,6 +31,7 @@ Step 8 is done when steps 1 through 19 are done.
 | [17. Retry](#step-17-retry) | An aborted job is cancelled and sent again. A stopped queue is resumed | done |
 | [18. Worker](#step-18-worker) | `POST /print` picks, draws the format that queue takes, then submits or appends | done |
 | [19. PDF window](#step-19-pdf-window) | Hold the PDF page drawn for the picked queue. One window per printer, or one per zone | done |
+| [20. PDF batching](#step-20-pdf-batching) | Unite several print tasks into one multi-page PDF and verify the flush | not started |
 
 Shared rules:
 
@@ -583,3 +584,32 @@ A PDF page is already drawn for the queue pick chose, at that queue's dpi, then 
 `cargo test --lib registration_server::cups::tests::pdf_window` passes, `cargo test --lib registration_server::gate` stays green, and steps 1 through 18 stay green.
 
 Done. A PDF page waits on the printer's window, or on the zone's one window. `SLIDING_WINDOW_TIME` is 500 milliseconds. The flush sends one `application/pdf` after the destination has been quiet for that long. ZPL and PNG are not held. A page that arrives once the window has closed starts a new document.
+
+## Step 20. PDF batching
+
+[Back to summary](#summary)
+
+Status: not started.
+
+Step 19 proved the window unit tests. This step is the extra check that several separate print tasks that land inside `SLIDING_WINDOW_TIME` for the same PDF destination are united into **one** PDF file with **multiple pages**, then submitted once. It covers the worker path (`POST /print`) plus the flush, not only the window helper in isolation.
+
+### Work
+
+1. Drive at least three `POST /print` jobs (or the worker entry the tests already use) that pick the same PDF-capable queue or the same zone, with arrivals inside the sliding window.
+2. Assert the stand-in (or captured bytes) sees **one** `Print-Job` / native submit with `application/pdf`, and that document has one page per task, in arrival order.
+3. Assert a late task after the window has closed starts a **second** document and does not grow the first.
+4. Assert mixed ZPL/PNG jobs for that printer are not folded into the PDF batch (they still submit immediately).
+5. Prefer an automated `cargo test` under `registration_server::cups::tests` (or the print worker module) that records the submitted PDF page count. A short manual open of the flushed PDF is allowed as a supplement, not a substitute.
+
+### Test scenarios
+
+| Scenario | Assert |
+|---|---|
+| `several_tasks_become_one_multipage_pdf` | Three PDF prints for the same printer inside the window produce one submit; the PDF has three pages in order. |
+| `a_batch_flush_is_one_job` | The stand-in sees a single `application/pdf` job for that batch, not one job per page. |
+| `a_task_after_the_window_is_a_new_file` | A fourth print after quiet expiry is a second one-page (or new multi-page) document; the first batch is already sent. |
+| `zpl_or_png_does_not_join_the_pdf_batch` | A raster/ZPL print interleaved with PDF tasks does not add a page to the held PDF. |
+
+### Done when
+
+The scenarios above pass (automated preferred). Steps 1 through 19 stay green. Porting step 8 notes this check when it is closed.
