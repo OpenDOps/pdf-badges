@@ -175,7 +175,7 @@ write_drag_dmg() {
   mkdir -p "$stage"
   cp -R "$app_src" "$stage/reg-server.app"
   prefix="$stage/reg-server.app/Contents/prefix"
-  mkdir -p "$prefix/bin" "$prefix/updates"
+  mkdir -p "$prefix/bin" "$prefix/updates" "$prefix/versions"
   cp -R "$version_dir" "$prefix/versions/$(basename "$version_dir")"
   cp "$version_dir/$run_name" "$prefix/bin/$run_name"
   chmod 755 "$prefix/bin/$run_name"

@@ -1,5 +1,6 @@
-//! Windows spooler. Steps 5 and 6 map a queue. Step 7 reads `EnumPrinters`.
-//! Tests install a fixture, so they do not call `EnumPrinters` and they do not send IPP.
+// Windows spooler. Steps 5 and 6 map a queue. Step 7 reads `EnumPrinters`.
+// Tests install a fixture, so they do not call `EnumPrinters` and they do not send IPP.
+// (Plain comments: this file is `include!`d into native_print.rs.)
 
 use std::cell::RefCell;
 

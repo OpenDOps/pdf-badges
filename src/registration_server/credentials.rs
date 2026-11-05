@@ -639,6 +639,7 @@ fn corrupt(path: &Path, detail: &str) -> CredentialError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
     struct Scratch(PathBuf);
@@ -664,6 +665,7 @@ mod tests {
 
     impl Drop for Scratch {
         fn drop(&mut self) {
+            #[cfg(unix)]
             if let Ok(metadata) = fs::metadata(&self.0) {
                 let mut perms = metadata.permissions();
                 perms.set_mode(0o755);
@@ -892,16 +894,26 @@ mod tests {
     }
 
     #[test]
-    fn crash_temp_is_ignored_and_a_failed_replace_keeps_the_previous_file() {
+    fn crash_temp_is_ignored() {
+        let scratch = Scratch::new();
+        let path = scratch.path().join(FILE_NAME);
+        let file = CredentialFile::new(&path);
+        let first = sample();
+        file.store(&first).unwrap();
+
+        fs::write(scratch.path().join("credentials.yml.tmp-crash"), "{partial").unwrap();
+        assert_eq!(file.load().unwrap(), first);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_replace_keeps_the_previous_file() {
         let scratch = Scratch::new();
         let path = scratch.path().join(FILE_NAME);
         let file = CredentialFile::new(&path);
         let first = sample();
         file.store(&first).unwrap();
         let previous = fs::read(&path).unwrap();
-
-        fs::write(scratch.path().join("credentials.yml.tmp-crash"), "{partial").unwrap();
-        assert_eq!(file.load().unwrap(), first);
 
         let mut perms = fs::metadata(scratch.path()).unwrap().permissions();
         perms.set_mode(0o555);
