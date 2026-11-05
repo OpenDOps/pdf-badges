@@ -1252,6 +1252,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn installed_bin_starts_the_supervisor() {
         let launch = launch_for(Path::new("/opt/rust-reg/bin/rust-reg-desk"));
@@ -1305,6 +1306,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn mac_app_uses_the_library_prefix() {
         let support = std::env::temp_dir().join(format!("reg-server-empty-{}", std::process::id()));
@@ -1345,8 +1347,10 @@ mod tests {
 
     #[test]
     fn development_copy_starts_the_sibling_server() {
-        let launch = launch_for(Path::new("/tmp/target/debug/rust-reg-desk"));
-        assert_eq!(launch.program, Path::new("/tmp/target/debug/rust-reg"));
+        let desk = Path::new("/tmp/target/debug/rust-reg-desk");
+        let (_, server_name) = binary_names(desk);
+        let launch = launch_for(desk);
+        assert_eq!(launch.program, desk.with_file_name(server_name));
         assert!(launch.args.is_empty());
     }
 

@@ -184,7 +184,25 @@ write_drag_dmg() {
   codesign --force --deep --sign - "$stage/reg-server.app"
   rw="$work/reg-server-rw.dmg"
   rm -f "$rw" "$dmg"
-  hdiutil create -volname "reg-server" -srcfolder "$stage" -ov -format UDRW "$rw"
+  # CI runners sometimes leave a previous "reg-server" volume attached.
+  while diskutil list 2>/dev/null | grep -q 'reg-server'; do
+    hdiutil detach "/Volumes/reg-server" -force 2>/dev/null || true
+    sleep 1
+  done
+  local create_ok=0
+  local attempt
+  for attempt in 1 2 3 4 5; do
+    if hdiutil create -volname "reg-server" -srcfolder "$stage" -ov -format UDRW "$rw"; then
+      create_ok=1
+      break
+    fi
+    echo "pack: hdiutil create attempt $attempt failed; retrying" >&2
+    sleep 2
+  done
+  if [[ "$create_ok" -ne 1 ]]; then
+    echo "pack: hdiutil create failed after retries" >&2
+    exit 1
+  fi
   mount=$(hdiutil attach "$rw" -readwrite -noverify -noautoopen | awk 'END {print $NF}')
   osascript <<'EOF' || true
 tell application "Finder"
