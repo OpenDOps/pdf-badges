@@ -274,6 +274,23 @@ test("login_repeated_error_is_highlighted_again", async () => {
   expect(second).not.toBe(first);
 });
 
+test("login_enter_dismisses_the_old_error", () => {
+  const onSubmit = vi.fn(() => new Promise<void>(() => {}));
+  render(
+    <Login
+      onSubmit={onSubmit}
+      error="no_device_id"
+      watchNetwork={false}
+      timeoutSecs={0}
+    />,
+  );
+  expect(screen.getByRole("alert")).toHaveTextContent(
+    "У устройства нет серийного номера",
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Войти" }));
+  expect(screen.getByRole("alert")).toHaveTextContent("");
+});
+
 test("login_ignores_submit_while_pending", () => {
   const onSubmit = vi.fn(() => new Promise<void>(() => {}));
   renderLogin({ onSubmit });

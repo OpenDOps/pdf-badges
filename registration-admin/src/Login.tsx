@@ -59,6 +59,8 @@ export default function Login({
   }
 
   const locked = busy || left > 0;
+  // Pressing Enter dismisses the previous error until the new answer arrives.
+  const shownError = busy ? "" : error;
 
   const field =
     "w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-zinc-900 outline-none placeholder:text-zinc-400 focus:border-zinc-900 focus:ring-2 focus:ring-zinc-900";
@@ -98,10 +100,10 @@ export default function Login({
           key={attempt}
           role="alert"
           className={`mt-4 min-h-5 rounded text-sm text-red-600${
-            error && attempt > 0 ? " login-error-flash" : ""
+            shownError && attempt > 0 ? " login-error-flash" : ""
           }`}
         >
-          {error ? t(`error.${error}`) : ""}
+          {shownError ? t(`error.${shownError}`) : ""}
         </p>
         <button
           type="submit"
