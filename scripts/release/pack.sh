@@ -282,6 +282,9 @@ EOF
     assemble_version "$version_dir"
     cp "$version_dir/$run_name" "$prefix/bin/$run_name"
     chmod 755 "$prefix/bin/$run_name"
+    # Supervisor reads updates/live to choose versions/<live>/rust-reg (same as the deb).
+    mkdir -p "$prefix/updates"
+    printf '%s\n' "$version" > "$prefix/updates/live"
     cat > "$work/root/Library/LaunchDaemons/com.opendops.rust-reg.plist" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -307,8 +310,18 @@ EOF
     else
       asset="$release_dir/rust-reg-${version}.pkg"
     fi
+    # Install the app at /Applications even when another copy of the bundle ID
+    # exists elsewhere (installer otherwise relocates onto it, e.g. ~/Applications).
+    component="$work/component.plist"
+    pkgbuild --analyze --root "$work/root" "$component" >&2
+    i=0
+    while /usr/libexec/PlistBuddy -c "Print :$i" "$component" >/dev/null 2>&1; do
+      /usr/libexec/PlistBuddy -c "Set :$i:BundleIsRelocatable false" "$component"
+      i=$((i + 1))
+    done
     pkgbuild \
       --root "$work/root" \
+      --component-plist "$component" \
       --identifier com.opendops.rust-reg \
       --version "$version" \
       --install-location / \

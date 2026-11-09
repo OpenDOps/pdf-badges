@@ -3,6 +3,8 @@
 #
 #   sudo bash scripts/release/mac-proof.sh install <rust-reg-X.pkg>
 #       Install pkg, add prerelease env + stderr log to the daemon, (re)load it.
+#   sudo bash scripts/release/mac-proof.sh fixup
+#       Pre-fix pkgs: write updates/live, move a relocated app to /Applications.
 #   sudo bash scripts/release/mac-proof.sh restart
 #       launchctl kickstart -k the daemon (picks up a replaced bin/rust-reg-run).
 #
@@ -35,12 +37,30 @@ case "${1:-}" in
     launchctl bootstrap system "$plist"
     launchctl print system/$label | grep -E 'state|pid' | head -3
     ;;
+  fixup)
+    # Pre-fix pkgs (<= alpha.7): no updates/live, and the app may be relocated
+    # onto an older copy of the bundle (e.g. ~/Applications from a DMG).
+    prefix=/Library/rust-reg
+    if [[ ! -s $prefix/updates/live ]]; then
+      ver=$(ls "$prefix/versions" | sort -V | tail -1)
+      mkdir -p "$prefix/updates"
+      printf '%s\n' "$ver" > "$prefix/updates/live"
+      echo "updates/live -> $ver"
+    fi
+    for user_app in /Users/*/Applications/reg-server.app; do
+      [[ -d $user_app && ! -e /Applications/reg-server.app ]] || continue
+      mv "$user_app" /Applications/reg-server.app
+      echo "moved $user_app -> /Applications/reg-server.app"
+    done
+    launchctl kickstart -k system/$label
+    launchctl print system/$label | grep -E 'state|pid' | head -3
+    ;;
   restart)
     launchctl kickstart -k system/$label
     launchctl print system/$label | grep -E 'state|pid' | head -3
     ;;
   *)
-    sed -n '2,9p' "$0" >&2
+    sed -n '2,11p' "$0" >&2
     exit 2
     ;;
 esac
