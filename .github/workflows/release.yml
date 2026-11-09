@@ -297,6 +297,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           TAG: ${{ needs.select.outputs.tag }}
+          SHA: ${{ needs.select.outputs.sha }}
           VERSION: ${{ needs.select.outputs.version }}
         run: |
           set -euo pipefail
@@ -351,7 +352,7 @@ jobs:
             gh release edit "$TAG" "${mark[@]}"
           else
             gh release create "$TAG" "${files[@]}" \
-              --verify-tag \
+              --target "$SHA" \
               --title "$TAG" \
               --notes "rust-reg ${VERSION}" \
               "${mark[@]}"
