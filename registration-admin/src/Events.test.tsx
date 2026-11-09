@@ -22,6 +22,8 @@ function renderEvents(
     version: string | null;
     newer: string | null;
     failed: string | null;
+    checkFailed: boolean;
+    retryIn: number | null;
     supervised: boolean;
   }> = {},
 ) {
@@ -37,6 +39,8 @@ function renderEvents(
       version={props.version ?? null}
       newer={props.newer ?? null}
       failed={props.failed ?? null}
+      checkFailed={props.checkFailed ?? false}
+      retryIn={props.retryIn ?? null}
       supervised={props.supervised ?? true}
     />,
   );
@@ -373,7 +377,47 @@ test("events_check_reports_a_failure", async () => {
   await act(async () => {
     fireEvent.click(screen.getByRole("button", { name: "Проверить обновления" }));
   });
-  expect(screen.getByRole("alert")).toHaveTextContent("Не удалось проверить обновления");
+  expect(screen.getByRole("alert")).toHaveTextContent(
+    "Не удалось проверить обновления: сервер обновлений недоступен. Повторная проверка через 10 минут",
+  );
   expect(screen.getByRole("button", { name: "Проверить обновления" })).toBeEnabled();
+  vi.unstubAllGlobals();
+});
+
+test("events_shows_the_servers_failed_check", () => {
+  const view = renderEvents({ checkFailed: true, retryIn: 61 });
+  expect(screen.getByRole("alert")).toHaveTextContent(
+    "Не удалось проверить обновления: сервер обновлений недоступен. Повторная проверка через 2 минуты",
+  );
+  view.rerender(
+    <Events
+      events={events}
+      current={events[0]}
+      tokenStored={false}
+      onSelect={() => {}}
+      watchNetwork={false}
+      keepSession={false}
+      timeoutSecs={0}
+      newer="2.0.0"
+      checkFailed={false}
+    />,
+  );
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Обновить до v2.0.0" })).toBeInTheDocument();
+});
+
+test("events_check_refused_is_not_called_unreachable", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () => ({
+      ok: false,
+      json: async () => ({ ok: false, error: { code: "unauthorized" } }),
+    })),
+  );
+  renderEvents();
+  await act(async () => {
+    fireEvent.click(screen.getByRole("button", { name: "Проверить обновления" }));
+  });
+  expect(screen.getByRole("alert")).toHaveTextContent(/^Не удалось проверить обновления$/);
   vi.unstubAllGlobals();
 });

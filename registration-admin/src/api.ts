@@ -137,6 +137,10 @@ export type UpdateStatus = {
   total: number | null;
   /** Version from `updates/state.yml` when the last upgrade was rolled back. */
   failed: string | null;
+  /** The last release check could not reach GitHub. */
+  checkFailed: boolean;
+  /** Seconds until the server retries a failed check. */
+  retryIn: number | null;
 };
 
 export async function fetchUpdate(): Promise<UpdateStatus | null> {
@@ -154,6 +158,8 @@ export async function fetchUpdate(): Promise<UpdateStatus | null> {
       received?: number;
       total?: number | null;
       failed?: string | null;
+      check_failed?: boolean;
+      retry_in?: number | null;
     };
   };
   if (!body.ok || !body.data) {
@@ -167,6 +173,8 @@ export async function fetchUpdate(): Promise<UpdateStatus | null> {
     received: typeof body.data.received === "number" ? body.data.received : 0,
     total: typeof body.data.total === "number" ? body.data.total : null,
     failed: typeof body.data.failed === "string" && body.data.failed !== "" ? body.data.failed : null,
+    checkFailed: body.data.check_failed === true,
+    retryIn: typeof body.data.retry_in === "number" ? body.data.retry_in : null,
   };
 }
 

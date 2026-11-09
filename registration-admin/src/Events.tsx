@@ -28,9 +28,16 @@ type EventsProps = {
   newer?: string | null;
   /** Version that was rolled back. Absent when the last upgrade was not rolled back. */
   failed?: string | null;
+  /** The server's last release check could not reach GitHub. */
+  checkFailed?: boolean;
+  /** Seconds until the server retries that check. */
+  retryIn?: number | null;
   /** `false` when this process was not started by `rust-reg-run`. */
   supervised?: boolean;
 };
+
+/** The server retries a failed release check after this long. */
+const RETRY_AFTER_FAILURE_SECS = 600;
 
 export default function Events({
   events,
@@ -43,6 +50,8 @@ export default function Events({
   version = null,
   newer = null,
   failed = null,
+  checkFailed = false,
+  retryIn = null,
   supervised = true,
 }: EventsProps) {
   const { t } = useTranslation();
@@ -55,7 +64,24 @@ export default function Events({
   const [received, setReceived] = useState(0);
   const [total, setTotal] = useState<number | null>(null);
   const [target, setTarget] = useState<string | null>(newer);
-  const [check, setCheck] = useState<"idle" | "checking" | "none" | "error">("idle");
+  const [check, setCheck] = useState<"idle" | "checking" | "none" | "error" | "refused">(
+    checkFailed ? "error" : "idle",
+  );
+  const [retrySecs, setRetrySecs] = useState<number | null>(retryIn);
+
+  // The server's own scheduled check (every 10 min after a failure) updates these props.
+  useEffect(() => {
+    setRetrySecs(retryIn);
+    setCheck((now) => {
+      if (now === "checking") {
+        return now;
+      }
+      if (checkFailed) {
+        return "error";
+      }
+      return now === "error" || now === "refused" ? "idle" : now;
+    });
+  }, [checkFailed, retryIn]);
   const poll = useRef<number | null>(null);
   const posted = useRef(false);
 
@@ -130,13 +156,18 @@ export default function Events({
     try {
       const result = await postUpdateCheck();
       if (!result.ok) {
-        setCheck("error");
+        if (result.code === "update_check_failed") {
+          setRetrySecs(RETRY_AFTER_FAILURE_SECS);
+          setCheck("error");
+        } else {
+          setCheck("refused");
+        }
         return;
       }
       setTarget(result.newer);
       setCheck(result.newer ? "idle" : "none");
     } catch {
-      setCheck("error");
+      setCheck("refused");
     }
   }
 
@@ -298,9 +329,17 @@ export default function Events({
             {t("events.up_to_date")}
           </p>
         ) : null}
+        {check === "refused" ? (
+          <p role="alert" className="text-xs text-red-600">
+            {t("events.check_error")}
+          </p>
+        ) : null}
         {check === "error" ? (
           <p role="alert" className="text-xs text-red-600">
             {t("events.check_failed")}
+            {retrySecs !== null
+              ? ` ${t("events.check_retry", { count: Math.max(1, Math.ceil(retrySecs / 60)) })}`
+              : ""}
           </p>
         ) : null}
         {supervised ? null : (

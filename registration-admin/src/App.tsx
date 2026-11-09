@@ -57,6 +57,8 @@ function LoginRoute({ onSuccess }: { onSuccess: () => void }) {
   );
 }
 
+const UPDATE_POLL_MS = 60_000;
+
 function EventsRoute({ onLeave }: { onLeave: () => void }) {
   const { t } = useTranslation();
   const [ready, setReady] = useState(false);
@@ -66,6 +68,8 @@ function EventsRoute({ onLeave }: { onLeave: () => void }) {
   const [version, setVersion] = useState<string | null>(null);
   const [newer, setNewer] = useState<string | null>(null);
   const [failed, setFailed] = useState<string | null>(null);
+  const [checkFailed, setCheckFailed] = useState(false);
+  const [retryIn, setRetryIn] = useState<number | null>(null);
   const [supervised, setSupervised] = useState(true);
   const [error, setError] = useState("");
 
@@ -98,6 +102,8 @@ function EventsRoute({ onLeave }: { onLeave: () => void }) {
           setVersion(update.version);
           setNewer(update.newer);
           setFailed(update.failed);
+          setCheckFailed(update.checkFailed);
+          setRetryIn(update.retryIn);
           setSupervised(update.supervised);
         }
         setReady(true);
@@ -113,6 +119,26 @@ function EventsRoute({ onLeave }: { onLeave: () => void }) {
       cancel = true;
     };
   }, [onLeave]);
+
+  // Pick up the server's own release checks (and a failed one) while the page stays open.
+  useEffect(() => {
+    if (!ready) {
+      return;
+    }
+    const timer = window.setInterval(() => {
+      void fetchUpdate()
+        .then((update) => {
+          if (!update) {
+            return;
+          }
+          setNewer(update.newer);
+          setCheckFailed(update.checkFailed);
+          setRetryIn(update.retryIn);
+        })
+        .catch(() => {});
+    }, UPDATE_POLL_MS);
+    return () => window.clearInterval(timer);
+  }, [ready]);
 
   if (!ready) {
     return null;
@@ -135,6 +161,8 @@ function EventsRoute({ onLeave }: { onLeave: () => void }) {
       version={version}
       newer={newer}
       failed={failed}
+      checkFailed={checkFailed}
+      retryIn={retryIn}
       supervised={supervised}
       onSelect={async (id, name) => {
         const result = await postSelect(id, name);

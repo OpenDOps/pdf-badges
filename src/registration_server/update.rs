@@ -509,6 +509,17 @@ impl ReleaseCheck {
         self.inner.lock().expect("release offer").last_attempt
     }
 
+    /// Whole seconds until the next scheduled check when the last one failed.
+    /// `None` when the last check worked or none ran yet.
+    pub fn failed_retry_in(&self, now: SystemTime) -> Option<u64> {
+        let state = self.inner.lock().expect("release offer");
+        if !state.last_failed {
+            return None;
+        }
+        let due = state.last_attempt?.checked_add(RETRY_AFTER_FAILURE)?;
+        Some(due.duration_since(now).map(|d| d.as_secs()).unwrap_or(0))
+    }
+
     pub fn due(&self, now: SystemTime) -> bool {
         check_due_after(self.last_attempt(), now, self.every())
     }
@@ -639,6 +650,7 @@ pub(crate) fn update_document(app: &crate::registration_server::App) -> serde_js
     let (phase, received, total) = app.updates.progress();
     let allowed = update_allowed(app);
     let failed = failed_upgrade(&app.prefix);
+    let retry_in = app.updates.failed_retry_in(SystemTime::now());
     serde_json::json!({
         "version": release_version(),
         "newer": app.updates.offer(),
@@ -647,6 +659,9 @@ pub(crate) fn update_document(app: &crate::registration_server::App) -> serde_js
         "received": received,
         "total": if total == 0 { serde_json::Value::Null } else { serde_json::json!(total) },
         "failed": failed,
+        // The last GitHub check failed (offline, rate limit); the next try is in `retry_in` s.
+        "check_failed": retry_in.is_some(),
+        "retry_in": retry_in,
     })
 }
 
@@ -3898,6 +3913,7 @@ mod tests {
                 .await
                 .is_err());
             assert_eq!(look.every(), RETRY_AFTER_FAILURE);
+            assert_eq!(look.failed_retry_in(opened + Duration::from_secs(60)), Some(540));
             assert!(!look.due(opened + Duration::from_secs(9 * 60)));
             let retry = opened + RETRY_AFTER_FAILURE;
             assert!(look.due(retry));
@@ -3905,6 +3921,7 @@ mod tests {
                 .await;
             assert_eq!(look.offer().as_deref(), Some("0.2.0"));
             assert_eq!(look.every(), UPDATE_EVERY);
+            assert_eq!(look.failed_retry_in(retry), None);
             assert!(!look.due(retry + RETRY_AFTER_FAILURE));
         }
     }
@@ -4085,6 +4102,30 @@ mod tests {
             assert_eq!(body["data"]["version"], release_version());
             assert_eq!(body["data"]["newer"], "999.0.0");
             assert_eq!(hits.lock().expect("hits").len(), 1);
+            updates_absent();
+        }
+
+        #[tokio::test]
+        async fn a_failed_check_is_reported_with_the_retry() {
+            let venue = desk();
+            let cookie = admin_cookie(&venue.app);
+            let (base, _hits) = stand_in(
+                StatusCode::FORBIDDEN,
+                r#"{"message":"API rate limit exceeded"}"#,
+            )
+            .await;
+            venue.app.updates.set_api_base(&base);
+            let (_, body) = send(&venue.app, "GET", "/api/update", Some(&cookie)).await;
+            assert_eq!(body["data"]["check_failed"], false);
+            assert!(body["data"]["retry_in"].is_null());
+            let (status, body) =
+                send(&venue.app, "POST", "/api/update/check", Some(&cookie)).await;
+            assert_eq!(status, StatusCode::BAD_GATEWAY);
+            assert_eq!(body["error"]["code"], "update_check_failed");
+            let (_, body) = send(&venue.app, "GET", "/api/update", Some(&cookie)).await;
+            assert_eq!(body["data"]["check_failed"], true);
+            let retry = body["data"]["retry_in"].as_u64().expect("retry_in");
+            assert!(retry > 590 && retry <= 600, "retry_in {retry}");
             updates_absent();
         }
 
