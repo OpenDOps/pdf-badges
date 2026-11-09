@@ -23,6 +23,9 @@ export default function Login({
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [left, setLeft] = useState(0);
+  // Bumped when each submit settles; it remounts the error line so the
+  // highlight replays even when the same error comes back.
+  const [attempt, setAttempt] = useState(0);
   const network = useNetwork(watchNetwork);
   const inFlight = useRef(false);
 
@@ -43,14 +46,12 @@ export default function Login({
         window.clearInterval(tick);
       }
     }, 1000);
-    const hold = new Promise<void>((resolve) => {
-      window.setTimeout(resolve, budget * 1000);
-    });
     try {
       await onSubmit(login, password);
     } finally {
-      await hold;
+      // The answer is in: stop the countdown so a failed login can be retried.
       window.clearInterval(tick);
+      setAttempt((n) => n + 1);
       inFlight.current = false;
       setBusy(false);
       setLeft(0);
@@ -93,7 +94,13 @@ export default function Login({
             className={field}
           />
         </div>
-        <p role="alert" className="mt-4 min-h-5 text-sm text-red-600">
+        <p
+          key={attempt}
+          role="alert"
+          className={`mt-4 min-h-5 rounded text-sm text-red-600${
+            error && attempt > 0 ? " login-error-flash" : ""
+          }`}
+        >
           {error ? t(`error.${error}`) : ""}
         </p>
         <button

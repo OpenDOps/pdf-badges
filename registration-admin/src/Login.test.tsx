@@ -195,9 +195,12 @@ test("login_shows_local_server_down", async () => {
   vi.unstubAllGlobals();
 });
 
-test("login_counts_down_for_the_timeout", async () => {
+test("login_counts_down_while_the_answer_is_pending", async () => {
   vi.useFakeTimers();
-  const onSubmit = vi.fn().mockResolvedValue(undefined);
+  let answer: () => void = () => {};
+  const onSubmit = vi.fn(
+    () => new Promise<void>((resolve) => (answer = resolve)),
+  );
   render(<Login onSubmit={onSubmit} watchNetwork={false} timeoutSecs={3} />);
   const button = screen.getByRole("button", { name: "Войти" });
   act(() => {
@@ -210,12 +213,65 @@ test("login_counts_down_for_the_timeout", async () => {
   });
   expect(button).toHaveTextContent("Подождите 2 с");
   await act(async () => {
-    await vi.advanceTimersByTimeAsync(2000);
+    answer();
   });
   expect(button).toHaveTextContent("Войти");
   expect(button).toBeEnabled();
   expect(onSubmit).toHaveBeenCalledTimes(1);
   vi.useRealTimers();
+});
+
+function ErrorHarness({ onSubmit }: { onSubmit: () => void }) {
+  const [error, setError] = useState("");
+  return (
+    <Login
+      error={error}
+      watchNetwork={false}
+      timeoutSecs={10}
+      onSubmit={async () => {
+        onSubmit();
+        setError("no_device_id");
+      }}
+    />
+  );
+}
+
+test("login_error_stops_the_countdown_at_once", async () => {
+  vi.useFakeTimers();
+  const onSubmit = vi.fn();
+  render(<ErrorHarness onSubmit={onSubmit} />);
+  const button = screen.getByRole("button", { name: "Войти" });
+  await act(async () => {
+    fireEvent.click(button);
+  });
+  expect(screen.getByRole("alert")).toHaveTextContent(
+    "У устройства нет серийного номера",
+  );
+  expect(button).toHaveTextContent("Войти");
+  expect(button).toBeEnabled();
+  await act(async () => {
+    fireEvent.click(button);
+  });
+  expect(onSubmit).toHaveBeenCalledTimes(2);
+  vi.useRealTimers();
+});
+
+test("login_repeated_error_is_highlighted_again", async () => {
+  render(<ErrorHarness onSubmit={() => {}} />);
+  const button = screen.getByRole("button", { name: "Войти" });
+  expect(screen.getByRole("alert")).not.toHaveClass("login-error-flash");
+  await act(async () => {
+    fireEvent.click(button);
+  });
+  const first = screen.getByRole("alert");
+  expect(first).toHaveClass("login-error-flash");
+  await act(async () => {
+    fireEvent.click(button);
+  });
+  const second = screen.getByRole("alert");
+  expect(second).toHaveClass("login-error-flash");
+  // A new node restarts the CSS animation.
+  expect(second).not.toBe(first);
 });
 
 test("login_ignores_submit_while_pending", () => {
