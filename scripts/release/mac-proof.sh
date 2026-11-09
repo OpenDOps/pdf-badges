@@ -6,7 +6,7 @@
 #   sudo bash scripts/release/mac-proof.sh fixup
 #       Pre-fix pkgs: write updates/live, move a relocated app to /Applications.
 #   sudo bash scripts/release/mac-proof.sh port <N>
-#       Daemon listens on 0.0.0.0:N (RUST_REG_HTTP) instead of 8080.
+#       Daemon listens on 0.0.0.0:N (RUST_REG_HTTP + data/port) instead of 8080.
 #   sudo bash scripts/release/mac-proof.sh restart
 #       launchctl kickstart -k the daemon (picks up a replaced bin/rust-reg-run).
 #
@@ -62,6 +62,9 @@ case "${1:-}" in
     "$pb" -c "Add :EnvironmentVariables dict" "$plist" >/dev/null 2>&1 || true
     "$pb" -c "Delete :EnvironmentVariables:RUST_REG_HTTP" "$plist" >/dev/null 2>&1 || true
     "$pb" -c "Add :EnvironmentVariables:RUST_REG_HTTP string 0.0.0.0:$port" "$plist"
+    # Newer wrappers and trays read the service port from the prefix.
+    mkdir -p /Library/rust-reg/data
+    echo "$port" > /Library/rust-reg/data/port
     launchctl bootout system/$label 2>/dev/null || true
     launchctl bootstrap system "$plist"
     launchctl print system/$label | grep -E 'state|pid' | head -3

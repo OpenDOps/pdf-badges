@@ -45,18 +45,30 @@ impl Session {
             Some(file) => file,
             None => return Ok(Opened::AlreadyRunning),
         };
+        // An installed service owns the port (`<prefix>/data/port`); otherwise
+        // the last port this desk started on.
+        let port = match installed_service_prefix() {
+            Some(prefix) => {
+                let port = service_port(&prefix);
+                desk_log(format!("service at {} listens on {port}", prefix.display()));
+                port
+            }
+            None => remembered_port(),
+        };
         let mut session = Session {
             child: None,
             address: Arc::new(Mutex::new(String::new())),
-            port: remembered_port(),
+            port,
             failure: None,
             #[cfg(target_os = "linux")]
             inflight_old_port: None,
             _lock: lock,
         };
-        // Persist (and migrate off the old runtime-dir path) on every launch.
-        remember_port(session.port);
         session.begin();
+        // Only a port that worked is remembered (also migrates the old path).
+        if session.failure.is_none() {
+            remember_port(session.port);
+        }
         Ok(Opened::Ready(session))
     }
 
@@ -71,15 +83,24 @@ impl Session {
 
     /// Stop the current server, if this desk started one, and start on `port`.
     ///
-    /// Does **not** touch the installed system service. May block for a few
+    /// With an installed service, moves the service instead (admin prompt):
+    /// writes `<prefix>/data/port` and restarts it. May block for a few
     /// seconds while the old process exits — Linux Port apply runs
     /// [`restart_switch`] on a worker thread instead.
+    ///
+    /// The remembered port changes only when the new port started.
     pub fn restart(&mut self, port: u16) {
         desk_log(format!("restart {port} (was {})", self.port));
-        self.stop_owned();
-        self.port = port;
-        remember_port(port);
-        self.begin();
+        if let Some(prefix) = installed_service_prefix() {
+            self.move_service(&prefix, port);
+        } else {
+            self.stop_owned();
+            self.port = port;
+            self.begin();
+            if self.failure.is_none() {
+                remember_port(port);
+            }
+        }
         desk_log(format!(
             "restart done → {} failure={:?}",
             self.address_text(),
@@ -99,7 +120,6 @@ impl Session {
         ));
         self.inflight_old_port = Some(old_port);
         self.port = port;
-        remember_port(port);
         self.failure = None;
         *self.address.lock().expect("address") = format!("switching to {port}…");
         (child, old_port)
@@ -121,8 +141,37 @@ impl Session {
         self.inflight_old_port = None;
         self.port = port;
         self.child = child;
+        if failure.is_none() {
+            remember_port(port);
+        }
         self.failure = failure;
         *self.address.lock().expect("address") = address;
+    }
+
+    /// Move the installed service to `port`. A cancelled prompt or a refused
+    /// port leaves the service (and this desk) on the old port.
+    fn move_service(&mut self, prefix: &Path, port: u16) {
+        if let Some(child) = self.child.take() {
+            stop_child(child);
+        }
+        let old = self.port;
+        match switch_service_port(prefix, port) {
+            Ok(()) => {
+                self.port = port;
+                self.failure = None;
+                *self.address.lock().expect("address") = format!("localhost:{port}");
+                remember_port(port);
+            }
+            Err(ServiceSwitch::Unchanged(message)) => {
+                self.port = old;
+                self.begin();
+                self.failure = Some(message);
+            }
+            Err(ServiceSwitch::NotListening(message)) => {
+                self.port = port;
+                self.fail(message);
+            }
+        }
     }
 
     /// Shared label for the Linux tray menu (ksni rebuilds from this mutex).
@@ -856,6 +905,20 @@ pub fn restart_switch(
     } else {
         desk_log("restart_switch no old child");
     }
+    if let Some(prefix) = installed_service_prefix() {
+        return match switch_service_port(&prefix, new_port) {
+            Ok(()) => {
+                let shown = format!("localhost:{new_port}");
+                *address.lock().expect("address") = shown.clone();
+                (None, shown, None)
+            }
+            Err(ServiceSwitch::Unchanged(message) | ServiceSwitch::NotListening(message)) => {
+                let shown = format!("failed on port {new_port}");
+                *address.lock().expect("address") = shown.clone();
+                (None, shown, Some(message))
+            }
+        };
+    }
     desk_log(format!(
         "restart_switch stop_port {old_port} (open={})",
         port_open(old_port)
@@ -1195,6 +1258,184 @@ fn port_open(port: u16) -> bool {
     TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok()
 }
 
+pub(crate) enum ServiceSwitch {
+    /// The service was not touched (port busy, prompt cancelled, command failed).
+    Unchanged(String),
+    /// The port file was written but rust-reg did not answer on the new port.
+    NotListening(String),
+}
+
+const SERVICE_LABEL: &str = "com.opendops.rust-reg";
+
+/// Prefix of the installed system service (launchd / systemd / Windows service),
+/// when this machine has one.
+#[allow(unreachable_code)]
+pub(crate) fn installed_service_prefix() -> Option<PathBuf> {
+    // Unit tests must never reach the real service (it opens an admin prompt).
+    #[cfg(test)]
+    return None;
+    #[cfg(target_os = "macos")]
+    {
+        let prefix = PathBuf::from("/Library/rust-reg");
+        let plist = PathBuf::from(format!("/Library/LaunchDaemons/{SERVICE_LABEL}.plist"));
+        return (plist.is_file() && prefix.join("bin/rust-reg-run").is_file()).then_some(prefix);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let prefix = PathBuf::from("/opt/rust-reg");
+        let unit = ["/lib/systemd/system", "/etc/systemd/system", "/usr/lib/systemd/system"]
+            .iter()
+            .any(|dir| Path::new(dir).join("rust-reg.service").is_file());
+        return (unit && prefix.join("bin/rust-reg-run").is_file()).then_some(prefix);
+    }
+    #[cfg(windows)]
+    {
+        let prefix = PathBuf::from(r"C:\Program Files\rust-reg");
+        let service = Command::new("sc.exe")
+            .args(["query", "rust-reg"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        return (service && prefix.join(r"bin\rust-reg-run.exe").is_file()).then_some(prefix);
+    }
+    #[allow(unreachable_code)]
+    None
+}
+
+/// Port the installed service listens on: `<prefix>/data/port`, else 8080.
+pub(crate) fn service_port(prefix: &Path) -> u16 {
+    read_saved_port(&prefix.join("data").join("port")).unwrap_or(DEFAULT_PORT)
+}
+
+/// Write `<prefix>/data/port`, restart the service (admin prompt), and wait for
+/// rust-reg to answer on `port`.
+fn switch_service_port(prefix: &Path, port: u16) -> Result<(), ServiceSwitch> {
+    if port_open(port) && !rust_reg_listening(port) {
+        return Err(ServiceSwitch::Unchanged(port_taken(port)));
+    }
+    desk_log(format!("service port → {port} at {}", prefix.display()));
+    if let Err(err) = set_service_port(prefix, port) {
+        desk_log(format!("service port not changed: {err}"));
+        return Err(ServiceSwitch::Unchanged(format!(
+            "port not changed ({err}); the service stays on its previous port."
+        )));
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while std::time::Instant::now() < deadline {
+        if rust_reg_listening(port) {
+            desk_log(format!("service listening on {port}"));
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+    Err(ServiceSwitch::NotListening(format!(
+        "the service did not start on port {port}. Choose another port."
+    )))
+}
+
+fn set_service_port(prefix: &Path, port: u16) -> io::Result<()> {
+    #[cfg(target_os = "macos")]
+    let status = Command::new("osascript")
+        .args(["-e", &mac_service_port_script(prefix, port)])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+    #[cfg(target_os = "linux")]
+    let status = {
+        let script = linux_service_port_script(prefix, port);
+        Command::new("timeout")
+            .args(["120", "pkexec", "sh", "-c", &script])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .or_else(|_| {
+                Command::new("pkexec")
+                    .args(["sh", "-c", &script])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+            })?
+    };
+    #[cfg(windows)]
+    let status = Command::new("powershell.exe")
+        .args(["-NoProfile", "-Command", &windows_service_port_script(prefix, port)])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+    let status: ExitStatus = {
+        let _ = (prefix, port);
+        return Err(io::Error::new(io::ErrorKind::Unsupported, "no service"));
+    };
+    if status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::new(io::ErrorKind::Other, "cancelled or refused"))
+    }
+}
+
+/// `osascript -e` source: write the port file and restart the launchd daemon as admin.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn mac_service_port_script(prefix: &Path, port: u16) -> String {
+    let p = prefix.display();
+    let plist = format!("/Library/LaunchDaemons/{SERVICE_LABEL}.plist");
+    let shell = format!(
+        "mkdir -p '{p}/data' && echo {port} > '{p}/data/port' && \
+         (launchctl kickstart -k system/{SERVICE_LABEL} || launchctl bootstrap system {plist})"
+    );
+    format!("do shell script \"{shell}\" with administrator privileges")
+}
+
+/// `pkexec sh -c` body: write the port file and restart the systemd unit.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn linux_service_port_script(prefix: &Path, port: u16) -> String {
+    let p = prefix.display();
+    format!(
+        "mkdir -p '{p}/data' && echo {port} > '{p}/data/port' && systemctl restart rust-reg.service"
+    )
+}
+
+/// `powershell -Command` body: elevate (UAC), write the port file, restart the service.
+/// The elevated part goes through `-EncodedCommand` so paths need no nested quoting.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn windows_service_port_script(prefix: &Path, port: u16) -> String {
+    let p = prefix.display();
+    let inner = format!(
+        "New-Item -ItemType Directory -Force -Path '{p}\\data' | Out-Null; \
+         Set-Content -Path '{p}\\data\\port' -Value '{port}'; \
+         Restart-Service -Name rust-reg -Force"
+    );
+    let encoded = base64_utf16le(&inner);
+    format!(
+        "$p = Start-Process powershell.exe -Verb RunAs -Wait -PassThru -WindowStyle Hidden \
+         -ArgumentList '-NoProfile','-EncodedCommand','{encoded}'; exit $p.ExitCode"
+    )
+}
+
+/// Base64 of UTF-16LE text (what `powershell -EncodedCommand` expects).
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn base64_utf16le(text: &str) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let bytes: Vec<u8> = text.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let n = (u32::from(chunk[0]) << 16)
+            | (u32::from(*chunk.get(1).unwrap_or(&0)) << 8)
+            | u32::from(*chunk.get(2).unwrap_or(&0));
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(TABLE[(n >> (18 - 6 * i) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
 fn port_taken(port: u16) -> String {
     format!("port {port} is in use by another program; the server did not start. Choose another port.")
 }
@@ -1344,6 +1585,103 @@ mod tests {
             }
         });
         port
+    }
+
+    /// `RUST_REG_DESK_STATE` is process-wide; tests that set it hold this.
+    static STATE_ENV: Mutex<()> = Mutex::new(());
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "rust-reg-desk-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn test_session(port: u16, state: &Path) -> Session {
+        Session {
+            child: None,
+            address: Arc::new(Mutex::new(String::new())),
+            port,
+            failure: None,
+            #[cfg(target_os = "linux")]
+            inflight_old_port: None,
+            _lock: File::create(state.join("test.lock")).unwrap(),
+        }
+    }
+
+    #[test]
+    fn a_busy_port_is_not_remembered() {
+        let _env = STATE_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let state = temp_dir("busy");
+        std::env::set_var("RUST_REG_DESK_STATE", &state);
+        remember_port(8181);
+        // A foreign program holds the new port: start fails, 8181 stays saved.
+        let busy = serve_once(NGINX_SPA);
+        let mut session = test_session(8181, &state);
+        session.restart(busy);
+        assert!(session.failure().is_some_and(|text| text.contains("did not start")));
+        assert_eq!(remembered_port(), 8181);
+        std::env::remove_var("RUST_REG_DESK_STATE");
+        let _ = std::fs::remove_dir_all(&state);
+    }
+
+    #[test]
+    fn the_service_port_comes_from_the_prefix() {
+        let prefix = temp_dir("svc");
+        assert_eq!(service_port(&prefix), DEFAULT_PORT);
+        std::fs::create_dir_all(prefix.join("data")).unwrap();
+        std::fs::write(prefix.join("data/port"), "8081\n").unwrap();
+        assert_eq!(service_port(&prefix), 8081);
+        std::fs::write(prefix.join("data/port"), "nope").unwrap();
+        assert_eq!(service_port(&prefix), DEFAULT_PORT);
+        let _ = std::fs::remove_dir_all(&prefix);
+    }
+
+    #[test]
+    fn mac_service_script_writes_the_port_and_restarts_launchd() {
+        let script = mac_service_port_script(Path::new("/Library/rust-reg"), 8081);
+        assert!(script.starts_with("do shell script \""));
+        assert!(script.ends_with("\" with administrator privileges"));
+        assert!(script.contains("echo 8081 > '/Library/rust-reg/data/port'"));
+        assert!(script.contains("launchctl kickstart -k system/com.opendops.rust-reg"));
+        assert!(script.contains("launchctl bootstrap system /Library/LaunchDaemons/com.opendops.rust-reg.plist"));
+        // Only the outer AppleScript string quotes.
+        assert_eq!(script.matches('"').count(), 2);
+    }
+
+    #[test]
+    fn linux_service_script_writes_the_port_and_restarts_systemd() {
+        let script = linux_service_port_script(Path::new("/opt/rust-reg"), 8081);
+        assert!(script.contains("mkdir -p '/opt/rust-reg/data'"));
+        assert!(script.contains("echo 8081 > '/opt/rust-reg/data/port'"));
+        assert!(script.ends_with("systemctl restart rust-reg.service"));
+    }
+
+    #[test]
+    fn windows_service_script_elevates_an_encoded_command() {
+        let script = windows_service_port_script(Path::new(r"C:\Program Files\rust-reg"), 8081);
+        assert!(script.contains("-Verb RunAs"));
+        assert!(script.contains("exit $p.ExitCode"));
+        let inner = "New-Item -ItemType Directory -Force -Path 'C:\\Program Files\\rust-reg\\data' | Out-Null; \
+                     Set-Content -Path 'C:\\Program Files\\rust-reg\\data\\port' -Value '8081'; \
+                     Restart-Service -Name rust-reg -Force";
+        assert!(script.contains(&base64_utf16le(inner)));
+    }
+
+    #[test]
+    fn base64_utf16le_matches_powershell() {
+        // [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes(...))
+        assert_eq!(base64_utf16le(""), "");
+        assert_eq!(base64_utf16le("a"), "YQA=");
+        assert_eq!(base64_utf16le("dir"), "ZABpAHIA");
+        assert_eq!(base64_utf16le("ab"), "YQBiAA==");
     }
 
     #[test]
@@ -1600,6 +1938,11 @@ mod tests {
 
     #[test]
     fn mac_app_uses_application_support_when_library_is_missing() {
+        // launch_for_in prefers a real /Library/rust-reg install on this machine.
+        if Path::new("/Library/rust-reg/bin/rust-reg-run").is_file() {
+            eprintln!("skip: /Library/rust-reg is installed here");
+            return;
+        }
         let root = std::env::temp_dir().join(format!("reg-server-support-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let support = root.join("support");
@@ -1652,8 +1995,7 @@ mod tests {
 
     #[test]
     fn remember_port_roundtrips_through_state_dir() {
-        static GUARD: Mutex<()> = Mutex::new(());
-        let _lock = GUARD.lock().unwrap();
+        let _lock = STATE_ENV.lock().unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!(
             "rust-reg-desk-state-{}-{}",
             std::process::id(),

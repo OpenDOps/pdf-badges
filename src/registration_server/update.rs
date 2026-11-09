@@ -2413,13 +2413,23 @@ fn spawn_registration(prefix: &Path, version_dir: &Path) -> io::Result<Child> {
         .arg(version_dir.join("admin"))
         .arg("--form")
         .arg(version_dir.join("form"));
-    // The tray sets this when the menu asks for a listen port.
-    if let Ok(http) = std::env::var("RUST_REG_HTTP") {
-        if !http.is_empty() {
-            command.arg("--http").arg(http);
-        }
+    let env = std::env::var("RUST_REG_HTTP").ok();
+    let file = std::fs::read_to_string(prefix.join("data").join("port")).ok();
+    if let Some(http) = service_http(env.as_deref(), file.as_deref()) {
+        command.arg("--http").arg(http);
     }
     command.spawn()
+}
+
+/// Listen address for the server the wrapper starts. `RUST_REG_HTTP` (set by a
+/// tray that spawns its own server) wins; otherwise `<prefix>/data/port`, which
+/// the tray's **Port…** writes for an installed service. `None` keeps 8080.
+pub(crate) fn service_http(env: Option<&str>, port_file: Option<&str>) -> Option<String> {
+    if let Some(http) = env.map(str::trim).filter(|http| !http.is_empty()) {
+        return Some(http.to_string());
+    }
+    let port: u16 = port_file?.trim().parse().ok()?;
+    (port != 0).then(|| format!("0.0.0.0:{port}"))
 }
 
 #[cfg(unix)]
@@ -2902,12 +2912,13 @@ fn replace_dest_if_newer(dest: &Path, new_bytes: &[u8]) -> io::Result<()> {
 }
 
 fn macos_tray_app_path() -> Option<PathBuf> {
-    #[cfg(target_os = "macos")]
+    // Tests must never touch the real installed app (covered by `replace_tray_with`).
+    #[cfg(all(target_os = "macos", not(test)))]
     {
         let path = PathBuf::from("/Applications/reg-server.app/Contents/MacOS/reg-server");
         path.is_file().then_some(path)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(any(not(target_os = "macos"), test))]
     {
         None
     }
@@ -3185,6 +3196,33 @@ mod tests {
         assert_eq!(total, 1000);
         check.begin_apply();
         assert_eq!(check.progress().0, "applying");
+    }
+
+    mod service_port {
+        use super::super::service_http;
+
+        #[test]
+        fn the_port_file_sets_the_service_listen_address() {
+            assert_eq!(service_http(None, Some("8081\n")).as_deref(), Some("0.0.0.0:8081"));
+            assert_eq!(service_http(Some(""), Some(" 9000\r\n")).as_deref(), Some("0.0.0.0:9000"));
+        }
+
+        #[test]
+        fn the_tray_env_wins_over_the_port_file() {
+            assert_eq!(
+                service_http(Some("0.0.0.0:7000"), Some("8081")).as_deref(),
+                Some("0.0.0.0:7000")
+            );
+        }
+
+        #[test]
+        fn a_missing_or_bad_port_file_keeps_the_default() {
+            assert_eq!(service_http(None, None), None);
+            assert_eq!(service_http(None, Some("")), None);
+            assert_eq!(service_http(None, Some("0")), None);
+            assert_eq!(service_http(None, Some("nope")), None);
+            assert_eq!(service_http(None, Some("65536")), None);
+        }
     }
 
     mod upgrade_probe {
