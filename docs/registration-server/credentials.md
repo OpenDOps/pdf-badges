@@ -19,7 +19,7 @@ project_token: token-value
 
 | field | when it is set |
 |---|---|
-| `device_id` | provisioning writes it |
+| `device_id` | provisioning, or a UUID v4 the server writes at startup when the file has none |
 | `base_url` | configuration, such as `https://kuprin.su/` or `https://stage.kuprin.su/` |
 | `event_id` | the event chosen at bind |
 | `event_name` | display label, optional |

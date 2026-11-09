@@ -250,17 +250,12 @@ pub fn run(config: Config) -> Result<(), Box<dyn std::error::Error + Send + Sync
     let (mut app, worker) = App::new();
     let remote = Remote::new(&config.remote_base)?;
     let credentials = CredentialFile::new(&config.credentials_path);
-    match credentials.load() {
-        Ok(loaded) => match loaded.device_id() {
-            Some(device_id) => eprintln!(
-                "registration-server credentials {} device_id={device_id}",
-                config.credentials_path.display()
-            ),
-            None => eprintln!(
-                "registration-server credentials {} has no device_id",
-                config.credentials_path.display()
-            ),
-        },
+    match credentials.ensure_device_id() {
+        Ok((device_id, generated)) => eprintln!(
+            "registration-server credentials {} device_id={device_id}{}",
+            config.credentials_path.display(),
+            if generated { " (generated)" } else { "" }
+        ),
         Err(err) => {
             eprintln!(
                 "registration-server credentials {}: {err}",

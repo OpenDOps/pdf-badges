@@ -32,7 +32,7 @@ every sync call                         form fields dev_id, token, eid
 
 ## What must already be on the device
 
-`device_id` is a string in `./base/main.props`. The application reads it and never writes it. Login refuses with `no_device_id` when the key is missing. Provision the id with the machine.
+`device_id` is a string in the credential file. A provisioned id is kept. When the file has none, the server writes a UUID v4 at startup (`CredentialFile::ensure_device_id`), so a fresh install can log in. Login still refuses with `no_device_id` when the id is empty.
 
 The remote base URL is configuration. The Scala client hardcodes the two hosts above. The Rust process reads `REGISTRATION_REMOTE` at start. Unset, that is `https://kuprin.su/`. An `http` URL is rewritten to `https`.
 
