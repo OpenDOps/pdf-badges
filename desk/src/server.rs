@@ -5,7 +5,7 @@
 //! The macOS application bundle always uses `/Library/rust-reg`.
 
 use std::fs::{File, OpenOptions, TryLockError};
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -177,6 +177,11 @@ impl Session {
         // Service or leftover process already listening: show the address and
         // do not start a second server. Quit still clears the port via stop().
         if port_open(self.port) {
+            if !rust_reg_listening(self.port) {
+                desk_log(format!("begin port {} held by another program", self.port));
+                self.fail(port_taken(self.port));
+                return;
+            }
             let shown = format!("localhost:{}", self.port);
             desk_log(format!("begin adopt existing {shown}"));
             *self.address.lock().expect("address") = shown;
@@ -861,6 +866,12 @@ pub fn restart_switch(
         port_open(old_port)
     ));
     if port_open(new_port) {
+        if !rust_reg_listening(new_port) {
+            desk_log(format!("restart_switch port {new_port} held by another program"));
+            let shown = format!("failed on port {new_port}");
+            *address.lock().expect("address") = shown.clone();
+            return (None, shown, Some(port_taken(new_port)));
+        }
         let shown = format!("localhost:{new_port}");
         desk_log(format!("restart_switch adopt existing {shown}"));
         *address.lock().expect("address") = shown.clone();
@@ -1002,7 +1013,16 @@ fn stop_port(port: u16) {
         }
         #[cfg(unix)]
         {
-            let pids = listen_pids(port);
+            // Never signal another program that happens to hold the port
+            // (e.g. Docker on 8080): only rust-reg / rust-reg-run listeners.
+            let all = listen_pids(port);
+            let pids: Vec<String> = all.iter().filter(|pid| is_rust_reg_pid(pid)).cloned().collect();
+            if pids.is_empty() && !all.is_empty() {
+                desk_log(format!(
+                    "stop_port {port} held by other program(s) {all:?}; leaving them"
+                ));
+                return;
+            }
             if pids.is_empty() {
                 desk_log(format!(
                     "stop_port {port} open but no pids (round {round})"
@@ -1175,6 +1195,59 @@ fn port_open(port: u16) -> bool {
     TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok()
 }
 
+fn port_taken(port: u16) -> String {
+    format!("port {port} is in use by another program; the server did not start. Choose another port.")
+}
+
+/// True when the listener on `port` answers `GET /health` like rust-reg
+/// (`200`, JSON `{"status":"ok"}`), not merely when the port accepts a connection.
+fn rust_reg_listening(port: u16) -> bool {
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(500)) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+    let request = format!("GET /health HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
+    if stream.write_all(request.as_bytes()).is_err() {
+        return false;
+    }
+    let mut response = Vec::new();
+    let _ = stream.take(16 * 1024).read_to_end(&mut response);
+    health_is_rust_reg(&String::from_utf8_lossy(&response))
+}
+
+pub(crate) fn health_is_rust_reg(response: &str) -> bool {
+    let Some((head, body)) = response.split_once("\r\n\r\n") else {
+        return false;
+    };
+    let mut lines = head.lines();
+    let ok_status = lines
+        .next()
+        .is_some_and(|status| status.split_whitespace().nth(1) == Some("200"));
+    let json = lines.any(|line| {
+        line.split_once(':').is_some_and(|(name, value)| {
+            name.trim().eq_ignore_ascii_case("content-type")
+                && value.trim().to_ascii_lowercase().starts_with("application/json")
+        })
+    });
+    let compact: String = body.chars().filter(|c| !c.is_whitespace()).collect();
+    ok_status && json && compact == r#"{"status":"ok"}"#
+}
+
+/// Listener process is the server or its wrapper (not the desk, not another program).
+#[cfg(unix)]
+fn is_rust_reg_pid(pid: &str) -> bool {
+    timed_output("2", "ps", &["-o", "comm=", "-p", pid])
+        .map(|comm| is_rust_reg_comm(comm.trim()))
+        .unwrap_or(false)
+}
+
+pub(crate) fn is_rust_reg_comm(comm: &str) -> bool {
+    let name = comm.rsplit('/').next().unwrap_or(comm);
+    matches!(name, "rust-reg" | "rust-reg-run" | "rust-reg.exe" | "rust-reg-run.exe")
+}
+
 fn prefix_args(prefix: &Path) -> Vec<String> {
     vec!["--prefix".to_string(), prefix.display().to_string()]
 }
@@ -1255,6 +1328,63 @@ fn app_bundle(exe: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const RUST_REG_HEALTH: &str = "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 15\r\ndate: Mon, 09 Nov 2026 10:23:09 GMT\r\n\r\n{\"status\":\"ok\"}";
+    const NGINX_SPA: &str = "HTTP/1.1 200 OK\r\nServer: nginx\r\nContent-Type: text/html\r\n\r\n<!doctype html><html lang=\"en\"></html>";
+
+    /// One-shot listener on a free port that answers the first request with `reply`.
+    fn serve_once(reply: &'static str) -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(reply.as_bytes());
+            }
+        });
+        port
+    }
+
+    #[test]
+    fn health_matches_only_rust_reg() {
+        assert!(health_is_rust_reg(RUST_REG_HEALTH));
+        assert!(!health_is_rust_reg(NGINX_SPA));
+        assert!(!health_is_rust_reg(
+            "HTTP/1.1 503 Service Unavailable\r\ncontent-type: application/json\r\n\r\n{\"status\":\"ok\"}"
+        ));
+        assert!(!health_is_rust_reg(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\r\n{\"status\":\"up\"}"
+        ));
+        assert!(!health_is_rust_reg(""));
+    }
+
+    #[test]
+    fn a_foreign_listener_is_not_adopted() {
+        assert!(!rust_reg_listening(serve_once(NGINX_SPA)));
+    }
+
+    #[test]
+    fn a_rust_reg_listener_is_adopted() {
+        assert!(rust_reg_listening(serve_once(RUST_REG_HEALTH)));
+    }
+
+    #[test]
+    fn port_taken_says_the_server_did_not_start() {
+        let text = port_taken(8080);
+        assert!(text.contains("8080") && text.contains("did not start"));
+    }
+
+    #[test]
+    fn only_server_processes_are_stopped() {
+        assert!(is_rust_reg_comm("/Library/rust-reg/bin/rust-reg-run"));
+        assert!(is_rust_reg_comm("/Library/rust-reg/versions/2.0.0-alpha.6/rust-reg"));
+        assert!(is_rust_reg_comm("rust-reg"));
+        assert!(!is_rust_reg_comm("/Applications/reg-server.app/Contents/MacOS/reg-server"));
+        assert!(!is_rust_reg_comm("rust-reg-desk"));
+        assert!(!is_rust_reg_comm("/Applications/Docker.app/Contents/MacOS/com.docker.backend"));
+        assert!(!is_rust_reg_comm("nginx"));
+    }
 
     #[test]
     fn square_icon_keeps_the_tray_pixels() {

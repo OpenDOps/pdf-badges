@@ -5,6 +5,8 @@
 #       Install pkg, add prerelease env + stderr log to the daemon, (re)load it.
 #   sudo bash scripts/release/mac-proof.sh fixup
 #       Pre-fix pkgs: write updates/live, move a relocated app to /Applications.
+#   sudo bash scripts/release/mac-proof.sh port <N>
+#       Daemon listens on 0.0.0.0:N (RUST_REG_HTTP) instead of 8080.
 #   sudo bash scripts/release/mac-proof.sh restart
 #       launchctl kickstart -k the daemon (picks up a replaced bin/rust-reg-run).
 #
@@ -55,12 +57,21 @@ case "${1:-}" in
     launchctl kickstart -k system/$label
     launchctl print system/$label | grep -E 'state|pid' | head -3
     ;;
+  port)
+    port=${2:?port number}
+    "$pb" -c "Add :EnvironmentVariables dict" "$plist" >/dev/null 2>&1 || true
+    "$pb" -c "Delete :EnvironmentVariables:RUST_REG_HTTP" "$plist" >/dev/null 2>&1 || true
+    "$pb" -c "Add :EnvironmentVariables:RUST_REG_HTTP string 0.0.0.0:$port" "$plist"
+    launchctl bootout system/$label 2>/dev/null || true
+    launchctl bootstrap system "$plist"
+    launchctl print system/$label | grep -E 'state|pid' | head -3
+    ;;
   restart)
     launchctl kickstart -k system/$label
     launchctl print system/$label | grep -E 'state|pid' | head -3
     ;;
   *)
-    sed -n '2,11p' "$0" >&2
+    sed -n '2,13p' "$0" >&2
     exit 2
     ;;
 esac
