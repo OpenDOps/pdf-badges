@@ -60,6 +60,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         Opened::Ready(session) => session,
     };
+    let probe_letter = server::upgrade_probe_letter();
     let (width, height, rgba) = menu_icon();
     let icon = tray_icon::Icon::from_rgba(rgba, width, height)?;
     let mut shown = session.address_text();
@@ -70,20 +71,41 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         None,
     );
     let port_item = MenuItem::with_id("port", "Port…", true, None);
+    let probe_item = if server::show_upgrade_probe_menu(probe_letter) {
+        Some(MenuItem::with_id(
+            "upgrade-probe",
+            server::UPGRADE_PROBE_MENU,
+            true,
+            None,
+        ))
+    } else {
+        None
+    };
     let quit = MenuItem::with_id("quit", "Quit", true, None);
     let menu = Menu::new();
     menu.append(&address)?;
     menu.append(&port_item)?;
+    if let Some(ref item) = probe_item {
+        menu.append(item)?;
+    }
     menu.append(&quit)?;
-    let _tray = TrayIconBuilder::new()
+    let tooltip = match probe_letter {
+        Some(letter) => format!("reg-server (probe {letter})"),
+        None => "reg-server".into(),
+    };
+    let builder = TrayIconBuilder::new()
         .with_menu(Box::new(menu))
         .with_menu_on_left_click(true)
-        .with_tooltip("reg-server")
-        .with_icon_templated(icon)
-        .build()?;
+        .with_tooltip(&tooltip);
+    let _tray = if server::probe_uses_color_icon(probe_letter) {
+        builder.with_icon(icon).build()?
+    } else {
+        builder.with_icon_templated(icon).build()?
+    };
 
     let address_id = address.id().clone();
     let port_id = port_item.id().clone();
+    let probe_id = probe_item.as_ref().map(|item| item.id().clone());
     let quit_id = quit.id().clone();
     let mut panel = None;
     if let Some(message) = session.failure() {
@@ -140,6 +162,10 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                     None => panel = Some(open_port(marker, &app, session.port())),
                 }
             }
+            if probe_id.as_ref() == Some(&event.id) {
+                server::desk_log("action UpgradeProbe");
+                show_upgrade_probe(marker, &app);
+            }
         }
 
         let next = session.address_text();
@@ -155,6 +181,16 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 fn set_address_item(item: &MenuItem, text: &str) {
     item.set_text(text);
     item.set_enabled(server::listen_url(text).is_some());
+}
+
+fn show_upgrade_probe(marker: MainThreadMarker, app: &NSApplication) {
+    let alert = NSAlert::new(marker);
+    alert.setAlertStyle(NSAlertStyle::Informational);
+    alert.setMessageText(&NSString::from_str(server::UPGRADE_PROBE_MENU));
+    alert.setInformativeText(&NSString::from_str("Tray marker B is active."));
+    activate_app(app);
+    alert.layout();
+    let _ = alert.runModal();
 }
 
 /// Blocking error alert. Quit from the tray does not dismiss it.
@@ -394,9 +430,16 @@ impl PanelActions {
 }
 
 pub(crate) fn menu_icon() -> (u32, u32, Vec<u8>) {
+    menu_icon_for(server::upgrade_probe_letter())
+}
+
+pub(crate) fn menu_icon_for(letter: Option<char>) -> (u32, u32, Vec<u8>) {
     match system_pencil_alpha() {
+        Some(alpha) if server::probe_uses_color_icon(letter) => {
+            server::icon_with_pencil_rgb(&alpha, server::probe_icon_rgb(letter))
+        }
         Some(alpha) => server::icon_with_pencil(&alpha),
-        None => server::icon_rgba(),
+        None => server::icon_rgba_for(letter),
     }
 }
 

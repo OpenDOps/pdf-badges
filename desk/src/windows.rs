@@ -9,8 +9,8 @@ use std::time::Duration;
 use tray_icon::menu::{Menu, MenuEvent, MenuItem};
 use tray_icon::TrayIconBuilder;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, MessageBoxW, PeekMessageW, TranslateMessage, MB_ICONERROR, MB_OK, MSG,
-    PM_REMOVE,
+    DispatchMessageW, MessageBoxW, PeekMessageW, TranslateMessage, MB_ICONERROR,
+    MB_ICONINFORMATION, MB_OK, MSG, PM_REMOVE,
 };
 
 use crate::server::{self, Opened};
@@ -26,6 +26,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         Opened::Ready(session) => session,
     };
+    let probe = server::upgrade_probe_letter();
     let (width, height, rgba) = server::icon_rgba();
     let icon = tray_icon::Icon::from_rgba(rgba, width, height)?;
     let mut shown = session.address_text();
@@ -36,15 +37,25 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         None,
     );
     let port_item = MenuItem::with_id("port", "Port…", true, None);
+    let upgrade_probe = server::show_upgrade_probe_menu(probe).then(|| {
+        MenuItem::with_id("upgrade-probe", server::UPGRADE_PROBE_MENU, true, None)
+    });
     let quit = MenuItem::with_id("quit", "Quit", true, None);
     let menu = Menu::new();
     menu.append(&address)?;
     menu.append(&port_item)?;
+    if let Some(item) = upgrade_probe.as_ref() {
+        menu.append(item)?;
+    }
     menu.append(&quit)?;
+    let tooltip = match probe {
+        Some(letter) => format!("reg-server (probe {letter})"),
+        None => "reg-server".into(),
+    };
     let _tray = TrayIconBuilder::new()
         .with_menu(Box::new(menu))
         .with_menu_on_left_click(true)
-        .with_tooltip("reg-server")
+        .with_tooltip(&tooltip)
         .with_icon(icon)
         .build()?;
 
@@ -54,6 +65,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let address_id = address.id().clone();
     let port_id = port_item.id().clone();
+    let upgrade_probe_id = upgrade_probe.as_ref().map(|item| item.id().clone());
     let quit_id = quit.id().clone();
     loop {
         pump_messages();
@@ -74,6 +86,10 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                         show_error(&message);
                     }
                 }
+            }
+            if upgrade_probe_id.as_ref() == Some(&event.id) {
+                server::desk_log("action UpgradeProbe");
+                show_info("Tray marker B is active.");
             }
         }
         let next = session.address_text();
@@ -118,17 +134,25 @@ fn ask_port(current: u16) -> Option<u16> {
 }
 
 fn show_error(message: &str) {
+    show_message(message, "reg-server", MB_OK | MB_ICONERROR);
+}
+
+fn show_info(message: &str) {
+    show_message(message, server::UPGRADE_PROBE_MENU, MB_OK | MB_ICONINFORMATION);
+}
+
+fn show_message(message: &str, title: &str, style: u32) {
     use std::os::windows::ffi::OsStrExt;
     let mut text: Vec<u16> = std::ffi::OsStr::new(message).encode_wide().collect();
     text.push(0);
-    let mut title: Vec<u16> = std::ffi::OsStr::new("reg-server").encode_wide().collect();
+    let mut title: Vec<u16> = std::ffi::OsStr::new(title).encode_wide().collect();
     title.push(0);
     unsafe {
         MessageBoxW(
             std::ptr::null_mut(),
             text.as_ptr(),
             title.as_ptr(),
-            MB_OK | MB_ICONERROR,
+            style,
         );
     }
 }

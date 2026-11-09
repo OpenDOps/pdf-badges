@@ -12,6 +12,8 @@ root=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$root"
 # shellcheck source=upgrade-zips.sh
 source "$root/scripts/release/upgrade-zips.sh"
+# shellcheck source=write-testpath.sh
+source "$root/scripts/release/write-testpath.sh"
 
 cargo_version=$(awk '
   /^\[package\]/ { in_pkg = 1; next }
@@ -135,6 +137,8 @@ assemble_version() {
   cp -R "$form_client/." "$dest/form/"
   # The client build copies public/dbenums next to the form. That dump is not part of the release.
   rm -rf "$dest/form/dbenums"
+  # Step 9 marker: only when RUST_REG_UPGRADE_PROBE is one letter (shipping omits /testpath).
+  write_upgrade_probe_testpath "$dest/form" "${RUST_REG_UPGRADE_PROBE:-}"
   printf '%s\n' "$tag" > "$dest/RELEASE"
 }
 
@@ -334,7 +338,22 @@ EOF
     icons_src="$root/desk/icons"
     icon_src_128=""
     icon_tmp=""
-    if [[ -f "$icons_src/rust-reg-128.png" ]]; then
+    # Marker packs (probe letter set): always --write-icon so B/C tints land in hicolor.
+    # Shipping: prefer vendored macOS-shaped PNGs from desk/icons.
+    probe_letter=$(printf '%s' "${RUST_REG_UPGRADE_PROBE:-}" | tr -d '[:space:]')
+    if [[ "$probe_letter" =~ ^[A-Za-z]$ ]]; then
+      echo "pack: probe $(printf '%s' "$probe_letter" | tr '[:lower:]' '[:upper:]'); writing tinted desk icons via --write-icon" >&2
+      icon_tmp=$(mktemp "${TMPDIR:-/tmp}/rust-reg-icon.XXXXXX.png")
+      if "$release_dir/$desk_name" --write-icon "$icon_tmp" 128; then
+        icon_src_128="$icon_tmp"
+        for edge in 22 24 32 48 64 128 256; do
+          mkdir -p "$deb/usr/share/icons/hicolor/${edge}x${edge}/apps"
+          "$release_dir/$desk_name" --write-icon \
+            "$deb/usr/share/icons/hicolor/${edge}x${edge}/apps/rust-reg.png" "$edge" \
+            || cp "$icon_tmp" "$deb/usr/share/icons/hicolor/${edge}x${edge}/apps/rust-reg.png"
+        done
+      fi
+    elif [[ -f "$icons_src/rust-reg-128.png" ]]; then
       echo "pack: using vendored macOS desk icons from desk/icons" >&2
       icon_src_128="$icons_src/rust-reg-128.png"
       for edge in 22 24 32 48 64 128 256; do

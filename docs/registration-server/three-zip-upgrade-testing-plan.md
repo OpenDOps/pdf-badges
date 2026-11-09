@@ -6,7 +6,7 @@ Each step below is one change (or one manual matrix). The tests named in the ste
 
 This plan is done when steps 1 through 13 are `done`.
 
-**Not ready to run the Mac/Linux matrices until steps 1–6 (and marker steps 7–9 for a full proof) are done.** Steps 1–5 are in tree; step 6 (parts suite gate) and marker packs remain before the Mac/Linux proof.
+**Steps 1–10 are in tree.** Ready to run the Mac/Linux proof matrices ([11](#step-11-macos-proof), [12](#step-12-linux-proof)) once real A/B/C packs are published (see [pack-markers.sh](../../scripts/release/pack-markers.sh)).
 
 ## Summary
 
@@ -17,12 +17,12 @@ This plan is done when steps 1 through 13 are `done`.
 | [3. Unpack parts](#step-3-unpack-parts) | Server / wrapper / tray zips land in `versions/<to>/` (or live tree copy on skip) | [§ Test](#step-3-unpack-parts) | done |
 | [4. Replace tray](#step-4-replace-tray) | After `current`, replace `bin/rust-reg-desk` (and macOS app binary) like the wrapper | [§ Test](#step-4-replace-tray) | done |
 | [5. Publish assets](#step-5-publish-assets) | CI / release upload three zips; drop the single `*-linux.zip` / `*-macos.zip` upgrade asset | [§ Test](#step-5-publish-assets) | done |
-| [6. Automated parts suite](#step-6-automated-parts-suite) | `cargo test --lib registration_server::update::tests::parts` | [§ Test](#step-6-automated-parts-suite) | not started |
-| [7. Probe logs](#step-7-probe-logs) | Wrapper and server log `upgrade-probe-*-{LETTER}` | [§ Test](#step-7-probe-logs) | not started |
-| [8. Tray markers](#step-8-tray-markers) | Distinct icon + menu item **Upgrade probe** (B); removed or changed in C | [§ Test](#step-8-tray-markers) | not started |
-| [9. Frontend `/testpath`](#step-9-frontend-testpath) | Hardcoded HTML + script probe letter in the form (or admin) tree | [§ Test](#step-9-frontend-testpath) | not started |
-| [10. Marker packs A/B/C](#step-10-marker-packs-abc) | Three installers + three-zip sets with letters A → B → C | [§ Test](#step-10-marker-packs-abc) | not started |
-| [11. macOS proof](#step-11-macos-proof) | Full observable upgrade matrix on Mac | [§ Test](#step-11-macos-proof) | not started |
+| [6. Automated parts suite](#step-6-automated-parts-suite) | `cargo test --lib registration_server::update::tests::parts` | [§ Test](#step-6-automated-parts-suite) | done |
+| [7. Probe logs](#step-7-probe-logs) | Wrapper and server log `upgrade-probe-*-{LETTER}` | [§ Test](#step-7-probe-logs) | done |
+| [8. Tray markers](#step-8-tray-markers) | Distinct icon + menu item **Upgrade probe** (B); removed or changed in C | [§ Test](#step-8-tray-markers) | done |
+| [9. Frontend `/testpath`](#step-9-frontend-testpath) | Hardcoded HTML + script probe letter in the form (or admin) tree | [§ Test](#step-9-frontend-testpath) | done |
+| [10. Marker packs A/B/C](#step-10-marker-packs-abc) | Three installers + three-zip sets with letters A → B → C | [§ Test](#step-10-marker-packs-abc) | done |
+| [11. macOS proof](#step-11-macos-proof) | Full observable upgrade matrix on Mac | [§ Test](#step-11-macos-proof) | in progress |
 | [12. Linux proof](#step-12-linux-proof) | Tray + wrapper markers; server smoke only | [§ Test](#step-12-linux-proof) | not started |
 | [13. Cleanup](#step-13-cleanup) | Remove or gate probes; leave shipping icons/menus | [§ Test](#step-13-cleanup) | not started |
 
@@ -223,7 +223,7 @@ Done. `release.yml` asserts each platform packed the three `*-server/wrapper/tra
 
 [Back to summary](#summary)
 
-**Status:** not started  
+**Status:** done  
 **Depends on:** [2](#step-2-select-zips-by-digest)–[4](#step-4-replace-tray)  
 **Unlocks:** [11](#step-11-macos-proof) (required gate)
 
@@ -243,13 +243,15 @@ Done. `release.yml` asserts each platform packed the three `*-server/wrapper/tra
 
 Both commands green. Status → `done`. **Product step 16 code path is testable;** markers still needed for visible proof ([7](#step-7-probe-logs)+).
 
+Done. `registration_server::update::tests::parts` covers release step 16 rows (select / unpack / replace tray+wrapper, including matching-wrapper leave and skipped-server live-tree finish). `cargo test --lib registration_server::update::tests::parts` and `cargo test --lib registration_server::update::tests::` are green (14 + 84).
+
 ---
 
 ## Step 7. Probe logs
 
 [Back to summary](#summary)
 
-**Status:** not started  
+**Status:** done  
 **Depends on:** none (can start in parallel with 1–6 on a branch)  
 **Unlocks:** [10](#step-10-marker-packs-abc), [11](#step-11-macos-proof), [12](#step-12-linux-proof)
 
@@ -271,13 +273,15 @@ Both commands green. Status → `done`. **Product step 16 code path is testable;
 
 Scenarios pass (unit or manual one-shot). Status → `done`. Continue to [step 8](#step-8-tray-markers).
 
+Done. `RUST_REG_UPGRADE_PROBE` (one ASCII letter) drives `emit_upgrade_probe`. The wrapper logs `rust-reg-run: upgrade-probe-wrapper-{LETTER}` at start; the server logs `registration-server: upgrade-probe-server-{LETTER}` after the listen socket binds. Covered by `registration_server::update::tests::upgrade_probe` (`wrapper_probe_in_stderr`, `server_probe_after_listen`, `probe_off_is_silent`).
+
 ---
 
 ## Step 8. Tray markers
 
 [Back to summary](#summary)
 
-**Status:** not started  
+**Status:** done  
 **Depends on:** [7](#step-7-probe-logs) optional  
 **Unlocks:** [10](#step-10-marker-packs-abc), [11](#step-11-macos-proof), [12](#step-12-linux-proof)
 
@@ -299,13 +303,15 @@ Scenarios pass (unit or manual one-shot). Status → `done`. Continue to [step 8
 
 Scenarios checked on at least one OS in dev. Status → `done`. Continue to [step 9](#step-9-frontend-testpath).
 
+Done. `RUST_REG_UPGRADE_PROBE` drives desk tray markers: letter `B` adds menu **Upgrade probe** (info dialog) on macOS/Linux/Windows; `B`/`C` use distinct icon tints (macOS non-template color; Linux/Windows RGBA — theme PNGs for deb come from `--write-icon` under the same env). Covered by `desk::server::tests` (`probe_b_shows_menu_item`, `probe_c_hides_menu_item`, `icons_differ_by_letter`).
+
 ---
 
 ## Step 9. Frontend `/testpath`
 
 [Back to summary](#summary)
 
-**Status:** not started  
+**Status:** done  
 **Depends on:** form (or admin) pack path used by server zip  
 **Unlocks:** [10](#step-10-marker-packs-abc), [11](#step-11-macos-proof)
 
@@ -327,23 +333,27 @@ Scenarios checked on at least one OS in dev. Status → `done`. Continue to [ste
 
 Scenarios pass. Status → `done`. Continue to [step 10](#step-10-marker-packs-abc).
 
+Done. `GET /testpath` serves `form/testpath.html` (404 when missing). Pack writes that page plus `form/upgrade-probe.js` (`export const UPGRADE_PROBE = "…"`) only when `RUST_REG_UPGRADE_PROBE` is one letter (`scripts/release/write-testpath.sh`, same content as `write_upgrade_probe_testpath`). Covered by `registration_server::update::tests::testpath`, `admin_pages::serve_admin::{testpath_shows_probe_letter,testpath_absent_when_gated_off}`, and `test-upgrade-zips.sh` `in_server_zip`.
+
 ---
 
 ## Step 10. Marker packs A/B/C
 
 [Back to summary](#summary)
 
-**Status:** not started  
+**Status:** done  
 **Depends on:** [1](#step-1-pack-three-zips)–[6](#step-6-automated-parts-suite), [7](#step-7-probe-logs)–[9](#step-9-frontend-testpath)  
 **Unlocks:** [11](#step-11-macos-proof), [12](#step-12-linux-proof)
 
 ### Work
 
-1. Produce three version tags (e.g. `2.0.0-alpha.16a` / `16b` / `16c`) or local `REGISTRATION_RELEASE_TAG` values.
+1. Produce three version tags (e.g. `2.0.0-alpha.160` / `161` / `162` — **numeric** prerelease only; `16a`-style suffixes are rejected by CI / `parse_version`) or local `REGISTRATION_RELEASE_TAG` values.
 2. **A:** first-install package; probes off or letter A; shipping tray.
 3. **B:** all three zips differ; probes B; tray icon + **Upgrade probe**; `/testpath` = B.
 4. **C:** probes C; remove **Upgrade probe**; icon ≠ B; `/testpath` = C or removed.
 5. Host assets: GitHub pre-release + `REGISTRATION_UPDATE_PRERELEASE=1`, or a static directory stand-in the updater can read.
+
+`RUST_REG_UPGRADE_PROBE` is baked at compile time into server/wrapper (`build.rs`) and desk (`desk/build.rs`) so file digests differ and upgrades fetch all three zips without relying on launchd/systemd env. Runtime env still overrides when set. Pack also writes form `/testpath` and, on Linux with a probe letter, forces `--write-icon` tints.
 
 ### Test plan
 
@@ -357,25 +367,102 @@ Scenarios pass. Status → `done`. Continue to [step 10](#step-10-marker-packs-a
 
 Artifacts ready for Mac install. Status → `done`. Continue to [step 11](#step-11-macos-proof).
 
+Done. Fixture packs + asserts: `bash scripts/release/test-marker-packs.sh` (`three_installers_exist`, `digests_differ_where_expected`, `b_zip_contains_markers`). Real A/B/C packs: see `scripts/release/pack-markers.sh` (bump version, set `RUST_REG_UPGRADE_PROBE`, run `pack.sh` per letter).
+
 ---
 
 ## Step 11. macOS proof
 
 [Back to summary](#summary)
 
-**Status:** not started  
+**Status:** in progress  
 **Depends on:** [6](#step-6-automated-parts-suite), [10](#step-10-marker-packs-abc)  
 **Unlocks:** [12](#step-12-linux-proof) (recommended), [13](#step-13-cleanup)
 
 Prefix: `/Library/rust-reg` (pkg) **or** Application Support — same style for A/B/C. Tray: `/Applications/reg-server.app`.
 
-### Work (manual)
+Use numeric prerelease versions only (here `2.0.0-alpha.6` / `7` / `8` — not `6a`). Clients need `REGISTRATION_UPDATE_PRERELEASE=1` (and `REGISTRATION_UPDATE_REPO` if not the default) to see alpha releases.
 
-1. Install **A**. Open app. No **Upgrade probe** (if A has none). Record digests of run, desk, `versions/<A>/rust-reg`.
-2. Offer **B** via desk update APIs. Wait until phase `current`.
-3. Restart service/launchd so wrapper B runs. Quit tray and reopen.
-4. Optional skip pack B′ (only server/form changed): confirm tray/wrapper not re-fetched.
-5. Offer **C**. Confirm removals / new letters.
+### Work (manual) — phases
+
+#### Phase 0 — Preflight (automated)
+
+Re-run anytime before publishing:
+
+```bash
+bash scripts/release/test-upgrade-zips.sh
+bash scripts/release/test-marker-packs.sh
+cargo test --lib registration_server::update::tests::parts
+cargo test --lib registration_server::update::tests::upgrade_probe
+cargo test --lib registration_server::update::tests::testpath
+cargo test --test admin_pages testpath_
+(cd desk && cargo test --bin rust-reg-desk probe_ && cargo test --bin rust-reg-desk icons_differ)
+```
+
+#### Phase 1 — Publish three marker packs
+
+Three separate **Actions → Release → Run workflow** runs (mac only is enough for this step):
+
+| Run | `version` | `upgrade_probe` | Role |
+|---|---|---|---|
+| 1 | `2.0.0-alpha.6` | *(empty)* | **A** — install pkg |
+| 2 | `2.0.0-alpha.7` | `B` | **B** — upgrade zips |
+| 3 | `2.0.0-alpha.8` | `C` | **C** — upgrade zips |
+
+Wait until each creates prerelease `release-2.0.0-alpha.{6,7,8}` with pkg + three zips + `SHA256SUMS`.
+
+Local alternative per letter (bump `Cargo.toml` to match, then pack / upload):
+
+```bash
+unset RUST_REG_UPGRADE_PROBE   # or =B / =C
+REGISTRATION_RELEASE_TAG=v2.0.0-alpha.6 bash scripts/release/pack.sh
+# gh release create --prerelease …
+```
+
+#### Phase 2 — Install A on the Mac
+
+1. Install `rust-reg-2.0.0-alpha.6.pkg` (and DMG tray if separate).
+2. Open **reg-server** from Applications.
+3. Confirm: no tray item **Upgrade probe**; `GET /testpath` → 404 (or no B).
+4. Record digests:
+
+```bash
+PREFIX=/Library/rust-reg
+shasum -a 256 "$PREFIX/bin/rust-reg-run" "$PREFIX/bin/rust-reg-desk" \
+  "$PREFIX/versions/2.0.0-alpha.6/rust-reg"
+```
+
+5. Ensure the installed updater sees prereleases (`REGISTRATION_UPDATE_PRERELEASE=1` in launchd `EnvironmentVariables`, or equivalent). Set `REGISTRATION_UPDATE_REPO` if assets are not on the default repo.
+
+#### Phase 3 — Offer B and wait for `current`
+
+Port is usually `8080` (desk **Port…** if different). Use the desk update UI, or:
+
+```bash
+curl -s "http://127.0.0.1:8080/api/update" | jq .
+curl -s -X POST "http://127.0.0.1:8080/api/update/check" | jq .
+curl -s -X POST "http://127.0.0.1:8080/api/update" | jq .
+# poll until phase is current after the restart cycle
+```
+
+Then restart wrapper + tray:
+
+```bash
+sudo launchctl kickstart -k system/com.opendops.rust-reg
+# Quit tray from menu → reopen reg-server.app
+```
+
+Confirm every **A → B** row in the [test plan](#step-11-macos-proof) (icon, **Upgrade probe**, wrapper/server logs, `/testpath` = B).
+
+Optional: publish a B′ with only form changed and same run/desk digests → tray/wrapper **not** re-downloaded (matching digest skip).
+
+#### Phase 4 — Offer C
+
+Same check → update → kickstart → Quit/reopen tray. Confirm every **B → C** row (probe menu gone; icon ≠ B; logs / `/testpath` = C).
+
+#### Phase 5 — Done
+
+When every row in the test plan passes, set status → `done`. Continue to [step 12](#step-12-linux-proof).
 
 ### Test plan
 
@@ -392,7 +479,7 @@ Prefix: `/Library/rust-reg` (pkg) **or** Application Support — same style for 
 
 ### Done when
 
-Every row passes. Status → `done`. Continue to [step 12](#step-12-linux-proof).
+Every row passes (Phases 0–5). Status → `done`. Continue to [step 12](#step-12-linux-proof).
 
 ---
 

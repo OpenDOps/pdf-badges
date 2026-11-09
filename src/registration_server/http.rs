@@ -76,6 +76,7 @@ pub fn router(app: App) -> Router {
         .route("/print", post(enqueue_print))
         .route("/ws", get(ws))
         .route("/", get(form_index).head(form_index))
+        .route("/testpath", get(testpath_page).head(testpath_page))
         .route("/admin", get(admin_index).head(admin_index))
         .route("/admin/events", get(admin_index).head(admin_index))
         .with_state(app);
@@ -144,6 +145,20 @@ async fn track_inflight(State(gate): State<Arc<Gate>>, request: Request, next: N
 
 async fn form_index(State(app): State<App>, request: Request) -> Response {
     crate::registration_server::admin::serve_index(&app.form, request).await
+}
+
+/// Marker page from `form/testpath.html` when packed with [`crate::registration_server::update::write_upgrade_probe_testpath`].
+/// Missing file → 404 (shipping / unset probe).
+async fn testpath_page(State(app): State<App>, request: Request) -> Response {
+    crate::registration_server::admin::serve_mapped(
+        &app.form,
+        &format!(
+            "/{}",
+            crate::registration_server::update::TESTPATH_HTML_NAME
+        ),
+        request,
+    )
+    .await
 }
 
 async fn admin_index(State(app): State<App>, request: Request) -> Response {

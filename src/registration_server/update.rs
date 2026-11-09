@@ -46,6 +46,8 @@ pub const UPDATE_REPO: &str = "OpenDOps/pdf-badges";
 pub const UPDATE_REPO_ENV: &str = "REGISTRATION_UPDATE_REPO";
 /// Set to `1` to offer pre-releases. Unset keeps `releases/latest`, which omits them.
 pub const UPDATE_PRERELEASE_ENV: &str = "REGISTRATION_UPDATE_PRERELEASE";
+/// Marker letter for three-zip upgrade proof (`A` / `B` / `C`). Unset or empty is silent.
+pub const UPGRADE_PROBE_ENV: &str = "RUST_REG_UPGRADE_PROBE";
 pub const GITHUB_API: &str = "https://api.github.com";
 
 /// How long the sync thread waits after a release check before the next one.
@@ -94,6 +96,134 @@ pub fn update_prerelease(raw: Option<&str>) -> bool {
 pub fn update_prerelease_from_env() -> bool {
     update_prerelease(std::env::var(UPDATE_PRERELEASE_ENV).ok().as_deref())
 }
+
+/// One ASCII letter from [`UPGRADE_PROBE_ENV`]. Empty, multi-character, and non-letters are silent.
+pub fn upgrade_probe_letter(raw: Option<&str>) -> Option<char> {
+    let value = raw.map(str::trim).filter(|value| !value.is_empty())?;
+    let mut chars = value.chars();
+    let letter = chars.next()?;
+    if chars.next().is_some() || !letter.is_ascii_alphabetic() {
+        return None;
+    }
+    Some(letter.to_ascii_uppercase())
+}
+
+/// Letter baked by `build.rs` from `RUST_REG_UPGRADE_PROBE` at compile time (empty when shipping).
+pub fn baked_upgrade_probe_letter() -> Option<char> {
+    upgrade_probe_letter(Some(env!("RUST_REG_UPGRADE_PROBE_BAKED")))
+}
+
+/// Stable `strings` marker in marker-pack binaries (`upgrade-probe-bake-B`).
+pub fn upgrade_probe_bake_mark() -> &'static str {
+    concat!("upgrade-probe-bake-", env!("RUST_REG_UPGRADE_PROBE_BAKED"))
+}
+
+/// Runtime env wins when set; otherwise the compile-time bake.
+pub fn resolve_upgrade_probe_raw(env: Option<&str>, baked: &str) -> Option<String> {
+    if let Some(value) = env.map(str::trim).filter(|value| !value.is_empty()) {
+        return Some(value.to_string());
+    }
+    let baked = baked.trim();
+    if baked.is_empty() {
+        None
+    } else {
+        Some(baked.to_string())
+    }
+}
+
+pub fn effective_upgrade_probe_raw() -> Option<String> {
+    if let Some(value) = std::env::var(UPGRADE_PROBE_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        return Some(value);
+    }
+    baked_upgrade_probe_letter().map(|letter| letter.to_string())
+}
+
+/// `rust-reg-run: upgrade-probe-wrapper-B` (or server), when a probe letter is set.
+pub fn upgrade_probe_line(prefix: &str, role: &str, raw: Option<&str>) -> Option<String> {
+    let letter = upgrade_probe_letter(raw)?;
+    Some(format!("{prefix}: upgrade-probe-{role}-{letter}"))
+}
+
+/// Print the upgrade probe line once when env or bake names a letter.
+pub fn emit_upgrade_probe(prefix: &str, role: &str) {
+    let _keep = upgrade_probe_bake_mark();
+    emit_upgrade_probe_from(prefix, role, effective_upgrade_probe_raw().as_deref());
+}
+
+fn emit_upgrade_probe_from(prefix: &str, role: &str, raw: Option<&str>) {
+    let Some(line) = upgrade_probe_line(prefix, role, raw) else {
+        return;
+    };
+    #[cfg(test)]
+    {
+        if let Ok(mut captured) = PROBE_CAPTURE.lock() {
+            captured.push(line.clone());
+        }
+    }
+    eprintln!("{line}");
+}
+
+/// Fixed `<h1>` (and `<title>`) for the form `/testpath` marker page.
+pub const TESTPATH_HEADING: &str = "Upgrade probe";
+
+/// Packed under `form/` next to the operator SPA.
+pub const TESTPATH_HTML_NAME: &str = "testpath.html";
+
+/// Small ES module with `export const UPGRADE_PROBE = "…"`.
+pub const TESTPATH_JS_NAME: &str = "upgrade-probe.js";
+
+/// `export const UPGRADE_PROBE = "B";` for the form marker module.
+pub fn upgrade_probe_js(letter: char) -> String {
+    format!("export const UPGRADE_PROBE = \"{letter}\";\n")
+}
+
+/// Hardcoded HTML for `GET /testpath`: heading plus the probe letter in the body.
+pub fn upgrade_probe_testpath_html(letter: char) -> String {
+    format!(
+        "<!doctype html>\n\
+<html lang=\"en\">\n\
+<head>\n\
+<meta charset=\"utf-8\">\n\
+<title>{TESTPATH_HEADING}</title>\n\
+</head>\n\
+<body>\n\
+<h1>{TESTPATH_HEADING}</h1>\n\
+<p class=\"probe-letter\">{letter}</p>\n\
+<script type=\"module\" src=\"./{TESTPATH_JS_NAME}\"></script>\n\
+</body>\n\
+</html>\n"
+    )
+}
+
+/// Write or remove `form/testpath.html` + `form/upgrade-probe.js`.
+///
+/// `None` (shipping / unset probe) deletes the assets so `/testpath` 404s.
+pub fn write_upgrade_probe_testpath(
+    form_dir: &Path,
+    letter: Option<char>,
+) -> std::io::Result<()> {
+    let html = form_dir.join(TESTPATH_HTML_NAME);
+    let js = form_dir.join(TESTPATH_JS_NAME);
+    match letter {
+        Some(letter) => {
+            std::fs::create_dir_all(form_dir)?;
+            std::fs::write(&html, upgrade_probe_testpath_html(letter))?;
+            std::fs::write(&js, upgrade_probe_js(letter))?;
+        }
+        None => {
+            let _ = std::fs::remove_file(&html);
+            let _ = std::fs::remove_file(&js);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+static PROBE_CAPTURE: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
 /// No previous attempt is due. An attempt is due again `UPDATE_EVERY` later.
 pub fn check_due(last: Option<SystemTime>, now: SystemTime) -> bool {
@@ -1467,10 +1597,24 @@ pub(crate) fn install_prefix(credentials: &Path) -> Option<PathBuf> {
 
 /// Binds the listen socket, then writes `updates/started`. A failed bind writes nothing.
 pub async fn open_listen(addr: SocketAddr, prefix: Option<&Path>) -> io::Result<TcpListener> {
+    open_listen_with_probe(
+        addr,
+        prefix,
+        effective_upgrade_probe_raw().as_deref(),
+    )
+    .await
+}
+
+async fn open_listen_with_probe(
+    addr: SocketAddr,
+    prefix: Option<&Path>,
+    probe: Option<&str>,
+) -> io::Result<TcpListener> {
     let listener = TcpListener::bind(addr).await?;
     if let Some(prefix) = prefix {
         note_listening(prefix)?;
     }
+    emit_upgrade_probe_from("registration-server", "server", probe);
     Ok(listener)
 }
 
@@ -3043,6 +3187,147 @@ mod tests {
         assert_eq!(check.progress().0, "applying");
     }
 
+    mod upgrade_probe {
+        use std::sync::Mutex;
+
+        use super::super::{
+            emit_upgrade_probe_from, open_listen_with_probe, upgrade_probe_letter,
+            upgrade_probe_line, PROBE_CAPTURE,
+        };
+
+        static LOCK: Mutex<()> = Mutex::new(());
+
+        fn take_captured() -> Vec<String> {
+            std::mem::take(&mut *PROBE_CAPTURE.lock().unwrap())
+        }
+
+        #[test]
+        fn wrapper_probe_in_stderr() {
+            let _guard = LOCK.lock().unwrap();
+            take_captured();
+            emit_upgrade_probe_from("rust-reg-run", "wrapper", Some("B"));
+            assert_eq!(
+                take_captured(),
+                vec!["rust-reg-run: upgrade-probe-wrapper-B".to_string()]
+            );
+            assert_eq!(
+                upgrade_probe_line("rust-reg-run", "wrapper", Some("b")).as_deref(),
+                Some("rust-reg-run: upgrade-probe-wrapper-B")
+            );
+        }
+
+        #[tokio::test]
+        async fn server_probe_after_listen() {
+            let _guard = LOCK.lock().unwrap();
+            take_captured();
+            let listener = open_listen_with_probe("127.0.0.1:0".parse().unwrap(), None, Some("B"))
+                .await
+                .unwrap();
+            drop(listener);
+            assert_eq!(
+                take_captured(),
+                vec!["registration-server: upgrade-probe-server-B".to_string()]
+            );
+        }
+
+        #[tokio::test]
+        async fn probe_off_is_silent() {
+            let _guard = LOCK.lock().unwrap();
+            take_captured();
+            assert_eq!(upgrade_probe_letter(None), None);
+            assert_eq!(upgrade_probe_letter(Some("")), None);
+            assert_eq!(upgrade_probe_letter(Some("   ")), None);
+            assert_eq!(upgrade_probe_letter(Some("BB")), None);
+            assert_eq!(upgrade_probe_letter(Some("1")), None);
+            emit_upgrade_probe_from("rust-reg-run", "wrapper", None);
+            emit_upgrade_probe_from("registration-server", "server", Some(""));
+            let listener = open_listen_with_probe("127.0.0.1:0".parse().unwrap(), None, None)
+                .await
+                .unwrap();
+            drop(listener);
+            assert!(take_captured().is_empty());
+            assert!(upgrade_probe_line("rust-reg-run", "wrapper", None).is_none());
+        }
+
+        #[test]
+        fn resolve_prefers_env_over_bake() {
+            use super::super::resolve_upgrade_probe_raw;
+            assert_eq!(
+                resolve_upgrade_probe_raw(Some("B"), "C").as_deref(),
+                Some("B")
+            );
+            assert_eq!(
+                resolve_upgrade_probe_raw(None, "C").as_deref(),
+                Some("C")
+            );
+            assert_eq!(resolve_upgrade_probe_raw(Some(""), "C").as_deref(), Some("C"));
+            assert_eq!(resolve_upgrade_probe_raw(None, ""), None);
+            assert_eq!(resolve_upgrade_probe_raw(Some("  "), "  "), None);
+        }
+    }
+
+    mod testpath {
+        use std::path::Path;
+
+        use super::super::{
+            upgrade_probe_js, upgrade_probe_letter, upgrade_probe_testpath_html,
+            write_upgrade_probe_testpath, TESTPATH_HEADING, TESTPATH_HTML_NAME, TESTPATH_JS_NAME,
+        };
+
+        #[test]
+        fn testpath_shows_probe_letter() {
+            let letter = upgrade_probe_letter(Some("B")).unwrap();
+            let html = upgrade_probe_testpath_html(letter);
+            assert!(html.contains(TESTPATH_HEADING), "{html}");
+            assert!(html.contains("<h1>Upgrade probe</h1>"), "{html}");
+            assert!(
+                html.contains("<p class=\"probe-letter\">B</p>"),
+                "{html}"
+            );
+            assert!(html.contains(TESTPATH_JS_NAME), "{html}");
+            assert_eq!(upgrade_probe_js(letter), "export const UPGRADE_PROBE = \"B\";\n");
+
+            let dir = std::env::temp_dir().join(format!(
+                "rust-reg-testpath-b-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            write_upgrade_probe_testpath(&dir, Some('B')).unwrap();
+            let body = std::fs::read_to_string(dir.join(TESTPATH_HTML_NAME)).unwrap();
+            assert!(body.contains(TESTPATH_HEADING));
+            assert!(body.contains('B'));
+            assert_eq!(
+                std::fs::read_to_string(dir.join(TESTPATH_JS_NAME)).unwrap(),
+                "export const UPGRADE_PROBE = \"B\";\n"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn testpath_absent_when_gated_off() {
+            let dir = std::env::temp_dir().join(format!(
+                "rust-reg-testpath-off-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            write_upgrade_probe_testpath(&dir, Some('B')).unwrap();
+            assert!(dir.join(TESTPATH_HTML_NAME).is_file());
+            write_upgrade_probe_testpath(&dir, None).unwrap();
+            assert!(!dir.join(TESTPATH_HTML_NAME).exists());
+            assert!(!dir.join(TESTPATH_JS_NAME).exists());
+            assert!(!Path::new(&dir).join(TESTPATH_HTML_NAME).exists());
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
     #[test]
     fn the_wrapper_name_is_rust_reg_run() {
         assert!(super::is_supervisor_path(std::path::Path::new(
@@ -4305,8 +4590,9 @@ mod tests {
 
         use super::super::{
             desk_binary_name, download_release, github_client, part_file_key, part_temp_path,
-            part_zip_name, payload_zip, replace_tray, replace_tray_with, sha256_hex, unpack_parts,
-            version_binary_name, wrapper_binary_name, UpgradePart, UPDATE_REPO,
+            part_zip_name, payload_zip, replace_tray, replace_tray_with, replace_wrapper,
+            sha256_hex, unpack_parts, version_binary_name, wrapper_binary_name, UpgradePart,
+            UPDATE_REPO,
         };
 
         const VERSION: &str = "0.2.0";
@@ -4554,6 +4840,7 @@ mod tests {
             let dir = TempDir::new();
             plant_live(&dir.0, b"old-server");
             plant_bin(&dir.0, Some(b"same-wrapper"), Some(b"old-tray"));
+            let detected = dir.0.join("bin").join(wrapper_binary_name());
             let server = server_zip_bytes(b"new-server");
             let wrapper = wrapper_zip_bytes(b"same-wrapper");
             let tray = tray_zip_bytes(b"new-tray");
@@ -4569,7 +4856,7 @@ mod tests {
                 (&part_file_key(UpgradePart::Tray), b"new-tray"),
             ]);
             let mut files = HashMap::new();
-            files.insert(server_name, server);
+            files.insert(server_name, server.clone());
             files.insert(wrapper_name, wrapper);
             files.insert(tray_name, tray);
             let (base, hits) = stand_in(files, sums).await;
@@ -4580,6 +4867,41 @@ mod tests {
             assert!(zip_hit(&seen, UpgradePart::Tray));
             drop(seen);
             assert!(loaded.wrapper_zip.is_none());
+
+            // Matching digest: after current, the detected wrapper path is not rewritten.
+            let server_path = dir.0.join("server.zip");
+            std::fs::write(&server_path, server).unwrap();
+            unpack_parts(
+                &dir.0,
+                VERSION,
+                LIVE,
+                Some(&server_path),
+                None,
+                loaded.tray_zip.as_deref(),
+            )
+            .unwrap();
+            // Same bytes as installed; replace_wrapper must leave the detected file alone.
+            std::fs::write(
+                dir.0
+                    .join("versions")
+                    .join(VERSION)
+                    .join(wrapper_binary_name()),
+                b"same-wrapper",
+            )
+            .unwrap();
+            write_phase(&dir.0, "current", LIVE, VERSION);
+            #[cfg(unix)]
+            let inode = {
+                use std::os::unix::fs::MetadataExt;
+                std::fs::metadata(&detected).unwrap().ino()
+            };
+            replace_wrapper(&dir.0, Some(&detected)).unwrap();
+            assert_eq!(std::fs::read(&detected).unwrap(), b"same-wrapper");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                assert_eq!(std::fs::metadata(&detected).unwrap().ino(), inode);
+            }
         }
 
         #[tokio::test]
@@ -4607,7 +4929,36 @@ mod tests {
             assert!(zip_hit(&seen, UpgradePart::Wrapper));
             drop(seen);
             assert!(loaded.server_zip.is_none());
-            assert!(loaded.wrapper_zip.is_some());
+            let wrapper_path = loaded.wrapper_zip.expect("wrapper zip");
+
+            // Skipped server zip → versions/<to> server tree is the live bytes.
+            unpack_parts(
+                &dir.0,
+                VERSION,
+                LIVE,
+                None,
+                Some(&wrapper_path),
+                None,
+            )
+            .unwrap();
+            let tree = dir.0.join("versions").join(VERSION);
+            assert_eq!(
+                std::fs::read(tree.join(version_binary_name())).unwrap(),
+                b"same-server"
+            );
+            assert_eq!(
+                std::fs::read(tree.join("admin").join("index.html")).unwrap(),
+                b"admin-live"
+            );
+            assert_eq!(
+                std::fs::read(tree.join("form").join("index.html")).unwrap(),
+                b"form-live"
+            );
+            assert_eq!(std::fs::read_to_string(tree.join("RELEASE")).unwrap(), "v0.1.0\n");
+            assert_eq!(
+                std::fs::read(tree.join(wrapper_binary_name())).unwrap(),
+                b"new-wrapper"
+            );
         }
 
         #[tokio::test]
@@ -4637,6 +4988,8 @@ mod tests {
             files.insert(server_name, server);
             files.insert(wrapper_name.clone(), wrapper);
             files.insert(tray_name, tray);
+            let tray_before =
+                std::fs::read(dir.0.join("bin").join(desk_binary_name())).unwrap();
             let (base, hits) = stand_in(files, sums).await;
             let err = fetch(&dir.0, &base)
                 .await
@@ -4659,6 +5012,10 @@ mod tests {
             assert!(!part_temp_path(&dir.0, VERSION, UpgradePart::Wrapper).exists());
             assert!(!part_temp_path(&dir.0, VERSION, UpgradePart::Tray).exists());
             assert!(!part_temp_path(&dir.0, VERSION, UpgradePart::Server).exists());
+            assert_eq!(
+                std::fs::read(dir.0.join("bin").join(desk_binary_name())).unwrap(),
+                tray_before
+            );
         }
 
         #[test]

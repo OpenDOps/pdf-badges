@@ -1114,7 +1114,9 @@ mod operator_session {
 
 mod serve_admin {
     use super::*;
-    use rust_reg::registration_server::{serve, App};
+    use rust_reg::registration_server::{
+        serve, write_upgrade_probe_testpath, App, TESTPATH_HEADING,
+    };
 
     const INDEX: &str = "<!doctype html><h1>mounted-index</h1>";
 
@@ -1128,6 +1130,10 @@ mod serve_admin {
     }
 
     async fn started() -> Running {
+        started_with_testpath(None).await
+    }
+
+    async fn started_with_testpath(letter: Option<char>) -> Running {
         let stand = StandIn::start(false).await;
         let scratch = Scratch::new();
         let dist = scratch.0.join("dist");
@@ -1141,6 +1147,7 @@ mod serve_admin {
             b"<!doctype html><h1>operator-key</h1>",
         )
         .unwrap();
+        write_upgrade_probe_testpath(&form, letter).unwrap();
         let file = CredentialFile::new(scratch.0.join("credentials.yml"));
         file.update(|credentials| {
             credentials.set_device_id("device-1")?;
@@ -1292,6 +1299,46 @@ mod serve_admin {
             body,
             json!({ "ok": false, "error": { "code": "not_found" } })
         );
+        stop(running).await;
+    }
+
+    #[tokio::test]
+    async fn testpath_shows_probe_letter() {
+        let running = started_with_testpath(Some('B')).await;
+        let client = reqwest::Client::new();
+        let page = client
+            .get(format!("http://{}/testpath", running.addr))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(page.status(), reqwest::StatusCode::OK);
+        let body = page.text().await.unwrap();
+        assert!(body.contains(TESTPATH_HEADING), "{body}");
+        assert!(body.contains("<p class=\"probe-letter\">B</p>"), "{body}");
+        let module = client
+            .get(format!("http://{}/upgrade-probe.js", running.addr))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(module.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            module.text().await.unwrap(),
+            "export const UPGRADE_PROBE = \"B\";\n"
+        );
+        stop(running).await;
+    }
+
+    #[tokio::test]
+    async fn testpath_absent_when_gated_off() {
+        let running = started_with_testpath(None).await;
+        let response = reqwest::get(format!("http://{}/testpath", running.addr))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
+        let js = reqwest::get(format!("http://{}/upgrade-probe.js", running.addr))
+            .await
+            .unwrap();
+        assert_eq!(js.status(), reqwest::StatusCode::NOT_FOUND);
         stop(running).await;
     }
 }

@@ -6,7 +6,7 @@ Two tracks. The build track compiles a release tag into the binary and publishes
 
 The build track is steps 1, 12, and 13. Step 1 is the value the binary carries. Steps 12 and 13 are the pack script and the GitHub Actions run that pass the tag in and upload the assets. The auto-updater is steps 2 through 11. Those steps run on the device. They do not run the workflow. Step 14 is where a release from that workflow is what the updater reads on `https://api.github.com`. Step 16 builds the three upgrade zips. Step 17 installs a published release and runs that swap on Linux, macOS, and Windows, after step 16. The macOS pack was opened in step 12. That open is not this upgrade. Linux amd64/arm64 and Windows assets have been published; device install/update of the three-zip layout waits on step 16.
 
-**Next:** [step 16 — Three zips](#step-16-three-zips) (server / wrapper / tray archives, skip when digests match, and replace wrapper + tray after `current`).
+**Next:** finish [step 16 — Three zips](#step-16-three-zips) marker proof ([three-zip-upgrade-testing-plan.md](three-zip-upgrade-testing-plan.md) steps 7–13), then [step 17 — Devices](#step-17-devices).
 
 A start that never opens the listen socket is rolled back. A start that does open it keeps the previous tree as a dated backup. The updater installs a release only after the operator agrees and the file matches `SHA256SUMS`.
 
@@ -47,7 +47,7 @@ The registration server compares the baked tag with a release, then the desk con
 | [10. Supervisor](#step-10-supervisor) | The parent reads the phase and starts the next tree | done |
 | [11. Started](#step-11-started) | The socket marker, the dated backup, seven days | done |
 | [15. Wrapper](#step-15-wrapper) | The version directory carries `rust-reg-run`. After the new version is current, that binary replaces the running wrapper where it was found, when the SHA-256 differs | done |
-| [16. Three zips](#step-16-three-zips) | Each platform publishes a tray zip, a wrapper zip, and a server zip. A file whose SHA-256 already matches is not downloaded. The tray is replaced the same way as the wrapper | **next** (not started) |
+| [16. Three zips](#step-16-three-zips) | Each platform publishes a tray zip, a wrapper zip, and a server zip. A file whose SHA-256 already matches is not downloaded. The tray is replaced the same way as the wrapper | **in progress** (code + `tests::parts`; markers / device proof open) |
 
 ### Both
 
@@ -550,7 +550,7 @@ Done. `scripts/release/pack.sh` puts `rust-reg-run` in the version directory and
 
 [Back to summary](#summary)
 
-Status: **next** — not started. This is the next release-plan work: pack three zips per platform and prove wrapper + tray upgrade (and skip) behaviour.
+Status: **in progress** — product code + `tests::parts` green through [three-zip-upgrade-testing-plan.md](three-zip-upgrade-testing-plan.md) steps 1–6; marker packs and Mac/Linux proof (steps 7–13) still open.
 
 Ordered implementation + proof (summary with **Status**, each step’s work and test plan, Mac then Linux) is [three-zip-upgrade-testing-plan.md](three-zip-upgrade-testing-plan.md) steps 1–13.
 

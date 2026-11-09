@@ -4,6 +4,7 @@ mod release_tag;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     compile_release_tag();
     compile_sync_in_flight();
+    compile_upgrade_probe();
     // rust-analyzer is launched with a short PATH, so a Homebrew protoc is invisible.
     ensure_protoc();
     let out = std::path::PathBuf::from(std::env::var("OUT_DIR")?);
@@ -44,6 +45,22 @@ fn compile_sync_in_flight() {
         panic!("SYNC_IN_FLIGHT must be greater than zero");
     }
     println!("cargo:rustc-env=SYNC_IN_FLIGHT={value}");
+}
+
+/// `RUST_REG_UPGRADE_PROBE=B cargo build` bakes letter `B` into server and wrapper.
+/// Unset / invalid → empty (shipping silent). Marker packs A/B/C rebuild with different letters
+/// so file digests differ and upgrades fetch all three zips.
+fn compile_upgrade_probe() {
+    println!("cargo:rerun-if-env-changed=RUST_REG_UPGRADE_PROBE");
+    let raw = std::env::var("RUST_REG_UPGRADE_PROBE").unwrap_or_default();
+    let trimmed = raw.trim();
+    let baked = if trimmed.len() == 1 && trimmed.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+    {
+        trimmed.to_ascii_uppercase()
+    } else {
+        String::new()
+    };
+    println!("cargo:rustc-env=RUST_REG_UPGRADE_PROBE_BAKED={baked}");
 }
 
 fn ensure_protoc() {

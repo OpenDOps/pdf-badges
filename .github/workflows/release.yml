@@ -10,6 +10,11 @@ on:
         description: Release version (x.x.x, x.x.x-alpha.N, x.x.x-beta.N, or x.x.x-rc.N)
         required: true
         type: string
+      upgrade_probe:
+        description: Marker letter A/B/C (empty = shipping; bakes RUST_REG_UPGRADE_PROBE + form /testpath)
+        required: false
+        type: string
+        default: ""
       linux:
         description: Linux
         type: boolean
@@ -236,6 +241,7 @@ jobs:
         env:
           REGISTRATION_RELEASE_TAG: v${{ needs.select.outputs.version }}
           REGISTRATION_SKIP_FRONT: "1"
+          RUST_REG_UPGRADE_PROBE: ${{ github.event_name == 'workflow_dispatch' && inputs.upgrade_probe || '' }}
           VERSION: ${{ needs.select.outputs.version }}
           PLATFORM: ${{ matrix.platform }}
         run: |

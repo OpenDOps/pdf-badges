@@ -54,7 +54,10 @@ pub use remote::{
 };
 pub use store::{Registration, Store};
 pub use sync::{sync_loop, sync_once, SYNC_IN_FLIGHT};
-pub use update::{release_file_contents, release_tag, release_version};
+pub use update::{
+    emit_upgrade_probe, release_file_contents, release_tag, release_version,
+    write_upgrade_probe_testpath, TESTPATH_HEADING, UPGRADE_PROBE_ENV,
+};
 
 /// Parent process. Reads `state.yml` and starts the version in `updates/live`.
 pub fn run_supervisor(prefix: &std::path::Path) -> std::io::Result<()> {

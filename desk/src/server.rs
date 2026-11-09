@@ -347,17 +347,88 @@ const MARK_SCALE: f32 = 1.3;
 const SRC_CX: f32 = 61.0;
 const SRC_CY: f32 = 65.5;
 
+/// Same env as the server/wrapper upgrade probe (`A` / `B` / `C`).
+pub const UPGRADE_PROBE_ENV: &str = "RUST_REG_UPGRADE_PROBE";
+
+/// Letter baked by `desk/build.rs` from `RUST_REG_UPGRADE_PROBE` (empty when shipping).
+pub fn baked_upgrade_probe_letter() -> Option<char> {
+    upgrade_probe_letter_from(Some(env!("RUST_REG_UPGRADE_PROBE_BAKED")))
+}
+
+/// Stable `strings` marker (`upgrade-probe-bake-B`) for marker-pack tray zips.
+pub fn upgrade_probe_bake_mark() -> &'static str {
+    concat!("upgrade-probe-bake-", env!("RUST_REG_UPGRADE_PROBE_BAKED"))
+}
+
+/// One ASCII letter from [`UPGRADE_PROBE_ENV`], else the compile-time bake.
+pub fn upgrade_probe_letter() -> Option<char> {
+    let _keep = upgrade_probe_bake_mark();
+    upgrade_probe_letter_from(std::env::var(UPGRADE_PROBE_ENV).ok().as_deref())
+        .or_else(baked_upgrade_probe_letter)
+}
+
+pub fn upgrade_probe_letter_from(raw: Option<&str>) -> Option<char> {
+    let value = raw.map(str::trim).filter(|value| !value.is_empty())?;
+    let mut chars = value.chars();
+    let letter = chars.next()?;
+    if chars.next().is_some() || !letter.is_ascii_alphabetic() {
+        return None;
+    }
+    Some(letter.to_ascii_uppercase())
+}
+
+/// Menu item **Upgrade probe** is only for marker letter `B`.
+pub fn show_upgrade_probe_menu(letter: Option<char>) -> bool {
+    letter == Some('B')
+}
+
+pub const UPGRADE_PROBE_MENU: &str = "Upgrade probe";
+
+/// Fixed tray labels after the live address row (Port…, optional probe, Quit).
+pub fn tray_static_menu_labels(letter: Option<char>) -> Vec<&'static str> {
+    let mut labels = vec!["Port…"];
+    if show_upgrade_probe_menu(letter) {
+        labels.push(UPGRADE_PROBE_MENU);
+    }
+    labels.push("Quit");
+    labels
+}
+
+/// Shipping / `A`: brand blue (or macOS template black). `B` and `C` use distinct tints.
+pub fn probe_icon_rgb(letter: Option<char>) -> [u8; 3] {
+    match letter {
+        Some('B') => [0xe6, 0x7e, 0x22],
+        Some('C') => [0xc0, 0x39, 0x2b],
+        _ => [0x1f, 0x6f, 0xeb],
+    }
+}
+
+/// Colored (non-template) tray icon for marker letters `B` and `C`.
+pub fn probe_uses_color_icon(letter: Option<char>) -> bool {
+    matches!(letter, Some('B') | Some('C'))
+}
+
+/// Used by Linux/Windows trays and `--write-icon`. macOS prefers [`crate::macos::menu_icon`].
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 pub fn icon_rgba() -> (u32, u32, Vec<u8>) {
+    icon_rgba_for(upgrade_probe_letter())
+}
+
+pub fn icon_rgba_for(letter: Option<char>) -> (u32, u32, Vec<u8>) {
+    let rgb = probe_icon_rgb(letter);
     #[cfg(target_os = "macos")]
     {
+        if probe_uses_color_icon(letter) {
+            return icon_from_pencil(None, rgb);
+        }
         // Template: only alpha matters; the menu bar recolors the mark.
-        return icon_from_pencil(None, [0, 0, 0]);
+        icon_from_pencil(None, [0, 0, 0])
     }
     #[cfg(not(target_os = "macos"))]
     {
         // StatusNotifier / notification area show the pixmap as-is. Black
-        // glyphs disappear on a dark panel; use the same blue as rust-reg.svg.
-        icon_from_pencil([0x1f, 0x6f, 0xeb])
+        // glyphs disappear on a dark panel; use the probe tint (shipping blue).
+        icon_from_pencil(rgb)
     }
 }
 
@@ -425,7 +496,12 @@ pub fn write_png(
 /// of the drawn fallback. macOS passes the system pencil glyph here.
 #[cfg(target_os = "macos")]
 pub fn icon_with_pencil(pencil: &[u8]) -> (u32, u32, Vec<u8>) {
-    icon_from_pencil(Some(pencil), [0, 0, 0])
+    icon_with_pencil_rgb(pencil, [0, 0, 0])
+}
+
+#[cfg(target_os = "macos")]
+pub fn icon_with_pencil_rgb(pencil: &[u8], rgb: [u8; 3]) -> (u32, u32, Vec<u8>) {
+    icon_from_pencil(Some(pencil), rgb)
 }
 
 /// AppKit draw rect (origin at the bottom left) for the system pencil, in the output image.
@@ -1188,6 +1264,73 @@ mod tests {
         assert_eq!(&square[0..4], &[0, 0, 0, 255]);
         assert_eq!(&square[4..8], &[0, 0, 0, 0]);
         assert_eq!(&square[8..16], &[0, 0, 0, 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn probe_b_shows_menu_item() {
+        assert!(show_upgrade_probe_menu(Some('B')));
+        assert!(show_upgrade_probe_menu(upgrade_probe_letter_from(Some("b"))));
+        let labels = tray_static_menu_labels(Some('B'));
+        assert!(labels.contains(&UPGRADE_PROBE_MENU));
+        assert_eq!(labels, vec!["Port…", UPGRADE_PROBE_MENU, "Quit"]);
+    }
+
+    #[test]
+    fn probe_c_hides_menu_item() {
+        assert!(!show_upgrade_probe_menu(Some('C')));
+        assert!(!show_upgrade_probe_menu(Some('A')));
+        assert!(!show_upgrade_probe_menu(None));
+        assert!(!show_upgrade_probe_menu(upgrade_probe_letter_from(Some("C"))));
+        assert!(!tray_static_menu_labels(Some('C')).contains(&UPGRADE_PROBE_MENU));
+        assert!(!tray_static_menu_labels(None).contains(&UPGRADE_PROBE_MENU));
+        assert_eq!(tray_static_menu_labels(None), vec!["Port…", "Quit"]);
+    }
+
+    #[test]
+    fn icons_differ_by_letter() {
+        assert_eq!(probe_icon_rgb(None), probe_icon_rgb(Some('A')));
+        assert_ne!(probe_icon_rgb(Some('B')), probe_icon_rgb(Some('A')));
+        assert_ne!(probe_icon_rgb(Some('C')), probe_icon_rgb(Some('B')));
+        assert!(probe_uses_color_icon(Some('B')));
+        assert!(probe_uses_color_icon(Some('C')));
+        assert!(!probe_uses_color_icon(Some('A')));
+        assert!(!probe_uses_color_icon(None));
+
+        let (_, _, a) = icon_rgba_for(Some('A'));
+        let (_, _, b) = icon_rgba_for(Some('B'));
+        let (_, _, c) = icon_rgba_for(Some('C'));
+        assert_ne!(a, b, "B tray icon must differ from A");
+        assert_ne!(b, c, "C tray icon must differ from B");
+
+        let sample = |rgba: &[u8], want: [u8; 3]| {
+            rgba.chunks_exact(4).any(|pixel| {
+                pixel[3] > 20 && pixel[0] == want[0] && pixel[1] == want[1] && pixel[2] == want[2]
+            })
+        };
+        #[cfg(target_os = "macos")]
+        {
+            // A stays a black template mark; B/C bake their probe tint.
+            assert!(sample(&a, [0, 0, 0]));
+            assert!(sample(&b, probe_icon_rgb(Some('B'))));
+            assert!(sample(&c, probe_icon_rgb(Some('C'))));
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            assert!(sample(&a, probe_icon_rgb(Some('A'))));
+            assert!(sample(&b, probe_icon_rgb(Some('B'))));
+            assert!(sample(&c, probe_icon_rgb(Some('C'))));
+        }
+    }
+
+    #[test]
+    fn upgrade_probe_letter_parses_one_ascii() {
+        assert_eq!(upgrade_probe_letter_from(None), None);
+        assert_eq!(upgrade_probe_letter_from(Some("")), None);
+        assert_eq!(upgrade_probe_letter_from(Some("  ")), None);
+        assert_eq!(upgrade_probe_letter_from(Some("BB")), None);
+        assert_eq!(upgrade_probe_letter_from(Some("1")), None);
+        assert_eq!(upgrade_probe_letter_from(Some("b")), Some('B'));
+        assert_eq!(upgrade_probe_letter_from(Some(" C ")), Some('C'));
     }
 
     #[test]

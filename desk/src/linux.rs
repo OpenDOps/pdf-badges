@@ -20,6 +20,7 @@ enum Action {
     Quit,
     AskPort,
     Open,
+    UpgradeProbe,
     ShowError(String),
     /// Worker finished [`server::restart_switch`].
     PortSwitched {
@@ -58,7 +59,10 @@ impl Tray for Desk {
     }
 
     fn title(&self) -> String {
-        "reg-server".into()
+        match server::upgrade_probe_letter() {
+            Some(letter) => format!("reg-server (probe {letter})"),
+            None => "reg-server".into(),
+        }
     }
 
     /// Theme name only. Absolute file paths and IconPixmap have both crashed
@@ -76,7 +80,7 @@ impl Tray for Desk {
         let quit = self.actions.clone();
         let ask = self.actions.clone();
         let open = self.actions.clone();
-        vec![
+        let mut items = vec![
             StandardItem {
                 label: label.clone(),
                 enabled: server::listen_url(&label).is_some(),
@@ -94,6 +98,21 @@ impl Tray for Desk {
                 ..Default::default()
             }
             .into(),
+        ];
+        if server::show_upgrade_probe_menu(server::upgrade_probe_letter()) {
+            let probe = self.actions.clone();
+            items.push(
+                StandardItem {
+                    label: server::UPGRADE_PROBE_MENU.into(),
+                    activate: Box::new(move |_| {
+                        let _ = probe.send(Action::UpgradeProbe);
+                    }),
+                    ..Default::default()
+                }
+                .into(),
+            );
+        }
+        items.push(
             StandardItem {
                 label: "Quit".into(),
                 activate: Box::new(move |_| {
@@ -102,7 +121,8 @@ impl Tray for Desk {
                 ..Default::default()
             }
             .into(),
-        ]
+        );
+        items
     }
 }
 
@@ -207,6 +227,12 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             Some(Action::Open) => {
                 server::desk_log(format!("action Open {}", session.address_text()));
                 server::open_listen(&session.address_text());
+            }
+            Some(Action::UpgradeProbe) => {
+                server::desk_log("action UpgradeProbe");
+                if pending.is_none() {
+                    pending = spawn_info_dialog("Tray marker B is active.");
+                }
             }
             Some(Action::AskPort) => {
                 server::desk_log(format!(
@@ -577,26 +603,57 @@ fn missing_dialog_hint() {
 }
 
 fn spawn_error_dialog(message: &str) -> Option<Pending> {
+    spawn_message_dialog(message, true)
+}
+
+fn spawn_info_dialog(message: &str) -> Option<Pending> {
+    spawn_message_dialog(message, false)
+}
+
+fn spawn_message_dialog(message: &str, error: bool) -> Option<Pending> {
     let Some(tool) = dialog_tool() else {
         missing_dialog_hint();
         let _ = writeln!(io::stderr(), "reg-server: {message}");
         return None;
     };
-    let child = match tool {
-        DialogTool::Zenity => Command::new("zenity")
-            .args(["--error", "--title", "reg-server", "--text", message])
+    let title = if error {
+        "reg-server"
+    } else {
+        server::UPGRADE_PROBE_MENU
+    };
+    let child = match (tool, error) {
+        (DialogTool::Zenity, true) => Command::new("zenity")
+            .args(["--error", "--title", title, "--text", message])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn(),
-        DialogTool::KDialog => Command::new("kdialog")
-            .args(["--error", message, "--title", "reg-server"])
+        (DialogTool::Zenity, false) => Command::new("zenity")
+            .args(["--info", "--title", title, "--text", message])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn(),
-        DialogTool::Yad => Command::new("yad")
-            .args(["--error", "--title", "reg-server", "--text", message])
+        (DialogTool::KDialog, true) => Command::new("kdialog")
+            .args(["--error", message, "--title", title])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn(),
+        (DialogTool::KDialog, false) => Command::new("kdialog")
+            .args(["--msgbox", message, "--title", title])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn(),
+        (DialogTool::Yad, true) => Command::new("yad")
+            .args(["--error", "--title", title, "--text", message])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn(),
+        (DialogTool::Yad, false) => Command::new("yad")
+            .args(["--info", "--title", title, "--text", message])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())

@@ -6,6 +6,8 @@ set -euo pipefail
 root=$(cd "$(dirname "$0")/../.." && pwd)
 # shellcheck source=upgrade-zips.sh
 source "$root/scripts/release/upgrade-zips.sh"
+# shellcheck source=write-testpath.sh
+source "$root/scripts/release/write-testpath.sh"
 
 fail() {
   echo "FAIL: $*" >&2
@@ -71,6 +73,8 @@ echo "$server_list" | grep -qx 'admin/index.html' || fail "server zip missing ad
 echo "$server_list" | grep -qx 'form/index.html' || fail "server zip missing form/"
 echo "$server_list" | grep -q 'rust-reg-run' && fail "server zip must not contain rust-reg-run"
 echo "$server_list" | grep -q 'rust-reg-desk' && fail "server zip must not contain rust-reg-desk"
+echo "$server_list" | grep -q 'form/testpath.html' && fail "shipping fixture must omit form/testpath.html"
+echo "$server_list" | grep -q 'form/upgrade-probe.js' && fail "shipping fixture must omit form/upgrade-probe.js"
 pass server_zip_layout
 
 # --- wrapper_and_tray_are_single_files ---
@@ -146,6 +150,39 @@ sums2=$(write_upgrade_zips \
 [[ ! -f "$out2/rust-reg-${version}-linux-tray.zip" ]] || fail "tray zip must be absent without desk"
 echo "$sums2" | grep -q 'rust-reg-desk-linux' && fail "desk file line must be absent without desk"
 pass skip_tray_without_desk
+
+# --- in_server_zip (step 9: probe B packs /testpath into form/) ---
+write_upgrade_probe_testpath "$version_dir/form" B
+out_probe="$tmpdir/out-probe"
+mkdir -p "$out_probe"
+write_upgrade_zips \
+  "$out_probe" \
+  "$version" \
+  "$platform_tag" \
+  "$version_dir" \
+  rust-reg \
+  rust-reg-run \
+  "$desk" >/dev/null
+probe_server="$out_probe/rust-reg-${version}-${platform_tag}-server.zip"
+[[ -f "$probe_server" ]] || fail "probe server zip missing"
+probe_list=$(python3 - "$probe_server" <<'PY'
+import sys, zipfile
+with zipfile.ZipFile(sys.argv[1]) as z:
+    print("\n".join(sorted(z.namelist())))
+PY
+)
+echo "$probe_list" | grep -qx 'form/testpath.html' || fail "probe server zip missing form/testpath.html"
+echo "$probe_list" | grep -qx 'form/upgrade-probe.js' || fail "probe server zip missing form/upgrade-probe.js"
+python3 - "$probe_server" <<'PY' || fail "probe testpath body mismatch"
+import sys, zipfile
+with zipfile.ZipFile(sys.argv[1]) as z:
+    html = z.read("form/testpath.html").decode()
+    js = z.read("form/upgrade-probe.js").decode()
+assert "Upgrade probe" in html, html
+assert '<p class="probe-letter">B</p>' in html, html
+assert 'export const UPGRADE_PROBE = "B";' in js, js
+PY
+pass in_server_zip
 
 echo
 echo "All step-1 upgrade-zip tests passed."

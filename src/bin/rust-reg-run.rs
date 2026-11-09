@@ -9,6 +9,7 @@ fn main() {
             if args.next().is_some() {
                 usage();
             }
+            rust_reg::registration_server::emit_upgrade_probe("rust-reg-run", "wrapper");
             if let Err(err) =
                 rust_reg::registration_server::run_supervisor(std::path::Path::new(&prefix))
             {
