@@ -1221,7 +1221,25 @@ async fn fetch_parts(
     };
     let mut downloaded: Vec<PathBuf> = Vec::new();
 
-    for part in needed {
+    // One bar for every part: sizes up front (HEAD), then a running total.
+    // Without a progress sink there is no bar, so no HEAD requests.
+    let mut sizes = Vec::with_capacity(needed.len());
+    for part in &needed {
+        sizes.push(match progress {
+            Some(_) => {
+                let url = release_file_url(base, repo, version, &part_zip_name(version, *part));
+                asset_size(client, &url).await
+            }
+            None => 0,
+        });
+    }
+    let plan = DownloadPlan::new(&sizes);
+    if let Some(progress) = progress {
+        progress.note_download(0, plan.total);
+    }
+
+    for (index, part) in needed.into_iter().enumerate() {
+        let span = progress.map(|progress| plan.span(progress, index));
         let name = part_zip_name(version, part);
         let path = part_temp_path(prefix, version, part);
         if let Some(parent) = path.parent() {
@@ -1233,7 +1251,7 @@ async fn fetch_parts(
             }
         }
         let asset_url = release_file_url(base, repo, version, &name);
-        if write_download(client, &asset_url, &path, progress)
+        if write_download(client, &asset_url, &path, span.as_ref())
             .await
             .is_err()
         {
@@ -1277,30 +1295,106 @@ fn api_host_is_github(base: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Units per part when a part's size is unknown (no `Content-Length` on HEAD).
+const PART_UNITS: u64 = 1000;
+
+/// Where each part sits on the one download bar.
+struct DownloadPlan {
+    /// Start of each part on the bar.
+    starts: Vec<u64>,
+    /// Width of each part on the bar.
+    widths: Vec<u64>,
+    total: u64,
+}
+
+impl DownloadPlan {
+    /// Bytes when every size is known; otherwise each part is an equal share.
+    fn new(sizes: &[u64]) -> Self {
+        let known = !sizes.is_empty() && sizes.iter().all(|size| *size > 0);
+        let widths: Vec<u64> = if known {
+            sizes.to_vec()
+        } else {
+            vec![PART_UNITS; sizes.len()]
+        };
+        let mut starts = Vec::with_capacity(widths.len());
+        let mut total = 0u64;
+        for width in &widths {
+            starts.push(total);
+            total += width;
+        }
+        Self {
+            starts,
+            widths,
+            total,
+        }
+    }
+
+    fn span<'a>(&self, progress: &'a ReleaseCheck, index: usize) -> DownloadSpan<'a> {
+        DownloadSpan {
+            progress,
+            start: self.starts[index],
+            width: self.widths[index],
+            total: self.total,
+        }
+    }
+}
+
+/// One part's slice of the download bar.
+struct DownloadSpan<'a> {
+    progress: &'a ReleaseCheck,
+    start: u64,
+    width: u64,
+    total: u64,
+}
+
+impl DownloadSpan<'_> {
+    /// `received` of `length` bytes of this part. `length` 0 means unknown: the slice stays at its start.
+    fn note(&self, received: u64, length: u64) {
+        let done = if length == 0 {
+            0
+        } else {
+            (u128::from(received.min(length)) * u128::from(self.width) / u128::from(length)) as u64
+        };
+        self.progress.note_download(self.start + done, self.total);
+    }
+}
+
+/// `Content-Length` from a HEAD of `url` (redirects followed). 0 when unknown.
+async fn asset_size(client: &reqwest::Client, url: &str) -> u64 {
+    match client.head(url).send().await {
+        Ok(response) if response.status().is_success() => response.content_length().unwrap_or(0),
+        _ => 0,
+    }
+}
+
 #[allow(dead_code)]
 async fn write_download(
     client: &reqwest::Client,
     url: &str,
     dest: &Path,
-    progress: Option<&ReleaseCheck>,
+    span: Option<&DownloadSpan<'_>>,
 ) -> Result<(), ()> {
     let mut response = client.get(url).send().await.map_err(|_| ())?;
     if !response.status().is_success() {
         return Err(());
     }
-    let total = response.content_length().unwrap_or(0);
+    let length = response.content_length().unwrap_or(0);
     let mut received = 0u64;
-    if let Some(progress) = progress {
-        progress.note_download(0, total);
+    if let Some(span) = span {
+        span.note(0, length);
     }
     let mut file = std::fs::File::create(dest).map_err(|_| ())?;
     while let Some(chunk) = response.chunk().await.map_err(|_| ())? {
         file.write_all(&chunk).map_err(|_| ())?;
         received += chunk.len() as u64;
-        if let Some(progress) = progress {
-            progress.note_download(received, total);
+        if let Some(span) = span {
+            span.note(received, length);
         }
         tokio::task::yield_now().await;
+    }
+    if let Some(span) = span {
+        // A part with no length jumps to its end when it is complete.
+        span.note(1, 1);
     }
     file.sync_all().map_err(|_| ())
 }
@@ -3222,6 +3316,39 @@ pub(crate) async fn update_loop(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn three_parts_fill_one_download_bar() {
+        let check = super::ReleaseCheck::with_prerelease(false);
+        assert!(check.begin_download());
+        let plan = super::DownloadPlan::new(&[600, 300, 100]);
+        assert_eq!(plan.total, 1000);
+        let mut seen = Vec::new();
+        for (index, length) in [600u64, 300, 100].into_iter().enumerate() {
+            let span = plan.span(&check, index);
+            span.note(0, length);
+            seen.push(check.progress().1);
+            span.note(length / 2, length);
+            seen.push(check.progress().1);
+            span.note(length, length);
+            seen.push(check.progress().1);
+            assert_eq!(check.progress().2, 1000);
+        }
+        assert_eq!(seen, vec![0, 300, 600, 600, 750, 900, 900, 950, 1000]);
+    }
+
+    #[test]
+    fn unknown_sizes_share_the_bar_equally() {
+        let check = super::ReleaseCheck::with_prerelease(false);
+        assert!(check.begin_download());
+        let plan = super::DownloadPlan::new(&[500, 0]);
+        assert_eq!(plan.total, 2 * super::PART_UNITS);
+        let second = plan.span(&check, 1);
+        second.note(250, 1000);
+        assert_eq!(check.progress().1, super::PART_UNITS + super::PART_UNITS / 4);
+        second.note(1, 1);
+        assert_eq!(check.progress().1, 2 * super::PART_UNITS);
+    }
+
     #[test]
     fn extract_progress_follows_the_download() {
         let check = super::ReleaseCheck::with_prerelease(false);
