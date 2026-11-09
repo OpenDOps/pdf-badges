@@ -63,6 +63,7 @@ function EventsRoute({ onLeave }: { onLeave: () => void }) {
   const [events, setEvents] = useState<Event[]>([]);
   const [current, setCurrent] = useState<Event | null>(null);
   const [tokenStored, setTokenStored] = useState(false);
+  const [version, setVersion] = useState<string | null>(null);
   const [newer, setNewer] = useState<string | null>(null);
   const [failed, setFailed] = useState<string | null>(null);
   const [supervised, setSupervised] = useState(true);
@@ -94,6 +95,7 @@ function EventsRoute({ onLeave }: { onLeave: () => void }) {
         setTokenStored(binding.tokenStored);
         const update = await fetchUpdate();
         if (!cancel && update) {
+          setVersion(update.version);
           setNewer(update.newer);
           setFailed(update.failed);
           setSupervised(update.supervised);
@@ -130,6 +132,7 @@ function EventsRoute({ onLeave }: { onLeave: () => void }) {
       events={events}
       current={current}
       tokenStored={tokenStored}
+      version={version}
       newer={newer}
       failed={failed}
       supervised={supervised}

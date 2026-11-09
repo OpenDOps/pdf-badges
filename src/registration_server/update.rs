@@ -52,6 +52,8 @@ pub const GITHUB_API: &str = "https://api.github.com";
 
 /// How long the sync thread waits after a release check before the next one.
 pub const UPDATE_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
+/// Wait after a failed check (offline, GitHub rate limit) before the next try.
+pub const RETRY_AFTER_FAILURE: Duration = Duration::from_secs(10 * 60);
 
 /// `tag` is `v` or `release-` plus a version. `running` is that version without the prefix.
 /// A version is `MAJOR.MINOR.PATCH` or the same numbers plus `-alpha.N`, `-beta.N`, or `-rc.N`.
@@ -226,11 +228,17 @@ pub fn write_upgrade_probe_testpath(
 static PROBE_CAPTURE: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
 /// No previous attempt is due. An attempt is due again `UPDATE_EVERY` later.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn check_due(last: Option<SystemTime>, now: SystemTime) -> bool {
+    check_due_after(last, now, UPDATE_EVERY)
+}
+
+/// [`check_due`] with the wait `every` instead of [`UPDATE_EVERY`].
+pub fn check_due_after(last: Option<SystemTime>, now: SystemTime, every: Duration) -> bool {
     match last {
         None => true,
         Some(last) => match now.duration_since(last) {
-            Ok(elapsed) => elapsed >= UPDATE_EVERY,
+            Ok(elapsed) => elapsed >= every,
             Err(_) => false,
         },
     }
@@ -381,6 +389,8 @@ pub struct ReleaseCheck {
 struct OfferState {
     offer: Option<String>,
     last_attempt: Option<SystemTime>,
+    /// The last check did not reach GitHub or got an error status.
+    last_failed: bool,
     api_base: String,
     in_flight: bool,
     include_prerelease: bool,
@@ -413,6 +423,7 @@ impl ReleaseCheck {
             inner: Mutex::new(OfferState {
                 offer: None,
                 last_attempt: None,
+                last_failed: false,
                 api_base: GITHUB_API.to_string(),
                 in_flight: false,
                 include_prerelease,
@@ -499,7 +510,16 @@ impl ReleaseCheck {
     }
 
     pub fn due(&self, now: SystemTime) -> bool {
-        check_due(self.last_attempt(), now)
+        check_due_after(self.last_attempt(), now, self.every())
+    }
+
+    /// [`UPDATE_EVERY`] after a good check, [`RETRY_AFTER_FAILURE`] after a failed one.
+    pub fn every(&self) -> Duration {
+        if self.inner.lock().expect("release offer").last_failed {
+            RETRY_AFTER_FAILURE
+        } else {
+            UPDATE_EVERY
+        }
     }
 
     fn api_base(&self) -> String {
@@ -597,6 +617,13 @@ impl ReleaseCheck {
         .await;
         let mut state = self.inner.lock().expect("release offer");
         state.last_attempt = Some(now);
+        state.last_failed = fetched.is_err();
+        if state.last_failed {
+            eprintln!(
+                "registration-server update check failed; retry in {}s",
+                RETRY_AFTER_FAILURE.as_secs()
+            );
+        }
         match fetched {
             Ok(offer) => {
                 state.offer = offer.clone();
@@ -3159,11 +3186,12 @@ pub(crate) async fn update_loop(
                 continue;
             }
         }
+        let every = app.updates.every();
         let wait = match app.updates.last_attempt() {
             Some(last) => last
-                .checked_add(UPDATE_EVERY)
+                .checked_add(every)
                 .and_then(|due| due.duration_since(SystemTime::now()).ok())
-                .unwrap_or(UPDATE_EVERY),
+                .unwrap_or(every),
             None => Duration::from_secs(0),
         };
         tokio::select! {
@@ -3532,8 +3560,8 @@ mod tests {
         use crate::registration_server::gate::Gate;
 
         use super::super::{
-            check_due, github_client, read_rejected, update_repo, ReleaseCheck, UPDATE_EVERY,
-            UPDATE_REPO,
+            check_due, github_client, read_rejected, update_repo, ReleaseCheck,
+            RETRY_AFTER_FAILURE, UPDATE_EVERY, UPDATE_REPO,
         };
 
         struct Hit {
@@ -3849,6 +3877,35 @@ mod tests {
             assert_eq!(hits.lock().expect("hits").len(), 1);
             assert!(!look.due(five_hours + Duration::from_secs(5 * 60 * 60)));
             assert!(look.due(five_hours + UPDATE_EVERY));
+        }
+
+        #[tokio::test]
+        async fn a_failed_check_retries_after_ten_minutes() {
+            let (base, _hits) = stand_in(vec![
+                (StatusCode::FORBIDDEN, r#"{"message":"API rate limit exceeded"}"#),
+                (
+                    StatusCode::OK,
+                    r#"{"tag_name":"v0.2.0","draft":false,"prerelease":false}"#,
+                ),
+            ])
+            .await;
+            let look = ReleaseCheck::with_prerelease(false);
+            let client = client();
+            let gate = Gate::new();
+            let opened = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+            assert!(look
+                .force(&gate, &client, &base, UPDATE_REPO, "0.1.0", &[], opened)
+                .await
+                .is_err());
+            assert_eq!(look.every(), RETRY_AFTER_FAILURE);
+            assert!(!look.due(opened + Duration::from_secs(9 * 60)));
+            let retry = opened + RETRY_AFTER_FAILURE;
+            assert!(look.due(retry));
+            look.scheduled(&gate, &client, &base, UPDATE_REPO, "0.1.0", &[], retry)
+                .await;
+            assert_eq!(look.offer().as_deref(), Some("0.2.0"));
+            assert_eq!(look.every(), UPDATE_EVERY);
+            assert!(!look.due(retry + RETRY_AFTER_FAILURE));
         }
     }
 
@@ -5352,6 +5409,25 @@ mod tests {
             app.operator
                 .keep_session("admin-session".to_string(), session);
             "operator=admin-session".to_string()
+        }
+
+        #[tokio::test]
+        async fn an_operator_can_ask_for_a_check() {
+            let venue = desk();
+            venue.app.updates.set_api_base("http://127.0.0.1:9");
+            let cookie = operator_cookie(&venue.app);
+            let request = Request::builder()
+                .method("POST")
+                .uri("/api/update/check")
+                .header("cookie", cookie)
+                .body(Body::empty())
+                .unwrap();
+            let response = crate::registration_server::http::router(venue.app.clone())
+                .oneshot(request)
+                .await
+                .unwrap();
+            // Signed in: GitHub is asked (and is unreachable here), not 401.
+            assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
         }
 
         async fn send(app: &App, cookie: Option<&str>) -> (StatusCode, Value) {

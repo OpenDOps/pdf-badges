@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import { fetchUpdate, postSession, postUpdate } from "./api";
+import { fetchUpdate, postSession, postUpdate, postUpdateCheck } from "./api";
 import NetworkSignal, { useNetwork } from "./NetworkSignal";
 
 const SESSION_PING_MS = 30_000;
@@ -22,6 +22,8 @@ type EventsProps = {
   keepSession?: boolean;
   /** Whole seconds. Used when the network reading is not ready yet. */
   timeoutSecs?: number;
+  /** Running release from `GET /api/update`. */
+  version?: string | null;
   /** Newer release from `GET /api/update`. Absent when this build is current. */
   newer?: string | null;
   /** Version that was rolled back. Absent when the last upgrade was not rolled back. */
@@ -38,6 +40,7 @@ export default function Events({
   watchNetwork = true,
   keepSession = true,
   timeoutSecs = 10,
+  version = null,
   newer = null,
   failed = null,
   supervised = true,
@@ -52,6 +55,7 @@ export default function Events({
   const [received, setReceived] = useState(0);
   const [total, setTotal] = useState<number | null>(null);
   const [target, setTarget] = useState<string | null>(newer);
+  const [check, setCheck] = useState<"idle" | "checking" | "none" | "error">("idle");
   const poll = useRef<number | null>(null);
   const posted = useRef(false);
 
@@ -115,6 +119,24 @@ export default function Events({
       }
     } catch {
       setUpgrade("applying");
+    }
+  }
+
+  async function checkForUpdate() {
+    if (check === "checking") {
+      return;
+    }
+    setCheck("checking");
+    try {
+      const result = await postUpdateCheck();
+      if (!result.ok) {
+        setCheck("error");
+        return;
+      }
+      setTarget(result.newer);
+      setCheck(result.newer ? "idle" : "none");
+    } catch {
+      setCheck("error");
     }
   }
 
@@ -198,6 +220,11 @@ export default function Events({
   return (
     <main className="min-h-screen bg-zinc-50 px-4 pb-10 pt-16 text-zinc-900">
       <header className="fixed inset-x-0 top-0 z-10 flex h-12 items-center justify-start gap-3 bg-zinc-50 px-4 pr-72">
+        {version ? (
+          <p className="select-text text-xs tabular-nums text-zinc-500">
+            {t("events.version", { version: versionLabel(version) })}
+          </p>
+        ) : null}
         {upgrade === "downloading" || upgrade === "extracting" ? (
           <div className="flex items-center gap-2">
             <div className="flex w-56 flex-col gap-1">
@@ -255,6 +282,26 @@ export default function Events({
           >
             {t("events.upgrade", { version: versionLabel(target) })}
           </button>
+        ) : null}
+        {!target && upgrade === "idle" ? (
+          <button
+            type="button"
+            onClick={() => void checkForUpdate()}
+            disabled={check === "checking"}
+            className="cursor-pointer rounded-full border border-zinc-300 bg-white px-3 py-1 text-sm text-zinc-700 hover:bg-zinc-100 disabled:cursor-wait disabled:opacity-60"
+          >
+            {check === "checking" ? t("events.checking") : t("events.check")}
+          </button>
+        ) : null}
+        {check === "none" && !target ? (
+          <p role="status" className="text-xs text-zinc-600">
+            {t("events.up_to_date")}
+          </p>
+        ) : null}
+        {check === "error" ? (
+          <p role="alert" className="text-xs text-red-600">
+            {t("events.check_failed")}
+          </p>
         ) : null}
         {supervised ? null : (
           <p role="status" className="text-xs text-zinc-600">

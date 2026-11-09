@@ -184,6 +184,27 @@ export async function postUpdate(): Promise<{ ok: boolean; code: string }> {
   return { ok: true, code: "" };
 }
 
+/** `POST /api/update/check`: ask GitHub now. `newer` is the offer after the check. */
+export async function postUpdateCheck(): Promise<
+  { ok: true; newer: string | null } | { ok: false; code: string }
+> {
+  const response = await fetch("/api/update/check", {
+    method: "POST",
+    credentials: "same-origin",
+  });
+  let body: { ok?: boolean; data?: { newer?: string | null }; error?: { code?: string } } = {};
+  try {
+    body = (await response.json()) as typeof body;
+  } catch {
+    // Not JSON: treated as a failed check below.
+  }
+  if (!response.ok || body.ok !== true) {
+    return { ok: false, code: body.error?.code ?? "update_check_failed" };
+  }
+  const newer = body.data?.newer;
+  return { ok: true, newer: typeof newer === "string" && newer !== "" ? newer : null };
+}
+
 export async function fetchKeys(): Promise<unknown[]> {
   const response = await fetch("/api/keys", { credentials: "same-origin" });
   const body = (await response.json()) as { data?: unknown[] };

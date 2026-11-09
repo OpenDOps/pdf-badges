@@ -1995,8 +1995,9 @@ async fn update_install(State(app): State<App>, request: Request) -> Response {
 }
 
 async fn update_check(State(app): State<App>, headers: HeaderMap) -> Response {
-    if let Err(response) = require_desk(&app, &headers) {
-        return response;
+    // The tray (desk cookie) or a signed-in operator on the events page.
+    if !can_read_update(&app, &headers) {
+        return api_error(StatusCode::UNAUTHORIZED, "unauthorized");
     }
     match crate::registration_server::update::check_now(&app).await {
         Ok(data) => api_ok(data),

@@ -19,6 +19,7 @@ function renderEvents(
     watchNetwork: boolean;
     keepSession: boolean;
     timeoutSecs: number;
+    version: string | null;
     newer: string | null;
     failed: string | null;
     supervised: boolean;
@@ -33,6 +34,7 @@ function renderEvents(
       watchNetwork={props.watchNetwork ?? false}
       keepSession={props.keepSession ?? false}
       timeoutSecs={props.timeoutSecs ?? 0}
+      version={props.version ?? null}
       newer={props.newer ?? null}
       failed={props.failed ?? null}
       supervised={props.supervised ?? true}
@@ -318,4 +320,60 @@ test("keys_block_empty", () => {
   expect(keys).toHaveTextContent("Ключи");
   expect(keys).toHaveTextContent("Нет ключей");
   expect(keys.querySelector("button")).toBeNull();
+});
+
+test("events_shows_the_running_version", () => {
+  renderEvents({ version: "2.0.0-alpha.9" });
+  expect(screen.getByText("Версия v2.0.0-alpha.9")).toBeInTheDocument();
+});
+
+test("events_check_finds_an_upgrade", async () => {
+  const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (String(input).endsWith("/api/update/check") && init?.method === "POST") {
+      return {
+        ok: true,
+        json: async () => ({ ok: true, data: { version: "2.0.0-alpha.9", newer: "2.0.0-alpha.10" } }),
+      };
+    }
+    return { ok: true, json: async () => ({ ok: true, data: {} }) };
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  renderEvents({ version: "2.0.0-alpha.9" });
+  expect(screen.queryByRole("button", { name: /Обновить до/ })).not.toBeInTheDocument();
+  await act(async () => {
+    fireEvent.click(screen.getByRole("button", { name: "Проверить обновления" }));
+  });
+  expect(screen.getByRole("button", { name: "Обновить до v2.0.0-alpha.10" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Проверить обновления" })).not.toBeInTheDocument();
+  vi.unstubAllGlobals();
+});
+
+test("events_check_says_up_to_date", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () => ({ ok: true, json: async () => ({ ok: true, data: { newer: null } }) })),
+  );
+  renderEvents();
+  await act(async () => {
+    fireEvent.click(screen.getByRole("button", { name: "Проверить обновления" }));
+  });
+  expect(screen.getByText("Обновлений нет")).toBeInTheDocument();
+  vi.unstubAllGlobals();
+});
+
+test("events_check_reports_a_failure", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () => ({
+      ok: false,
+      json: async () => ({ ok: false, error: { code: "update_check_failed" } }),
+    })),
+  );
+  renderEvents();
+  await act(async () => {
+    fireEvent.click(screen.getByRole("button", { name: "Проверить обновления" }));
+  });
+  expect(screen.getByRole("alert")).toHaveTextContent("Не удалось проверить обновления");
+  expect(screen.getByRole("button", { name: "Проверить обновления" })).toBeEnabled();
+  vi.unstubAllGlobals();
 });
