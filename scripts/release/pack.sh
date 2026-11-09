@@ -190,13 +190,13 @@ write_drag_dmg() {
   rm -f "$rw" "$dmg"
   # CI runners sometimes leave a previous "reg-server" volume attached.
   while diskutil list 2>/dev/null | grep -q 'reg-server'; do
-    hdiutil detach "/Volumes/reg-server" -force 2>/dev/null || true
+    hdiutil detach "/Volumes/reg-server" -force >/dev/null 2>&1 || true
     sleep 1
   done
   local create_ok=0
   local attempt
   for attempt in 1 2 3 4 5; do
-    if hdiutil create -volname "reg-server" -srcfolder "$stage" -ov -format UDRW "$rw"; then
+    if hdiutil create -volname "reg-server" -srcfolder "$stage" -ov -format UDRW "$rw" >&2; then
       create_ok=1
       break
     fi
@@ -229,8 +229,8 @@ tell application "Finder"
 end tell
 EOF
   sync
-  hdiutil detach "$mount" || hdiutil detach "$mount" -force
-  hdiutil convert "$rw" -format UDZO -ov -o "$dmg"
+  hdiutil detach "$mount" >&2 || hdiutil detach "$mount" -force >&2
+  hdiutil convert "$rw" -format UDZO -ov -o "$dmg" >&2
   rm -f "$rw"
 }
 
