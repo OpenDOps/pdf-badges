@@ -6,7 +6,7 @@ Each step below is one change (or one manual matrix). The tests named in the ste
 
 This plan is done when steps 1 through 13 are `done`.
 
-**Steps 1–10 are in tree.** [Step 11](#step-11-macos-proof) is running: Phase 0 done, Phase 1 publishing A/B/C as `alpha.9` / `10` / `11`. Bugs found on the way are listed under [Findings](#findings-during-the-proof).
+**Steps 1–10 are in tree.** [Step 11](#step-11-macos-proof): Phases 0–4 done (A → B → C, then C → D in the no-root model); a few checks are left, listed under [What is left](#what-is-left). Bugs found on the way are listed under [Findings](#findings-during-the-proof).
 
 ## Summary
 
@@ -22,7 +22,7 @@ This plan is done when steps 1 through 13 are `done`.
 | [8. Tray markers](#step-8-tray-markers) | Distinct icon + menu item **Upgrade probe** (B); removed or changed in C | [§ Test](#step-8-tray-markers) | done |
 | [9. Frontend `/testpath`](#step-9-frontend-testpath) | Hardcoded HTML + script probe letter in the form (or admin) tree | [§ Test](#step-9-frontend-testpath) | done |
 | [10. Marker packs A/B/C](#step-10-marker-packs-abc) | Three installers + three-zip sets with letters A → B → C | [§ Test](#step-10-marker-packs-abc) | done |
-| [11. macOS proof](#step-11-macos-proof) | Full observable upgrade matrix on Mac | [§ Test](#step-11-macos-proof) | in progress (Phase 0 done, Phase 1 running) |
+| [11. macOS proof](#step-11-macos-proof) | Full observable upgrade matrix on Mac | [§ Test](#step-11-macos-proof) | in progress (Phases 0–4 done; see What is left) |
 | [12. Linux proof](#step-12-linux-proof) | Tray + wrapper markers; server smoke only | [§ Test](#step-12-linux-proof) | not started |
 | [13. Cleanup](#step-13-cleanup) | Remove or gate probes; leave shipping icons/menus | [§ Test](#step-13-cleanup) | not started |
 
@@ -375,7 +375,7 @@ Done. Fixture packs + asserts: `bash scripts/release/test-marker-packs.sh` (`thr
 
 [Back to summary](#summary)
 
-**Status:** in progress — Phase 0 done; Phase 1: A + B published (C after A → B); Phase 2 done; Phase 3 A → B done except the Port… check on B  
+**Status:** in progress — Phases 0, 1, 2, 3, 4 done; Phase 4b (C → D, no root) done; [What is left](#what-is-left) before Phase 5  
 **Depends on:** [6](#step-6-automated-parts-suite), [10](#step-10-marker-packs-abc)  
 **Unlocks:** [12](#step-12-linux-proof) (recommended), [13](#step-13-cleanup)
 
@@ -400,7 +400,10 @@ Bugs found while running Phases 1–2 and fixed on `main` (each with tests):
 | Tray remembered a port before it started (a busy port stuck across launches) | `desk.port` written only after a successful start / adopt | `5b3090b8` |
 | Service (launchd / systemd / Windows) ignored the tray port | Wrapper reads `<prefix>/data/port`; with a service installed, **Port…** writes it and restarts the service (admin prompt), tray starts on the service port | `5b3090b8` |
 | **Port…** and Quit asked for an admin password every time; Quit unloaded the service, and the reopened tray then ran its own server as the user (`credentials.yml: Permission denied`) | The wrapper (root) makes `data/port` user-writable (macOS `staff` 664, Linux 666, Windows `Users` modify) and restarts the server when it changes; `data/port` now wins over `RUST_REG_HTTP`. **Port…** only writes the file (elevated restart only as a fallback for old installs). Quit leaves the service running. A tray that finds the service down says so instead of starting a copy | this commit |
-| Even without per-action prompts, a root service still needed admin rights to start, stop, or recover (the old B tray's Quit unloaded it again) | **No root at runtime.** The tray runs the server as the desktop user from a per-user prefix (macOS `~/Library/Application Support/rust-reg`, Linux `~/.local/share/rust-reg`, Windows `%LOCALAPPDATA%\rust-reg`). The installed copy (`/Library/rust-reg`, `/opt/rust-reg`, `C:\Program Files\rust-reg`) only seeds it: first run copies it without `data/`, a newer installed version refreshes `bin/` and `versions/`. Packages no longer install a LaunchDaemon / systemd unit / Windows service and retire an old one; the macOS pkg gives `reg-server.app` to the console user so self-update can replace it. macOS: `caffeinate -i -w <server>` keeps the system from idle sleep while the server runs (display may sleep). | next release |
+| Even without per-action prompts, a root service still needed admin rights to start, stop, or recover (the old B tray's Quit unloaded it again) | **No root at runtime.** The tray runs the server as the desktop user from a per-user prefix (macOS `~/Library/Application Support/rust-reg`, Linux `~/.local/share/rust-reg`, Windows `%LOCALAPPDATA%\rust-reg`). The installed copy (`/Library/rust-reg`, `/opt/rust-reg`, `C:\Program Files\rust-reg`) only seeds it: first run copies it without `data/`, a newer installed version refreshes `bin/` and `versions/`. Packages no longer install a LaunchDaemon / systemd unit / Windows service and retire an old one; the macOS pkg gives `reg-server.app` to the console user so self-update can replace it. macOS: `caffeinate -i -w <server>` keeps the system from idle sleep while the server runs (display may sleep). | `5cc4a547` (D = `alpha.12`) |
+| After the move off the root service the server lost `REGISTRATION_UPDATE_PRERELEASE`, asked GitHub for `releases/latest` (404: only pre-releases exist) and showed “update server unreachable” | A pre-release build follows pre-releases by itself; a 404 from `releases/latest` is “no update”; the tray passes the variable to older servers | `135eca54` |
+| Old wrapper and new server both copied the parts through `<name>.new` when the phase turned `current`; one rename failed (`No such file or directory` in the log, result still correct) | Per-process temp name | `faf9b40a` |
+| Events page showed the old version until a reload after an upgrade | Upgrade poll and minute refresh set the label | `b1f60041` (first shipped after D) |
 | Tests wrote to the real `/Applications/reg-server.app` / assumed no `/Library/rust-reg` | Test-only guards | `5b3090b8` |
 
 Known environment note (this Mac): Docker `expocab-node` holds **8080** (and other containers 8090/8100/8110) — use port **8081** for the proof.
@@ -421,7 +424,7 @@ cargo test --test admin_pages testpath_
 (cd desk && cargo test --bin rust-reg-desk probe_ && cargo test --bin rust-reg-desk icons_differ)
 ```
 
-#### Phase 1 — Publish marker packs — **in progress**
+#### Phase 1 — Publish marker packs — **done**
 
 **Actions → Release → Run workflow**, macOS only (`linux=false`, `windows=false`), one run at a time (each pushes a version-bump commit to `main`):
 
@@ -429,7 +432,8 @@ cargo test --test admin_pages testpath_
 |---|---|---|---|---|
 | 1 | `2.0.0-alpha.9` | *(empty)* | **A** — install pkg | published + verified |
 | 2 | `2.0.0-alpha.10` | `B` | **B** — upgrade zips | published + verified (server/wrapper/tray digests ≠ A; Intel job re-run after a CI artifact timeout) |
-| 3 | `2.0.0-alpha.11` | `C` | **C** — upgrade zips | after A → B verified |
+| 3 | `2.0.0-alpha.11` | `C` | **C** — upgrade zips | published + verified (server `c2244fda8b9b`, wrapper `4ed31bef4a44`, tray `047d1c54542c`, all ≠ B) |
+| 4 | `2.0.0-alpha.12` | *(empty)* | **D** — shipping build, no root (white icon, no probe) | published + verified (pkg has `postinstall`, no LaunchDaemon in the payload) |
 
 ```bash
 gh workflow run release.yml --ref main -f version=2.0.0-alpha.10 -f upgrade_probe=B \
@@ -466,7 +470,7 @@ shasum -a 256 "$PREFIX/bin/rust-reg-run" "$PREFIX/bin/rust-reg-desk" \
 
 Gotcha: killing a test tray does not stop the server it spawned — an orphaned rust-reg on the same port gets adopted by the tray while the daemon loops on `Address already in use`. Check the listener’s path (`versions/<A>/rust-reg`, run by root).
 
-#### Phase 3 — Offer B and wait for `current`
+#### Phase 3 — Offer B and wait for `current` — **done**
 
 `POST /api/update` needs an operator session — start the update from the desk / admin update UI. Status can be read with:
 
@@ -495,7 +499,7 @@ Optional: publish a B′ with only form changed and same run/desk digests → tr
 | `/testpath` | pass: 200, probe letter `B` |
 | digests: server / wrapper / tray | pass: `f39c949e03ce` / `6aa8fa3de69f` / `b1f7cf60882b`, equal to B |
 | tray icon and **Upgrade probe** item after Quit + reopen | pass: icon changed, **Upgrade probe** item present (operator, 2026-11-10) |
-| **Port…** on B's tray | pending (operator) |
+| **Port…** on B's tray | superseded: the root service model was dropped (Phase 4b); Port… is re-checked without a service |
 
 Found on the way (fixed on main, first shipped in C):
 
@@ -505,11 +509,47 @@ Found on the way (fixed on main, first shipped in C):
 - A's admin UI was replaced by hand with these builds for review; the A → B swap installed B's own admin.
 - Tray **Quit** stops the installed service (`launchctl bootout`, admin prompt). Approving it unloaded the daemon; the reopened tray then started its own `rust-reg-run` as the user against `/Library/rust-reg`, which looped on `credentials.yml: Permission denied`. The daemon was bootstrapped again by hand. Fixed for C (see Findings): Quit leaves the service, no user copy, **Port…** without a prompt.
 
-#### Phase 4 — Offer C
+#### Phase 4 — Offer C — **done** (tray marker check open)
 
 Dispatch C (`alpha.11`, probe `C`). Same check → update → `mac-proof.sh restart` → Quit/reopen tray. Confirm every **B → C** row (probe menu gone; icon ≠ B; logs / `/testpath` = C).
 
 On C also check, with no password prompt anywhere: `ls -l /Library/rust-reg/data/port` shows group `staff`, mode `-rw-rw-r--`; **Port…** → 8082 moves the service (wrapper logs `listen … -> 0.0.0.0:8082; restarting the server`) and back to 8081; Quit closes only the tray and `/health` still answers.
+
+**Result (2026-11-10):** B → C started from the events page at 10:57:23; `updates/live` = `2.0.0-alpha.11`, phase `current`, B moved to `backup/2.0.0-alpha.10-20261110`.
+
+| Check | Result |
+|---|---|
+| `upgrade-probe-server-C` | pass (right after the swap) |
+| `upgrade-probe-wrapper-C` | pass, after `launchctl kickstart -k` (the B wrapper process kept running until then) |
+| `/testpath` | pass: 200, probe letter `C` |
+| digests: server / wrapper / tray | pass: `c2244fda8b9b` / `4ed31bef4a44` / `047d1c54542c`, equal to C |
+| `data/port` opened by the C wrapper | pass: `root:staff -rw-rw-r--` |
+| tray icon ≠ B | pass: C's icon is red (operator) |
+| **Upgrade probe** item gone in C | not checked — the C tray was replaced by the no-root build before it was looked at |
+| **Port…** / Quit without prompts on the service | superseded: Port… → 8082 wrote the file with no prompt, but the service did not come up on 8082, and the old B tray's Quit had unloaded the daemon again. The service model was dropped (Phase 4b). |
+
+#### Phase 4b — C → D in the no-root model — **done**
+
+The root daemon was retired by hand the way D's pkg `postinstall` does it (`launchctl bootout`, plist removed, `reg-server.app` chowned to the user) and the C tray binary was replaced with the no-root build (one admin prompt, the last). The tray then copied `/Library/rust-reg` (alpha.11) into `~/Library/Application Support/rust-reg`, keeping its `data/`, and started the server as `mac`.
+
+| Check | Result |
+|---|---|
+| Server, wrapper, tray run as the user from `~/Library/Application Support/rust-reg` | pass (`mac`, port 8081, `/health` ok) |
+| No root daemon | pass (no `com.opendops.rust-reg` in `/Library/LaunchDaemons`) |
+| Keep awake while the server runs | pass: `caffeinate -i -w <wrapper>`, `PreventUserIdleSystemSleep` in `pmset -g assertions` |
+| Pre-release update offered | pass after `135eca54` (tray passes `REGISTRATION_UPDATE_PRERELEASE=1` to the alpha.11 server) |
+| C → D from the events page, no password | pass: `live` = `2.0.0-alpha.12`, phase `current` |
+| digests: server / wrapper / tray (`bin/` and `/Applications/…/reg-server`) | pass: `a5a48c2d9bf7` / `e37a58aab0fa` / `8531027a0af7`, equal to D |
+
+#### What is left
+
+1. **D tray markers:** Quit and reopen the tray → white icon, no **Upgrade probe** item (the running tray is still the pre-update build in memory).
+2. **Port… without a service:** move to 8082 and back to 8081 — no password, `/health` follows, Docker's 8080 untouched.
+3. **Quit:** stops the server (`/health` stops answering) with no prompt; reopening starts it again.
+4. **Matching digest skip:** never exercised — every release so far changed all three parts. Needs a release that changes only `admin/` / `form/` (e.g. E with the events-page label fix, then E′ with a frontend-only change) and a check that wrapper and tray zips are not downloaded.
+5. **Version label after an upgrade without a reload** (`b1f60041`): visible on the first update *from* a build that has it (needs E, then E → E′).
+6. **Fresh pkg install of D:** the `postinstall` path (retire an old daemon, chown the app, open the tray) has only been reproduced by hand, not run from the package.
+7. **Sleep:** with the display asleep and the screen locked, another machine can still reach `http://<mac>:8081/health`.
 
 #### Phase 5 — Done
 
@@ -519,17 +559,19 @@ When every row in the test plan passes, set status → `done`. Restore Docker / 
 
 | Check | Assert | Result |
 |---|---|---|
-| A → B tray icon | New mark after Quit + reopen | |
-| A → B tray menu | **Upgrade probe** present | |
-| A → B wrapper | After service restart, log `upgrade-probe-wrapper-B`; `bin` digest = `versions/<B>/rust-reg-run` | |
-| A → B server | Log `upgrade-probe-server-B` | |
-| A → B frontend | `/testpath` shows probe B | |
-| B → C tray | Probe item gone; icon ≠ B | |
-| B → C wrapper / server / frontend | Probe C (or `/testpath` gone) | |
-| Matching digest skip | Unchanged component not downloaded; its marker stays | |
+| A → B tray icon | New mark after Quit + reopen | pass |
+| A → B tray menu | **Upgrade probe** present | pass |
+| A → B wrapper | After service restart, log `upgrade-probe-wrapper-B`; `bin` digest = `versions/<B>/rust-reg-run` | pass |
+| A → B server | Log `upgrade-probe-server-B` | pass |
+| A → B frontend | `/testpath` shows probe B | pass |
+| B → C tray | Probe item gone; icon ≠ B | icon pass; probe item not checked |
+| B → C wrapper / server / frontend | Probe C (or `/testpath` gone) | pass |
+| C → D without root | Update as the user, no password; all three parts replaced | pass |
+| Matching digest skip | Unchanged component not downloaded; its marker stays | open |
 | Busy port at tray start | Error “port N is in use by another program; the server did not start”; not adopted | pass (fixed dev tray vs Docker on 8080) |
 | **Port…** to a free port | Server moves; other program on the old port untouched | pass (8080 → 8081, Docker kept 8080) |
-| **Port…** with installed service (B tray) | Admin prompt; `data/port` written; service on new port | |
+| **Port…** with installed service (B tray) | Admin prompt; `data/port` written; service on new port | superseded (no service since D) |
+| **Port…** / Quit in the no-root model | No prompt; server moves / stops | open |
 
 ### Done when
 
