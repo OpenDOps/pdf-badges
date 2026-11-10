@@ -37,6 +37,8 @@ pub struct Session {
 pub struct Launch {
     pub program: PathBuf,
     pub args: Vec<String>,
+    /// Install root passed as `--prefix` (the wrapper's data, versions, updates).
+    pub prefix: Option<PathBuf>,
 }
 
 impl Session {
@@ -45,16 +47,8 @@ impl Session {
             Some(file) => file,
             None => return Ok(Opened::AlreadyRunning),
         };
-        // An installed service owns the port (`<prefix>/data/port`); otherwise
-        // the last port this desk started on.
-        let port = match installed_service_prefix() {
-            Some(prefix) => {
-                let port = service_port(&prefix);
-                desk_log(format!("service at {} listens on {port}", prefix.display()));
-                port
-            }
-            None => remembered_port(),
-        };
+        // The last port this desk started on (the server runs as this user).
+        let port = remembered_port();
         let mut session = Session {
             child: None,
             address: Arc::new(Mutex::new(String::new())),
@@ -83,23 +77,18 @@ impl Session {
 
     /// Stop the current server, if this desk started one, and start on `port`.
     ///
-    /// With an installed service, moves the service instead (admin prompt):
-    /// writes `<prefix>/data/port` and restarts it. May block for a few
-    /// seconds while the old process exits — Linux Port apply runs
-    /// [`restart_switch`] on a worker thread instead.
+    /// May block for a few seconds while the old process exits — Linux Port
+    /// apply runs [`restart_switch`] on a worker thread instead.
     ///
     /// The remembered port changes only when the new port started.
+    #[cfg_attr(target_os = "linux", allow(dead_code))]
     pub fn restart(&mut self, port: u16) {
         desk_log(format!("restart {port} (was {})", self.port));
-        if let Some(prefix) = installed_service_prefix() {
-            self.move_service(&prefix, port);
-        } else {
-            self.stop_owned();
-            self.port = port;
-            self.begin();
-            if self.failure.is_none() {
-                remember_port(port);
-            }
+        self.stop_owned();
+        self.port = port;
+        self.begin();
+        if self.failure.is_none() {
+            remember_port(port);
         }
         desk_log(format!(
             "restart done → {} failure={:?}",
@@ -148,32 +137,6 @@ impl Session {
         *self.address.lock().expect("address") = address;
     }
 
-    /// Move the installed service to `port`. A cancelled prompt or a refused
-    /// port leaves the service (and this desk) on the old port.
-    fn move_service(&mut self, prefix: &Path, port: u16) {
-        if let Some(child) = self.child.take() {
-            stop_child(child);
-        }
-        let old = self.port;
-        match switch_service_port(prefix, port) {
-            Ok(()) => {
-                self.port = port;
-                self.failure = None;
-                *self.address.lock().expect("address") = format!("localhost:{port}");
-                remember_port(port);
-            }
-            Err(ServiceSwitch::Unchanged(message)) => {
-                self.port = old;
-                self.begin();
-                self.failure = Some(message);
-            }
-            Err(ServiceSwitch::NotListening(message)) => {
-                self.port = port;
-                self.fail(message);
-            }
-        }
-    }
-
     /// Shared label for the Linux tray menu (ksni rebuilds from this mutex).
     #[cfg(target_os = "linux")]
     pub fn address(&self) -> &Arc<Mutex<String>> {
@@ -185,14 +148,9 @@ impl Session {
     }
 
     /// Quit path: stop the server this desk started (and leftover copies of it).
-    /// An installed service keeps running: it is not this desk's to stop, and
-    /// stopping it would need an admin prompt.
+    /// The server runs as this user, so no admin rights are needed.
     pub fn stop(&mut self) {
         desk_log(format!("stop begin port={}", self.port));
-        if self.child.is_none() && installed_service_prefix().is_some() {
-            desk_log("stop leaves the installed service running".to_string());
-            return;
-        }
         self.stop_owned();
         #[cfg(target_os = "linux")]
         if let Some(old) = self.inflight_old_port.take() {
@@ -234,13 +192,6 @@ impl Session {
             let shown = format!("localhost:{}", self.port);
             desk_log(format!("begin adopt existing {shown}"));
             *self.address.lock().expect("address") = shown;
-            return;
-        }
-        // The installed service owns this machine's server. A desk copy would run
-        // as this user against root-owned files (credentials, versions) and fail.
-        if installed_service_prefix().is_some() {
-            desk_log(format!("begin service not listening on {}", self.port));
-            self.fail(service_down(self.port));
             return;
         }
         desk_log(format!("begin spawn port={}", self.port));
@@ -328,58 +279,187 @@ pub(crate) fn replacement_port(current: u16, text: &str) -> Option<u16> {
 }
 
 pub(crate) fn launch_for(exe: &Path) -> Launch {
-    launch_for_in(exe, &support_prefix())
+    launch_for_in(exe, &support_prefix(), &system_prefix())
 }
 
-fn launch_for_in(exe: &Path, support: &Path) -> Launch {
+/// The server always runs as this user from `support` (no root, no prompts).
+/// An installed copy (`system`, the app's bundled `Contents/prefix`, or the
+/// `bin/`'s parent) only seeds it: first run copies it, a newer installed
+/// version refreshes `bin/` and `versions/`, and `data/` is never touched.
+fn launch_for_in(exe: &Path, support: &Path, system: &Path) -> Launch {
     let (run_name, server_name) = binary_names(exe);
-    if let Some(template) = bundled_template(exe, run_name) {
-        let prefix = materialize(&template, support).unwrap_or(template);
-        return Launch {
-            program: prefix.join("bin").join(run_name),
-            args: prefix_args(&prefix),
-        };
-    }
-    if app_bundle(exe) {
-        // Packaged installs put the tree in /Library/rust-reg. A drag-installed
-        // thin app without that directory uses Application Support when a
-        // previous run or DMG already materialized one there.
-        let library = PathBuf::from("/Library/rust-reg");
-        if library.join("bin").join(run_name).is_file() {
-            return Launch {
-                program: library.join("bin").join(run_name),
-                args: prefix_args(&library),
-            };
-        }
-        if support.join("bin").join(run_name).is_file() {
-            return Launch {
-                program: support.join("bin").join(run_name),
-                args: prefix_args(support),
-            };
-        }
-        return Launch {
-            program: library.join("bin").join(run_name),
-            args: prefix_args(&library),
-        };
-    }
-    if let Some(dir) = exe.parent() {
-        if dir.file_name().and_then(|name| name.to_str()) == Some("bin") {
-            if let Some(prefix) = dir.parent() {
-                return Launch {
-                    program: dir.join(run_name),
-                    args: prefix_args(prefix),
-                };
+    let template = bundled_template(exe, run_name)
+        .or_else(|| app_bundle(exe).then(|| system.to_path_buf()))
+        .or_else(|| {
+            let dir = exe.parent()?;
+            (dir.file_name().and_then(|name| name.to_str()) == Some("bin"))
+                .then(|| dir.parent().map(Path::to_path_buf))
+                .flatten()
+        });
+    if let Some(template) = template {
+        if is_tree(&template, run_name) {
+            match seed_user_prefix(&template, support, run_name) {
+                Ok(()) => return run_from(support, run_name),
+                Err(err) => desk_log(format!(
+                    "could not copy {} to {}: {err}",
+                    template.display(),
+                    support.display()
+                )),
             }
         }
+        if support.join("bin").join(run_name).is_file() {
+            return run_from(support, run_name);
+        }
+        return run_from(&template, run_name);
+    }
+    if let Some(dir) = exe.parent() {
         return Launch {
             program: dir.join(server_name),
             args: Vec::new(),
+            prefix: None,
         };
     }
     Launch {
         program: PathBuf::from(server_name),
         args: Vec::new(),
+        prefix: None,
     }
+}
+
+fn run_from(prefix: &Path, run_name: &str) -> Launch {
+    Launch {
+        program: prefix.join("bin").join(run_name),
+        args: prefix_args(prefix),
+        prefix: Some(prefix.to_path_buf()),
+    }
+}
+
+/// An install tree the wrapper can start: `bin/rust-reg-run` and `updates/live`.
+fn is_tree(prefix: &Path, run_name: &str) -> bool {
+    prefix.join("bin").join(run_name).is_file() && prefix.join("updates/live").is_file()
+}
+
+fn read_live(prefix: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(prefix.join("updates/live")).ok()?;
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_string())
+}
+
+/// Make `support` a runnable copy of `template`, keeping `support/data/`.
+fn seed_user_prefix(template: &Path, support: &Path, run_name: &str) -> io::Result<()> {
+    let installed = read_live(template)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "updates/live"))?;
+    let current = support
+        .join("bin")
+        .join(run_name)
+        .is_file()
+        .then(|| read_live(support))
+        .flatten();
+    match current {
+        None => {
+            desk_log(format!("seed {} from {}", support.display(), template.display()));
+            copy_tree_except(template, support, &["data"])?;
+        }
+        Some(current) if version_newer(&installed, &current) => {
+            desk_log(format!("refresh {} {current} -> {installed}", support.display()));
+            let from = template.join("versions").join(&installed);
+            let to = support.join("versions").join(&installed);
+            if !to.join(server_binary_name(run_name)).is_file() {
+                copy_tree(&from, &to)?;
+            }
+            let bin = support.join("bin");
+            std::fs::create_dir_all(&bin)?;
+            replace_file(&template.join("bin").join(run_name), &bin.join(run_name))?;
+            std::fs::create_dir_all(support.join("updates"))?;
+            std::fs::write(support.join("updates/live"), format!("{installed}\n"))?;
+        }
+        Some(_) => return Ok(()),
+    }
+    // A fresh copy starts clean: no half-finished upgrade from another tree.
+    let _ = std::fs::remove_file(support.join("updates/state.yml"));
+    Ok(())
+}
+
+fn server_binary_name(run_name: &str) -> &'static str {
+    if run_name.ends_with(".exe") {
+        "rust-reg.exe"
+    } else {
+        "rust-reg"
+    }
+}
+
+/// Copy through a temp name and rename, so a running copy keeps its inode.
+fn replace_file(from: &Path, to: &Path) -> io::Result<()> {
+    let tmp = to.with_extension(format!("new-{}", std::process::id()));
+    std::fs::copy(from, &tmp)?;
+    std::fs::rename(&tmp, to)
+}
+
+/// `a` is a newer `MAJOR.MINOR.PATCH[-pre.N]` than `b`. Unparsable → false.
+fn version_newer(a: &str, b: &str) -> bool {
+    fn parse(text: &str) -> Option<(u64, u64, u64, Option<Vec<String>>)> {
+        let (core, pre) = match text.split_once('-') {
+            Some((core, pre)) => (core, Some(pre.split('.').map(str::to_string).collect())),
+            None => (text, None),
+        };
+        let mut parts = core.split('.').map(|part| part.parse::<u64>().ok());
+        let version = (parts.next()??, parts.next()??, parts.next()??, pre);
+        parts.next().is_none().then_some(version)
+    }
+    fn pre_cmp(a: &[String], b: &[String]) -> std::cmp::Ordering {
+        for (x, y) in a.iter().zip(b) {
+            let order = match (x.parse::<u64>(), y.parse::<u64>()) {
+                (Ok(x), Ok(y)) => x.cmp(&y),
+                _ => x.cmp(y),
+            };
+            if order.is_ne() {
+                return order;
+            }
+        }
+        a.len().cmp(&b.len())
+    }
+    let (Some(a), Some(b)) = (parse(a), parse(b)) else {
+        return false;
+    };
+    let core = (a.0, a.1, a.2).cmp(&(b.0, b.1, b.2));
+    if core.is_ne() {
+        return core.is_gt();
+    }
+    match (&a.3, &b.3) {
+        (None, Some(_)) => true,
+        (Some(_), None) | (None, None) => false,
+        (Some(x), Some(y)) => pre_cmp(x, y).is_gt(),
+    }
+}
+
+/// Where a package puts the read-only install copy on this OS.
+fn system_prefix() -> PathBuf {
+    #[cfg(target_os = "macos")]
+    return PathBuf::from("/Library/rust-reg");
+    #[cfg(windows)]
+    return PathBuf::from(r"C:\Program Files\rust-reg");
+    #[cfg(not(any(target_os = "macos", windows)))]
+    PathBuf::from("/opt/rust-reg")
+}
+
+/// macOS: no idle system sleep while the server runs (display may still sleep).
+/// `caffeinate -w` ends with the server; no admin rights are needed.
+fn keep_awake_while(pid: u32) {
+    #[cfg(target_os = "macos")]
+    {
+        match Command::new("caffeinate")
+            .args(["-i", "-w", &pid.to_string()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            Ok(_) => desk_log(format!("keep awake while pid {pid} runs")),
+            Err(err) => desk_log(format!("caffeinate: {err}")),
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = pid;
 }
 
 pub(crate) fn desk_address(line: &str) -> Option<String> {
@@ -726,6 +806,14 @@ fn spawn_server(port: u16, address: Arc<Mutex<String>>) -> io::Result<Child> {
             format!("missing {}", launch.program.display()),
         ));
     }
+    // The wrapper reads `<prefix>/data/port` first; keep it on the chosen port.
+    if let Some(prefix) = &launch.prefix {
+        let data = prefix.join("data");
+        let _ = std::fs::create_dir_all(&data);
+        if let Err(err) = std::fs::write(data.join("port"), format!("{port}\n")) {
+            desk_log(format!("could not write {}/port: {err}", data.display()));
+        }
+    }
     let mut command = Command::new(&launch.program);
     command
         .args(&launch.args)
@@ -736,6 +824,7 @@ fn spawn_server(port: u16, address: Arc<Mutex<String>>) -> io::Result<Child> {
     #[cfg(unix)]
     command.process_group(0);
     let mut child = command.spawn()?;
+    keep_awake_while(child.id());
     let log = Arc::new(Mutex::new(String::new()));
     if let Some(stderr) = child.stderr.take() {
         let address = Arc::clone(&address);
@@ -911,20 +1000,6 @@ pub fn restart_switch(
         stop_child(child);
     } else {
         desk_log("restart_switch no old child");
-    }
-    if let Some(prefix) = installed_service_prefix() {
-        return match switch_service_port(&prefix, new_port) {
-            Ok(()) => {
-                let shown = format!("localhost:{new_port}");
-                *address.lock().expect("address") = shown.clone();
-                (None, shown, None)
-            }
-            Err(ServiceSwitch::Unchanged(message) | ServiceSwitch::NotListening(message)) => {
-                let shown = format!("failed on port {new_port}");
-                *address.lock().expect("address") = shown.clone();
-                (None, shown, Some(message))
-            }
-        };
     }
     desk_log(format!(
         "restart_switch stop_port {old_port} (open={})",
@@ -1256,210 +1331,6 @@ fn port_open(port: u16) -> bool {
     TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok()
 }
 
-pub(crate) enum ServiceSwitch {
-    /// The service was not touched (port busy, prompt cancelled, command failed).
-    Unchanged(String),
-    /// The port file was written but rust-reg did not answer on the new port.
-    NotListening(String),
-}
-
-const SERVICE_LABEL: &str = "com.opendops.rust-reg";
-
-/// Prefix of the installed system service (launchd / systemd / Windows service),
-/// when this machine has one.
-#[allow(unreachable_code)]
-pub(crate) fn installed_service_prefix() -> Option<PathBuf> {
-    // Unit tests must never reach the real service (it opens an admin prompt).
-    #[cfg(test)]
-    return None;
-    #[cfg(target_os = "macos")]
-    {
-        let prefix = PathBuf::from("/Library/rust-reg");
-        let plist = PathBuf::from(format!("/Library/LaunchDaemons/{SERVICE_LABEL}.plist"));
-        return (plist.is_file() && prefix.join("bin/rust-reg-run").is_file()).then_some(prefix);
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let prefix = PathBuf::from("/opt/rust-reg");
-        let unit = ["/lib/systemd/system", "/etc/systemd/system", "/usr/lib/systemd/system"]
-            .iter()
-            .any(|dir| Path::new(dir).join("rust-reg.service").is_file());
-        return (unit && prefix.join("bin/rust-reg-run").is_file()).then_some(prefix);
-    }
-    #[cfg(windows)]
-    {
-        let prefix = PathBuf::from(r"C:\Program Files\rust-reg");
-        let service = Command::new("sc.exe")
-            .args(["query", "rust-reg"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false);
-        return (service && prefix.join(r"bin\rust-reg-run.exe").is_file()).then_some(prefix);
-    }
-    #[allow(unreachable_code)]
-    None
-}
-
-/// The installed service is not answering on `port`.
-pub(crate) fn service_down(port: u16) -> String {
-    format!(
-        "the rust-reg service is not running on port {port}. \
-         It starts with the computer; restart the computer or reinstall rust-reg."
-    )
-}
-
-/// Port the installed service listens on: `<prefix>/data/port`, else 8080.
-pub(crate) fn service_port(prefix: &Path) -> u16 {
-    read_saved_port(&prefix.join("data").join("port")).unwrap_or(DEFAULT_PORT)
-}
-
-/// Write `<prefix>/data/port`, restart the service (admin prompt), and wait for
-/// rust-reg to answer on `port`.
-fn switch_service_port(prefix: &Path, port: u16) -> Result<(), ServiceSwitch> {
-    if port_open(port) && !rust_reg_listening(port) {
-        return Err(ServiceSwitch::Unchanged(port_taken(port)));
-    }
-    desk_log(format!("service port → {port} at {}", prefix.display()));
-    // The installer makes `data/port` writable by desktop users; the service's
-    // wrapper sees the change and restarts the server on the new port. No prompt.
-    // Older installs (root-only file) fall back to the elevated restart.
-    let written = write_port_file(prefix, port);
-    if let Err(err) = &written {
-        desk_log(format!("port file not writable ({err}); asking for admin rights"));
-    }
-    if let Err(err) = written.or_else(|_| set_service_port(prefix, port)) {
-        desk_log(format!("service port not changed: {err}"));
-        return Err(ServiceSwitch::Unchanged(format!(
-            "port not changed ({err}); the service stays on its previous port."
-        )));
-    }
-    let deadline = std::time::Instant::now() + Duration::from_secs(20);
-    while std::time::Instant::now() < deadline {
-        if rust_reg_listening(port) {
-            desk_log(format!("service listening on {port}"));
-            return Ok(());
-        }
-        thread::sleep(Duration::from_millis(250));
-    }
-    Err(ServiceSwitch::NotListening(format!(
-        "the service did not start on port {port}. Choose another port."
-    )))
-}
-
-/// Overwrite `<prefix>/data/port` in place (the directory itself is root-only).
-pub(crate) fn write_port_file(prefix: &Path, port: u16) -> io::Result<()> {
-    let path = prefix.join("data").join("port");
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .truncate(true)
-        .open(&path)?;
-    file.write_all(format!("{port}\n").as_bytes())?;
-    file.sync_all()
-}
-
-fn set_service_port(prefix: &Path, port: u16) -> io::Result<()> {
-    #[cfg(target_os = "macos")]
-    let status = Command::new("osascript")
-        .args(["-e", &mac_service_port_script(prefix, port)])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()?;
-    #[cfg(target_os = "linux")]
-    let status = {
-        let script = linux_service_port_script(prefix, port);
-        Command::new("timeout")
-            .args(["120", "pkexec", "sh", "-c", &script])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .or_else(|_| {
-                Command::new("pkexec")
-                    .args(["sh", "-c", &script])
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status()
-            })?
-    };
-    #[cfg(windows)]
-    let status = Command::new("powershell.exe")
-        .args(["-NoProfile", "-Command", &windows_service_port_script(prefix, port)])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()?;
-    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
-    let status: ExitStatus = {
-        let _ = (prefix, port);
-        return Err(io::Error::new(io::ErrorKind::Unsupported, "no service"));
-    };
-    if status.success() {
-        Ok(())
-    } else {
-        Err(io::Error::new(io::ErrorKind::Other, "cancelled or refused"))
-    }
-}
-
-/// `osascript -e` source: write the port file and restart the launchd daemon as admin.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-pub(crate) fn mac_service_port_script(prefix: &Path, port: u16) -> String {
-    let p = prefix.display();
-    let plist = format!("/Library/LaunchDaemons/{SERVICE_LABEL}.plist");
-    let shell = format!(
-        "mkdir -p '{p}/data' && echo {port} > '{p}/data/port' && \
-         (launchctl kickstart -k system/{SERVICE_LABEL} || launchctl bootstrap system {plist})"
-    );
-    format!("do shell script \"{shell}\" with administrator privileges")
-}
-
-/// `pkexec sh -c` body: write the port file and restart the systemd unit.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-pub(crate) fn linux_service_port_script(prefix: &Path, port: u16) -> String {
-    let p = prefix.display();
-    format!(
-        "mkdir -p '{p}/data' && echo {port} > '{p}/data/port' && systemctl restart rust-reg.service"
-    )
-}
-
-/// `powershell -Command` body: elevate (UAC), write the port file, restart the service.
-/// The elevated part goes through `-EncodedCommand` so paths need no nested quoting.
-#[cfg_attr(not(windows), allow(dead_code))]
-pub(crate) fn windows_service_port_script(prefix: &Path, port: u16) -> String {
-    let p = prefix.display();
-    let inner = format!(
-        "New-Item -ItemType Directory -Force -Path '{p}\\data' | Out-Null; \
-         Set-Content -Path '{p}\\data\\port' -Value '{port}'; \
-         Restart-Service -Name rust-reg -Force"
-    );
-    let encoded = base64_utf16le(&inner);
-    format!(
-        "$p = Start-Process powershell.exe -Verb RunAs -Wait -PassThru -WindowStyle Hidden \
-         -ArgumentList '-NoProfile','-EncodedCommand','{encoded}'; exit $p.ExitCode"
-    )
-}
-
-/// Base64 of UTF-16LE text (what `powershell -EncodedCommand` expects).
-#[cfg_attr(not(windows), allow(dead_code))]
-pub(crate) fn base64_utf16le(text: &str) -> String {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let bytes: Vec<u8> = text.encode_utf16().flat_map(u16::to_le_bytes).collect();
-    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let n = (u32::from(chunk[0]) << 16)
-            | (u32::from(*chunk.get(1).unwrap_or(&0)) << 8)
-            | u32::from(*chunk.get(2).unwrap_or(&0));
-        for i in 0..4 {
-            if i <= chunk.len() {
-                out.push(TABLE[(n >> (18 - 6 * i) & 63) as usize] as char);
-            } else {
-                out.push('=');
-            }
-        }
-    }
-    out
-}
-
 fn port_taken(port: u16) -> String {
     format!("port {port} is in use by another program; the server did not start. Choose another port.")
 }
@@ -1551,17 +1422,40 @@ fn support_prefix() -> PathBuf {
             .unwrap_or_else(std::env::temp_dir);
         return home.join("Library/Application Support/rust-reg");
     }
-    #[cfg(not(target_os = "macos"))]
-    std::env::temp_dir().join("rust-reg")
+    #[cfg(windows)]
+    {
+        if let Some(base) = std::env::var_os("LOCALAPPDATA") {
+            return PathBuf::from(base).join("rust-reg");
+        }
+        return std::env::temp_dir().join("rust-reg");
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .filter(|dir| !dir.as_os_str().is_empty())
+            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))
+            .unwrap_or_else(std::env::temp_dir)
+            .join("rust-reg")
+    }
 }
 
-fn materialize(template: &Path, support: &Path) -> std::io::Result<PathBuf> {
-    let (run_name, _) = binary_names(Path::new("reg-server"));
-    if support.join("updates/live").is_file() && support.join("bin").join(run_name).is_file() {
-        return Ok(support.to_path_buf());
+fn copy_tree_except(from: &Path, to: &Path, skip: &[&str]) -> std::io::Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if skip.iter().any(|skip| name.to_str() == Some(*skip)) {
+            continue;
+        }
+        let dest = to.join(&name);
+        if entry.file_type()?.is_dir() {
+            copy_tree(&entry.path(), &dest)?;
+        } else {
+            std::fs::copy(entry.path(), &dest)?;
+        }
     }
-    copy_tree(template, support)?;
-    Ok(support.to_path_buf())
+    Ok(())
 }
 
 fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
@@ -1654,77 +1548,6 @@ mod tests {
         assert_eq!(remembered_port(), 8181);
         std::env::remove_var("RUST_REG_DESK_STATE");
         let _ = std::fs::remove_dir_all(&state);
-    }
-
-    #[test]
-    fn the_service_port_comes_from_the_prefix() {
-        let prefix = temp_dir("svc");
-        assert_eq!(service_port(&prefix), DEFAULT_PORT);
-        std::fs::create_dir_all(prefix.join("data")).unwrap();
-        std::fs::write(prefix.join("data/port"), "8081\n").unwrap();
-        assert_eq!(service_port(&prefix), 8081);
-        std::fs::write(prefix.join("data/port"), "nope").unwrap();
-        assert_eq!(service_port(&prefix), DEFAULT_PORT);
-        let _ = std::fs::remove_dir_all(&prefix);
-    }
-
-    #[test]
-    fn the_port_file_is_rewritten_in_place_without_a_prompt() {
-        let prefix = temp_dir("svc-write");
-        // No file yet (old install, or no service): nothing is created.
-        assert!(write_port_file(&prefix, 8082).is_err());
-        std::fs::create_dir_all(prefix.join("data")).unwrap();
-        std::fs::write(prefix.join("data/port"), "8081\n").unwrap();
-        write_port_file(&prefix, 8082).unwrap();
-        assert_eq!(std::fs::read_to_string(prefix.join("data/port")).unwrap(), "8082\n");
-        assert_eq!(service_port(&prefix), 8082);
-        let _ = std::fs::remove_dir_all(&prefix);
-    }
-
-    #[test]
-    fn service_down_says_the_service_is_not_running() {
-        let message = service_down(8081);
-        assert!(message.contains("service is not running on port 8081"));
-    }
-
-    #[test]
-    fn mac_service_script_writes_the_port_and_restarts_launchd() {
-        let script = mac_service_port_script(Path::new("/Library/rust-reg"), 8081);
-        assert!(script.starts_with("do shell script \""));
-        assert!(script.ends_with("\" with administrator privileges"));
-        assert!(script.contains("echo 8081 > '/Library/rust-reg/data/port'"));
-        assert!(script.contains("launchctl kickstart -k system/com.opendops.rust-reg"));
-        assert!(script.contains("launchctl bootstrap system /Library/LaunchDaemons/com.opendops.rust-reg.plist"));
-        // Only the outer AppleScript string quotes.
-        assert_eq!(script.matches('"').count(), 2);
-    }
-
-    #[test]
-    fn linux_service_script_writes_the_port_and_restarts_systemd() {
-        let script = linux_service_port_script(Path::new("/opt/rust-reg"), 8081);
-        assert!(script.contains("mkdir -p '/opt/rust-reg/data'"));
-        assert!(script.contains("echo 8081 > '/opt/rust-reg/data/port'"));
-        assert!(script.ends_with("systemctl restart rust-reg.service"));
-    }
-
-    #[test]
-    fn windows_service_script_elevates_an_encoded_command() {
-        let script = windows_service_port_script(Path::new(r"C:\Program Files\rust-reg"), 8081);
-        assert!(script.contains("-Verb RunAs"));
-        assert!(script.contains("exit $p.ExitCode"));
-        let inner = "New-Item -ItemType Directory -Force -Path 'C:\\Program Files\\rust-reg\\data' | Out-Null; \
-                     Set-Content -Path 'C:\\Program Files\\rust-reg\\data\\port' -Value '8081'; \
-                     Restart-Service -Name rust-reg -Force";
-        assert!(script.contains(&base64_utf16le(inner)));
-    }
-
-    #[test]
-    fn base64_utf16le_matches_powershell() {
-        // [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes(...))
-        assert_eq!(base64_utf16le(""), "");
-        assert_eq!(base64_utf16le("a"), "YQA=");
-        assert_eq!(base64_utf16le("dir"), "ZABpAHIA");
-        assert_eq!(base64_utf16le("ab"), "YQBiAA==");
     }
 
     #[test]
@@ -1909,7 +1732,11 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn installed_bin_starts_the_supervisor() {
-        let launch = launch_for(Path::new("/opt/rust-reg/bin/rust-reg-desk"));
+        let launch = launch_for_in(
+            Path::new("/opt/rust-reg/bin/rust-reg-desk"),
+            &scratch("no-support"),
+            Path::new("/nonexistent"),
+        );
         assert_eq!(launch.program, Path::new("/opt/rust-reg/bin/rust-reg-run"));
         assert_eq!(
             launch.args,
@@ -1919,7 +1746,11 @@ mod tests {
 
     #[test]
     fn windows_bin_uses_exe_names() {
-        let launch = launch_for(Path::new("/Program Files/rust-reg/bin/rust-reg-desk.exe"));
+        let launch = launch_for_in(
+            Path::new("/Program Files/rust-reg/bin/rust-reg-desk.exe"),
+            &scratch("no-support"),
+            Path::new("/nonexistent"),
+        );
         assert_eq!(
             launch.program,
             Path::new("/Program Files/rust-reg/bin/rust-reg-run.exe")
@@ -1933,75 +1764,132 @@ mod tests {
         );
     }
 
+    fn scratch(tag: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "reg-server-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        root
+    }
+
+    /// An install tree at `prefix` for `version`, with data that must not be copied.
+    fn plant_tree(prefix: &Path, version: &str, run: &[u8]) {
+        let (run_name, _) = binary_names(Path::new("reg-server"));
+        std::fs::create_dir_all(prefix.join("bin")).unwrap();
+        std::fs::create_dir_all(prefix.join("updates")).unwrap();
+        std::fs::create_dir_all(prefix.join("versions").join(version)).unwrap();
+        std::fs::create_dir_all(prefix.join("data")).unwrap();
+        std::fs::write(prefix.join("bin").join(run_name), run).unwrap();
+        std::fs::write(prefix.join("updates/live"), format!("{version}\n")).unwrap();
+        std::fs::write(
+            prefix.join("versions").join(version).join(server_binary_name(run_name)),
+            version.as_bytes(),
+        )
+        .unwrap();
+        std::fs::write(prefix.join("data/credentials.yml"), b"root-only").unwrap();
+    }
+
     #[test]
     fn mac_app_copies_the_bundled_prefix() {
-        let root = std::env::temp_dir().join(format!("reg-server-app-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = scratch("app");
         let exe = root.join("reg-server.app/Contents/MacOS/reg-server");
         let (run_name, _) = binary_names(&exe);
-        let template = root.join("reg-server.app/Contents/prefix");
         std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
-        std::fs::create_dir_all(template.join("bin")).unwrap();
-        std::fs::create_dir_all(template.join("updates")).unwrap();
         std::fs::write(&exe, b"tray").unwrap();
-        std::fs::write(template.join("bin").join(run_name), b"run").unwrap();
-        std::fs::write(template.join("updates/live"), b"2.0.0\n").unwrap();
+        plant_tree(&root.join("reg-server.app/Contents/prefix"), "2.0.0", b"run");
         let support = root.join("support");
-        let launch = launch_for_in(&exe, &support);
+        let launch = launch_for_in(&exe, &support, &root.join("no-system"));
         assert_eq!(launch.program, support.join("bin").join(run_name));
-        assert_eq!(
-            launch.args,
-            vec!["--prefix".to_string(), support.display().to_string()]
-        );
-        assert_eq!(
-            std::fs::read(support.join("updates/live")).unwrap(),
-            b"2.0.0\n"
-        );
+        assert_eq!(launch.prefix.as_deref(), Some(support.as_path()));
+        assert_eq!(std::fs::read(support.join("updates/live")).unwrap(), b"2.0.0\n");
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
-    fn mac_app_uses_the_library_prefix() {
-        let support = std::env::temp_dir().join(format!("reg-server-empty-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&support);
-        let launch = launch_for_in(
-            Path::new("/Applications/reg-server.app/Contents/MacOS/reg-server"),
-            &support,
-        );
-        assert_eq!(
-            launch.program,
-            Path::new("/Library/rust-reg/bin/rust-reg-run")
-        );
-        assert_eq!(
-            launch.args,
-            vec!["--prefix".to_string(), "/Library/rust-reg".to_string()]
-        );
-    }
-
-    #[test]
-    fn mac_app_uses_application_support_when_library_is_missing() {
-        // launch_for_in prefers a real /Library/rust-reg install on this machine.
-        if Path::new("/Library/rust-reg/bin/rust-reg-run").is_file() {
-            eprintln!("skip: /Library/rust-reg is installed here");
-            return;
-        }
-        let root = std::env::temp_dir().join(format!("reg-server-support-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+    fn the_installed_copy_seeds_a_user_prefix_without_its_data() {
+        let root = scratch("seed");
+        let system = root.join("Library/rust-reg");
+        plant_tree(&system, "2.0.0-alpha.11", b"run-c");
         let support = root.join("support");
         let (run_name, _) = binary_names(Path::new("reg-server"));
-        std::fs::create_dir_all(support.join("bin")).unwrap();
-        std::fs::write(support.join("bin").join(run_name), b"run").unwrap();
         let launch = launch_for_in(
             Path::new("/Applications/reg-server.app/Contents/MacOS/reg-server"),
             &support,
+            &system,
         );
         assert_eq!(launch.program, support.join("bin").join(run_name));
         assert_eq!(
             launch.args,
             vec!["--prefix".to_string(), support.display().to_string()]
         );
+        assert_eq!(std::fs::read(support.join("bin").join(run_name)).unwrap(), b"run-c");
+        assert!(support.join("versions/2.0.0-alpha.11").is_dir());
+        // Root's data (credentials) is not this user's to copy.
+        assert!(!support.join("data").exists());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_newer_install_refreshes_the_user_prefix_and_keeps_its_data() {
+        let root = scratch("refresh");
+        let system = root.join("system");
+        let support = root.join("support");
+        plant_tree(&support, "2.0.0-alpha.2", b"run-old");
+        std::fs::write(support.join("data/credentials.yml"), b"mine").unwrap();
+        std::fs::write(support.join("updates/state.yml"), b"phase: current\n").unwrap();
+        plant_tree(&system, "2.0.0-alpha.11", b"run-new");
+        let (run_name, _) = binary_names(Path::new("reg-server"));
+        launch_for_in(
+            Path::new("/Applications/reg-server.app/Contents/MacOS/reg-server"),
+            &support,
+            &system,
+        );
+        assert_eq!(std::fs::read(support.join("bin").join(run_name)).unwrap(), b"run-new");
+        assert_eq!(
+            std::fs::read(support.join("updates/live")).unwrap(),
+            b"2.0.0-alpha.11\n"
+        );
+        assert!(support.join("versions/2.0.0-alpha.11").is_dir());
+        assert!(support.join("versions/2.0.0-alpha.2").is_dir());
+        assert_eq!(std::fs::read(support.join("data/credentials.yml")).unwrap(), b"mine");
+        assert!(!support.join("updates/state.yml").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_self_updated_user_prefix_is_not_rolled_back() {
+        let root = scratch("keep");
+        let system = root.join("system");
+        let support = root.join("support");
+        plant_tree(&system, "2.0.0-alpha.9", b"run-a");
+        plant_tree(&support, "2.0.0-alpha.11", b"run-c");
+        let (run_name, _) = binary_names(Path::new("reg-server"));
+        launch_for_in(
+            Path::new("/Applications/reg-server.app/Contents/MacOS/reg-server"),
+            &support,
+            &system,
+        );
+        assert_eq!(std::fs::read(support.join("bin").join(run_name)).unwrap(), b"run-c");
+        assert_eq!(
+            std::fs::read(support.join("updates/live")).unwrap(),
+            b"2.0.0-alpha.11\n"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn versions_compare_like_semver() {
+        assert!(version_newer("2.0.0-alpha.11", "2.0.0-alpha.9"));
+        assert!(version_newer("2.0.0", "2.0.0-rc.1"));
+        assert!(version_newer("2.1.0-alpha.1", "2.0.9"));
+        assert!(!version_newer("2.0.0-alpha.9", "2.0.0-alpha.11"));
+        assert!(!version_newer("2.0.0", "2.0.0"));
+        assert!(!version_newer("nope", "2.0.0"));
     }
 
     #[test]

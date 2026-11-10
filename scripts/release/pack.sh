@@ -238,8 +238,9 @@ case "$os" in
   macos)
     prefix="$work/root/Library/rust-reg"
     version_dir="$prefix/versions/$version"
-    mkdir -p "$prefix/bin" "$(dirname "$work/root/Library/LaunchDaemons")"
-    mkdir -p "$work/root/Library/LaunchDaemons"
+    # /Library/rust-reg is a read-only template: the tray copies it to
+    # ~/Library/Application Support/rust-reg and runs the server as the user.
+    mkdir -p "$prefix/bin"
     if [[ "$with_desk" == 1 ]]; then
       cp "$release_dir/$desk_name" "$prefix/bin/$desk_name"
       chmod 755 "$prefix/bin/$desk_name"
@@ -285,26 +286,28 @@ EOF
     # Supervisor reads updates/live to choose versions/<live>/rust-reg (same as the deb).
     mkdir -p "$prefix/updates"
     printf '%s\n' "$version" > "$prefix/updates/live"
-    cat > "$work/root/Library/LaunchDaemons/com.opendops.rust-reg.plist" <<'EOF'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key>
-  <string>com.opendops.rust-reg</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>/Library/rust-reg/bin/rust-reg-run</string>
-    <string>--prefix</string>
-    <string>/Library/rust-reg</string>
-  </array>
-  <key>KeepAlive</key>
-  <true/>
-  <key>RunAtLoad</key>
-  <true/>
-</dict>
-</plist>
+    # postinstall (runs once as root, inside the installer's own prompt):
+    # retire the old root LaunchDaemon and give the app to the console user so
+    # the tray's self-update can replace it without a password.
+    mkdir -p "$work/scripts"
+    cat > "$work/scripts/postinstall" <<'EOF'
+#!/bin/sh
+label=com.opendops.rust-reg
+plist=/Library/LaunchDaemons/$label.plist
+if launchctl print "system/$label" >/dev/null 2>&1; then
+  launchctl bootout "system/$label" 2>/dev/null || true
+fi
+rm -f "$plist"
+user=$(stat -f %Su /dev/console 2>/dev/null)
+if [ -n "$user" ] && [ "$user" != root ] && [ -d /Applications/reg-server.app ]; then
+  chown -R "$user":staff /Applications/reg-server.app
+  uid=$(id -u "$user")
+  # Start the tray (and so the server) for the person who installed it.
+  launchctl asuser "$uid" sudo -u "$user" open -a /Applications/reg-server.app 2>/dev/null || true
+fi
+exit 0
 EOF
+    chmod 755 "$work/scripts/postinstall"
     if [[ "$mac_cpu" == intel ]]; then
       asset="$release_dir/rust-reg-${version}-intel.pkg"
     else
@@ -321,6 +324,7 @@ EOF
     done
     pkgbuild \
       --root "$work/root" \
+      --scripts "$work/scripts" \
       --component-plist "$component" \
       --identifier com.opendops.rust-reg \
       --version "$version" \
@@ -338,7 +342,7 @@ EOF
   linux)
     deb="$work/deb"
     version_dir="$deb/opt/rust-reg/versions/$version"
-    mkdir -p "$deb/opt/rust-reg/bin" "$deb/lib/systemd/system" "$deb/DEBIAN"
+    mkdir -p "$deb/opt/rust-reg/bin" "$deb/DEBIAN"
     if [[ "$with_desk" == 1 ]]; then
       cp "$release_dir/$desk_name" "$deb/opt/rust-reg/bin/$desk_name"
       chmod 755 "$deb/opt/rust-reg/bin/$desk_name"
@@ -428,18 +432,8 @@ EOF
     # Supervisor reads updates/live to choose versions/<live>/rust-reg (same as the macOS prefix).
     mkdir -p "$deb/opt/rust-reg/updates"
     printf '%s\n' "$version" > "$deb/opt/rust-reg/updates/live"
-    cat > "$deb/lib/systemd/system/rust-reg.service" <<'EOF'
-[Unit]
-Description=rust-reg registration server
-
-[Service]
-Type=simple
-ExecStart=/opt/rust-reg/bin/rust-reg-run --prefix /opt/rust-reg
-Restart=always
-
-[Install]
-WantedBy=multi-user.target
-EOF
+    # No systemd unit: /opt/rust-reg is a read-only template, and the tray copies
+    # it to ~/.local/share/rust-reg and runs the server as the desktop user.
     cat > "$deb/DEBIAN/control" <<EOF
 Package: rust-reg
 Version: $version
@@ -455,9 +449,11 @@ EOF
 set -e
 case "$1" in
 configure)
+  # Older packages ran the server as a root systemd unit; retire it.
   if command -v systemctl >/dev/null 2>&1; then
-    systemctl daemon-reload
-    systemctl enable rust-reg.service
+    systemctl disable --now rust-reg.service >/dev/null 2>&1 || true
+    rm -f /etc/systemd/system/rust-reg.service
+    systemctl daemon-reload || true
   fi
   # Older packs shipped a geometric SVG that outranked PNGs; drop leftovers.
   rm -f /usr/share/icons/hicolor/scalable/apps/rust-reg.svg
@@ -519,9 +515,10 @@ EOF
       cat > "$deb/DEBIAN/postinst" <<'EOF'
 #!/bin/sh
 set -e
+# Older packages ran the server as a root systemd unit; retire it.
 if command -v systemctl >/dev/null 2>&1; then
-  systemctl daemon-reload
-  systemctl enable rust-reg.service
+  systemctl disable --now rust-reg.service >/dev/null 2>&1 || true
+  systemctl daemon-reload || true
 fi
 EOF
     fi

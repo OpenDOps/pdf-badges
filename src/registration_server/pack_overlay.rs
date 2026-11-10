@@ -58,7 +58,9 @@ fn stage(args: &[String]) -> io::Result<()> {
 fn first_install(exe: &Path) -> io::Result<()> {
     let prefix = PathBuf::from(r"C:\Program Files\rust-reg");
     extract_folder(exe, &prefix, "tree")?;
-    register_service(&prefix)?;
+    // The tray runs the server as the signed-in user from %LOCALAPPDATA%\rust-reg;
+    // `C:\Program Files\rust-reg` is only the template it copies.
+    retire_service();
     install_shortcut(&prefix)
 }
 
@@ -88,31 +90,19 @@ fn install_shortcut(prefix: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Older installers registered `rust-reg` as an auto-start Windows service
+/// (LocalSystem). Stop and delete it; a missing service is fine.
 #[cfg(windows)]
-fn register_service(prefix: &Path) -> io::Result<()> {
-    let run = prefix.join("bin").join("rust-reg-run.exe");
-    let bin_path = format!("\"{}\" --prefix \"{}\"", run.display(), prefix.display());
-    let created = Command::new("sc.exe")
-        .arg("create")
-        .arg("rust-reg")
-        .arg(format!("binPath= {bin_path}"))
-        .arg("start= auto")
-        .status()?;
-    if !created.success() {
-        return Err(io::Error::new(io::ErrorKind::Other, "sc create rust-reg"));
-    }
-    let failure = Command::new("sc.exe")
-        .args([
-            "failure",
-            "rust-reg",
-            "reset= 86400",
-            "actions= restart/5000",
-        ])
-        .status()?;
-    if !failure.success() {
-        return Err(io::Error::new(io::ErrorKind::Other, "sc failure rust-reg"));
-    }
-    Ok(())
+fn retire_service() {
+    let quiet = |args: &[&str]| {
+        let _ = Command::new("sc.exe")
+            .args(args)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    };
+    quiet(&["stop", "rust-reg"]);
+    quiet(&["delete", "rust-reg"]);
 }
 
 pub(crate) fn extract_folder(exe: &Path, dest: &Path, folder: &str) -> io::Result<()> {
