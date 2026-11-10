@@ -3182,8 +3182,10 @@ fn write_replaced(dest: &Path, bytes: &[u8]) -> io::Result<()> {
     let name = dest
         .file_name()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "wrapper"))?;
+    // Per-process name: the old wrapper and the new server both copy the parts
+    // when the phase turns `current`; a shared `.new` made one rename fail (ENOENT).
     let mut tmp_name = name.to_os_string();
-    tmp_name.push(".new");
+    tmp_name.push(format!(".new-{}", std::process::id()));
     let tmp = parent.join(tmp_name);
     let write = (|| -> io::Result<()> {
         let mut file = std::fs::File::create(&tmp)?;
@@ -5601,7 +5603,7 @@ mod tests {
             std::fs::create_dir(
                 bin.parent()
                     .unwrap()
-                    .join(format!("{}.new", desk_binary_name())),
+                    .join(format!("{}.new-{}", desk_binary_name(), std::process::id())),
             )
             .unwrap();
             assert!(replace_tray(&dir.0).is_err());
@@ -7230,7 +7232,7 @@ mod tests {
                 detected
                     .parent()
                     .unwrap()
-                    .join(format!("{}.new", wrapper_binary_name())),
+                    .join(format!("{}.new-{}", wrapper_binary_name(), std::process::id())),
             )
             .unwrap();
             assert!(replace_wrapper(&dir.0, Some(&detected)).is_err());
