@@ -743,36 +743,3 @@ fn spawn_port_dialog(current: u16) -> Option<Pending> {
     }
 }
 
-pub(crate) fn stop_installed_service() {
-    use std::process::{Command, Stdio};
-    let active = Command::new("systemctl")
-        .args(["is-active", "--quiet", "rust-reg.service"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false);
-    if !active {
-        return;
-    }
-    // Non-interactive only. pkexec from a detached desk has no reliable UI and
-    // used to freeze Quit / Port… for tens of seconds. Root unit left running
-    // is cleared by stop_port when the listener is user-owned; otherwise the
-    // operator runs `sudo systemctl stop rust-reg`.
-    let _ = Command::new("timeout")
-        .args(["3", "systemctl", "stop", "rust-reg.service"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .ok()
-        .filter(|status| status.success())
-        .or_else(|| {
-            Command::new("systemctl")
-                .args(["stop", "rust-reg.service"])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .ok()
-        });
-}
-

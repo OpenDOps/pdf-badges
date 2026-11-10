@@ -2464,9 +2464,23 @@ pub(crate) fn resume(prefix: &Path, start: impl FnOnce(&Path)) -> io::Result<()>
     Ok(())
 }
 
+/// How often the wrapper rereads the listen address (the tray's **Port…** writes it).
+const LISTEN_POLL: Duration = Duration::from_secs(1);
+
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn supervise(
     prefix: &Path,
+    spawn: impl FnMut(&Path) -> io::Result<Child>,
+    stop: &AtomicBool,
+) -> io::Result<()> {
+    supervise_listen(prefix, spawn, || None, stop)
+}
+
+/// [`supervise`], and restart the server when `listen()` changes (port file edited).
+pub(crate) fn supervise_listen(
+    prefix: &Path,
     mut spawn: impl FnMut(&Path) -> io::Result<Child>,
+    listen: impl Fn() -> Option<String>,
     stop: &AtomicBool,
 ) -> io::Result<()> {
     loop {
@@ -2474,6 +2488,9 @@ pub(crate) fn supervise(
             return Ok(());
         }
         let path = decide(prefix)?;
+        let spawned_on = listen();
+        let mut next_listen_check = std::time::Instant::now() + LISTEN_POLL;
+        let mut moved = false;
         let mut child = match spawn(&path) {
             Ok(child) => child,
             Err(err) => {
@@ -2500,6 +2517,22 @@ pub(crate) fn supervise(
                     eprintln!("rust-reg-run: tray {err}");
                 }
             }
+            if std::time::Instant::now() >= next_listen_check {
+                next_listen_check = std::time::Instant::now() + LISTEN_POLL;
+                // `None` (file missing, empty, or mid-write) keeps the running port.
+                let wanted = listen();
+                if wanted.is_some() && wanted != spawned_on {
+                    eprintln!(
+                        "rust-reg-run: listen {} -> {}; restarting the server",
+                        spawned_on.as_deref().unwrap_or("default"),
+                        wanted.as_deref().unwrap_or("default")
+                    );
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    moved = true;
+                    break;
+                }
+            }
             match child.try_wait() {
                 Ok(Some(_)) => {
                     // A process-group TERM can kill the server before this
@@ -2516,7 +2549,10 @@ pub(crate) fn supervise(
                 }
             }
         }
-        roll_back_failed_try(prefix)?;
+        // A port move is not a failed start: keep the version, start it again.
+        if !moved {
+            roll_back_failed_try(prefix)?;
+        }
     }
 }
 
@@ -2534,9 +2570,83 @@ fn roll_back_failed_try(prefix: &Path) -> io::Result<bool> {
 }
 
 pub(crate) fn run_supervisor(prefix: &Path) -> io::Result<()> {
+    if let Err(err) = open_port_file(prefix) {
+        eprintln!("rust-reg-run: data/port: {err}");
+    }
     let stop = Arc::new(AtomicBool::new(false));
     arm_stop(Arc::clone(&stop));
-    supervise(prefix, |dir| spawn_registration(prefix, dir), &stop)
+    supervise_listen(
+        prefix,
+        |dir| spawn_registration(prefix, dir),
+        || service_listen(prefix),
+        &stop,
+    )
+}
+
+/// Create `<prefix>/data/port` when missing (the port in use now, else 8080) and
+/// let desktop users rewrite it, so the tray's **Port…** needs no admin prompt.
+/// The wrapper runs as root / SYSTEM; the directory itself stays root-only.
+fn open_port_file(prefix: &Path) -> io::Result<()> {
+    let data = prefix.join("data");
+    std::fs::create_dir_all(&data)?;
+    let path = data.join("port");
+    if !path.exists() {
+        let env = std::env::var("RUST_REG_HTTP").ok();
+        let port = service_http(env.as_deref(), None)
+            .and_then(|http| http.rsplit_once(':').and_then(|(_, port)| port.parse::<u16>().ok()))
+            .unwrap_or(8080);
+        std::fs::write(&path, format!("{port}\n"))?;
+    }
+    share_port_file(&path)
+}
+
+#[cfg(target_os = "macos")]
+fn share_port_file(path: &Path) -> io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::PermissionsExt;
+    // Every local macOS account is in `staff` (gid 20).
+    const STAFF: libc::gid_t = 20;
+    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path has NUL"))?;
+    if unsafe { libc::chown(c_path.as_ptr(), u32::MAX as libc::uid_t, STAFF) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o664))
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn share_port_file(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    // No group every desktop user shares on Linux; the file holds only a port.
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o666))
+}
+
+#[cfg(windows)]
+fn share_port_file(path: &Path) -> io::Result<()> {
+    // BUILTIN\Users (S-1-5-32-545): modify this one file.
+    let status = Command::new("icacls")
+        .arg(path)
+        .args(["/grant", "*S-1-5-32-545:M"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other("icacls failed"))
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn share_port_file(_path: &Path) -> io::Result<()> {
+    Ok(())
+}
+
+/// Listen address from `RUST_REG_HTTP` and `<prefix>/data/port`, read now.
+fn service_listen(prefix: &Path) -> Option<String> {
+    let env = std::env::var("RUST_REG_HTTP").ok();
+    let file = std::fs::read_to_string(prefix.join("data").join("port")).ok();
+    service_http(env.as_deref(), file.as_deref())
 }
 
 fn spawn_registration(prefix: &Path, version_dir: &Path) -> io::Result<Child> {
@@ -2549,23 +2659,26 @@ fn spawn_registration(prefix: &Path, version_dir: &Path) -> io::Result<Child> {
         .arg(version_dir.join("admin"))
         .arg("--form")
         .arg(version_dir.join("form"));
-    let env = std::env::var("RUST_REG_HTTP").ok();
-    let file = std::fs::read_to_string(prefix.join("data").join("port")).ok();
-    if let Some(http) = service_http(env.as_deref(), file.as_deref()) {
+    if let Some(http) = service_listen(prefix) {
         command.arg("--http").arg(http);
     }
     command.spawn()
 }
 
-/// Listen address for the server the wrapper starts. `RUST_REG_HTTP` (set by a
-/// tray that spawns its own server) wins; otherwise `<prefix>/data/port`, which
-/// the tray's **Port…** writes for an installed service. `None` keeps 8080.
+/// Listen address for the server the wrapper starts. `<prefix>/data/port` wins:
+/// the tray's **Port…** writes it for an installed service, and the wrapper
+/// restarts the server when it changes. Otherwise `RUST_REG_HTTP` (set by a tray
+/// that spawns its own server). `None` keeps 8080.
 pub(crate) fn service_http(env: Option<&str>, port_file: Option<&str>) -> Option<String> {
-    if let Some(http) = env.map(str::trim).filter(|http| !http.is_empty()) {
-        return Some(http.to_string());
-    }
-    let port: u16 = port_file?.trim().parse().ok()?;
-    (port != 0).then(|| format!("0.0.0.0:{port}"))
+    let from_file = port_file
+        .and_then(|text| text.trim().parse::<u16>().ok())
+        .filter(|port| *port != 0)
+        .map(|port| format!("0.0.0.0:{port}"));
+    from_file.or_else(|| {
+        env.map(str::trim)
+            .filter(|http| !http.is_empty())
+            .map(str::to_string)
+    })
 }
 
 #[cfg(unix)]
@@ -3371,6 +3484,36 @@ mod tests {
     mod service_port {
         use super::super::service_http;
 
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn the_wrapper_opens_the_port_file_to_desktop_users() {
+            use std::os::unix::fs::PermissionsExt;
+            let dir = std::env::temp_dir().join(format!("rust-reg-portfile-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            super::super::open_port_file(&dir).unwrap();
+            let path = dir.join("data").join("port");
+            assert!(!std::fs::read_to_string(&path).unwrap().trim().is_empty());
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o666);
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[cfg(target_os = "macos")]
+        #[test]
+        fn the_wrapper_keeps_an_existing_port_file() {
+            let dir = std::env::temp_dir().join(format!("rust-reg-portfile-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(dir.join("data")).unwrap();
+            std::fs::write(dir.join("data").join("port"), "8081\n").unwrap();
+            // Not root here: the group change may be refused, but the port is kept.
+            let _ = super::super::open_port_file(&dir);
+            assert_eq!(
+                std::fs::read_to_string(dir.join("data").join("port")).unwrap(),
+                "8081\n"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
         #[test]
         fn the_port_file_sets_the_service_listen_address() {
             assert_eq!(service_http(None, Some("8081\n")).as_deref(), Some("0.0.0.0:8081"));
@@ -3378,9 +3521,17 @@ mod tests {
         }
 
         #[test]
-        fn the_tray_env_wins_over_the_port_file() {
+        fn the_port_file_wins_over_the_env() {
             assert_eq!(
                 service_http(Some("0.0.0.0:7000"), Some("8081")).as_deref(),
+                Some("0.0.0.0:8081")
+            );
+            assert_eq!(
+                service_http(Some("0.0.0.0:7000"), None).as_deref(),
+                Some("0.0.0.0:7000")
+            );
+            assert_eq!(
+                service_http(Some("0.0.0.0:7000"), Some("0")).as_deref(),
                 Some("0.0.0.0:7000")
             );
         }
@@ -5991,6 +6142,55 @@ mod tests {
             stop.store(true, Ordering::Release);
             handle.join().unwrap().unwrap();
             assert_rolled_back(&dir.0);
+        }
+
+        #[test]
+        fn a_port_change_restarts_the_same_version() {
+            let dir = TempDir::new();
+            write_phase(&dir.0, "trying", "0.1.0", "0.2.0", &[]);
+            std::fs::write(dir.0.join("updates").join("live"), "0.2.0\n").unwrap();
+            plant_tree(&dir.0, "0.1.0", b"from-tree");
+            plant_tree(&dir.0, "0.2.0", b"new-tree");
+            let listen = Arc::new(Mutex::new(Some("0.0.0.0:8081".to_string())));
+            let seen = Arc::new(Mutex::new(Vec::<(PathBuf, Option<String>)>::new()));
+            let stop = Arc::new(AtomicBool::new(false));
+            let prefix = dir.0.clone();
+            let (seen_child, stop_child) = (Arc::clone(&seen), Arc::clone(&stop));
+            let (listen_spawn, listen_poll) = (Arc::clone(&listen), Arc::clone(&listen));
+            let handle = std::thread::spawn(move || {
+                super::super::supervise_listen(
+                    &prefix,
+                    move |path| {
+                        let now = listen_spawn.lock().expect("listen").clone();
+                        seen_child.lock().expect("path").push((path.to_path_buf(), now));
+                        idle_child()
+                    },
+                    move || listen_poll.lock().expect("listen").clone(),
+                    &stop_child,
+                )
+            });
+            let wait_for = |count: usize| {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while seen.lock().expect("path").len() < count {
+                    assert!(Instant::now() < deadline, "server was not started {count} times");
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            };
+            wait_for(1);
+            *listen.lock().expect("listen") = Some("0.0.0.0:8082".to_string());
+            wait_for(2);
+            stop.store(true, Ordering::Release);
+            handle.join().unwrap().unwrap();
+            let seen = seen.lock().expect("path").clone();
+            assert!(seen[0].0.ends_with("0.2.0"));
+            assert_eq!(seen[0].1.as_deref(), Some("0.0.0.0:8081"));
+            // Same version on the new port: a move is not a failed try.
+            assert!(seen[1].0.ends_with("0.2.0"));
+            assert_eq!(seen[1].1.as_deref(), Some("0.0.0.0:8082"));
+            assert_eq!(
+                std::fs::read_to_string(dir.0.join("updates").join("live")).unwrap().trim(),
+                "0.2.0"
+            );
         }
 
         #[test]

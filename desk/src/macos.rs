@@ -1,7 +1,6 @@
 //! macOS desk: a menu-bar status item. The pkg installs
 //! `/Applications/reg-server.app`, which launches this binary.
 
-use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -531,28 +530,3 @@ mod tests {
     }
 }
 
-pub(crate) fn stop_installed_service() {
-    let loaded = Command::new("launchctl")
-        .args(["print", "system/com.opendops.rust-reg"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false);
-    if !loaded {
-        return;
-    }
-    let stopped = Command::new("launchctl")
-        .args(["bootout", "system/com.opendops.rust-reg"])
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false);
-    if !stopped {
-        let _ = Command::new("osascript")
-            .args([
-                "-e",
-                "do shell script \"launchctl bootout system/com.opendops.rust-reg\" with administrator privileges",
-            ])
-            .status();
-    }
-}

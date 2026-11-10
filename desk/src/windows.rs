@@ -107,14 +107,6 @@ fn set_address_item(item: &MenuItem, text: &str) {
     item.set_enabled(server::listen_url(text).is_some());
 }
 
-pub(crate) fn stop_installed_service() {
-    let _ = Command::new("sc.exe")
-        .args(["stop", "rust-reg"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-}
-
 fn ask_port(current: u16) -> Option<u16> {
     let script = format!(
         "Add-Type -AssemblyName Microsoft.VisualBasic; \

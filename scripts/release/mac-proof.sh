@@ -62,9 +62,11 @@ case "${1:-}" in
     "$pb" -c "Add :EnvironmentVariables dict" "$plist" >/dev/null 2>&1 || true
     "$pb" -c "Delete :EnvironmentVariables:RUST_REG_HTTP" "$plist" >/dev/null 2>&1 || true
     "$pb" -c "Add :EnvironmentVariables:RUST_REG_HTTP string 0.0.0.0:$port" "$plist"
-    # Newer wrappers and trays read the service port from the prefix.
+    # data/port wins over RUST_REG_HTTP from alpha.11 on; keep both in step.
+    # Group staff + 664 lets the tray's Port… rewrite it without a prompt.
     mkdir -p /Library/rust-reg/data
     echo "$port" > /Library/rust-reg/data/port
+    chown root:staff /Library/rust-reg/data/port && chmod 664 /Library/rust-reg/data/port
     launchctl bootout system/$label 2>/dev/null || true
     launchctl bootstrap system "$plist"
     launchctl print system/$label | grep -E 'state|pid' | head -3

@@ -6,7 +6,7 @@ Each step below is one change (or one manual matrix). The tests named in the ste
 
 This plan is done when steps 1 through 13 are `done`.
 
-**Steps 1–10 are in tree.** Ready to run the Mac/Linux proof matrices ([11](#step-11-macos-proof), [12](#step-12-linux-proof)) once real A/B/C packs are published (see [pack-markers.sh](../../scripts/release/pack-markers.sh)).
+**Steps 1–10 are in tree.** [Step 11](#step-11-macos-proof) is running: Phase 0 done, Phase 1 publishing A/B/C as `alpha.9` / `10` / `11`. Bugs found on the way are listed under [Findings](#findings-during-the-proof).
 
 ## Summary
 
@@ -22,7 +22,7 @@ This plan is done when steps 1 through 13 are `done`.
 | [8. Tray markers](#step-8-tray-markers) | Distinct icon + menu item **Upgrade probe** (B); removed or changed in C | [§ Test](#step-8-tray-markers) | done |
 | [9. Frontend `/testpath`](#step-9-frontend-testpath) | Hardcoded HTML + script probe letter in the form (or admin) tree | [§ Test](#step-9-frontend-testpath) | done |
 | [10. Marker packs A/B/C](#step-10-marker-packs-abc) | Three installers + three-zip sets with letters A → B → C | [§ Test](#step-10-marker-packs-abc) | done |
-| [11. macOS proof](#step-11-macos-proof) | Full observable upgrade matrix on Mac | [§ Test](#step-11-macos-proof) | in progress |
+| [11. macOS proof](#step-11-macos-proof) | Full observable upgrade matrix on Mac | [§ Test](#step-11-macos-proof) | in progress (Phase 0 done, Phase 1 running) |
 | [12. Linux proof](#step-12-linux-proof) | Tray + wrapper markers; server smoke only | [§ Test](#step-12-linux-proof) | not started |
 | [13. Cleanup](#step-13-cleanup) | Remove or gate probes; leave shipping icons/menus | [§ Test](#step-13-cleanup) | not started |
 
@@ -375,19 +375,40 @@ Done. Fixture packs + asserts: `bash scripts/release/test-marker-packs.sh` (`thr
 
 [Back to summary](#summary)
 
-**Status:** in progress  
+**Status:** in progress — Phase 0 done; Phase 1: A + B published (C after A → B); Phase 2 done; Phase 3 A → B done except the Port… check on B  
 **Depends on:** [6](#step-6-automated-parts-suite), [10](#step-10-marker-packs-abc)  
 **Unlocks:** [12](#step-12-linux-proof) (recommended), [13](#step-13-cleanup)
 
-Prefix: `/Library/rust-reg` (pkg) **or** Application Support — same style for A/B/C. Tray: `/Applications/reg-server.app`.
+Prefix: `/Library/rust-reg` (pkg). Tray: `/Applications/reg-server.app`. Root-side steps use [mac-proof.sh](../../scripts/release/mac-proof.sh) (`install`, `fixup`, `port`, `restart`).
 
-Use numeric prerelease versions only (here `2.0.0-alpha.6` / `7` / `8` — not `6a`). Clients need `REGISTRATION_UPDATE_PRERELEASE=1` (and `REGISTRATION_UPDATE_REPO` if not the default) to see alpha releases.
+Versions: **A = `2.0.0-alpha.9`, B = `alpha.10`, C = `alpha.11`** (numeric prerelease only — not `9a`). The first attempt (`alpha.6` A / `alpha.7` B) was published but superseded: those pkgs/trays carry the bugs listed under [Findings](#findings-during-the-proof). Clients need `REGISTRATION_UPDATE_PRERELEASE=1` (`mac-proof.sh install` sets it).
+
+**Order matters:** the updater offers the *newest* release, so publish C only after A → B is verified (otherwise A jumps straight to C).
+
+### Findings during the proof
+
+Bugs found while running Phases 1–2 and fixed on `main` (each with tests):
+
+| Bug | Fix | Commit |
+|---|---|---|
+| `workflow_dispatch` publish failed: `gh release create --verify-tag` with no `release-*` tag | Publish creates the tag at the built SHA (`--target`); no duplicate tag-push run | `c37d89e1` |
+| `hdiutil` stdout leaked ~30 junk lines into `SHA256SUMS` (`shasum -c` warns; updater ignored them) | `hdiutil` output → stderr | `979045f2` |
+| macOS pkg shipped no `updates/live` → `rust-reg-run: updates/live` crash loop | pkg writes `updates/live` (like deb/Windows) | `5e7cd9bb` |
+| pkg relocated `reg-server.app` onto an older copy (`~/Applications`), out of reach of `replace_tray` | App bundle marked non-relocatable | `5e7cd9bb` |
+| Tray adopted **any** listener on its port (Docker on 8080 shown as running) | Adopt only when `/health` answers like rust-reg; else “port N is in use by another program; the server did not start” | `c99571d4` |
+| Quit / **Port…** sent TERM/KILL to **every** listener on the port (would kill Docker’s forwarder) | `stop_port` signals only `rust-reg` / `rust-reg-run` | `c99571d4` |
+| Tray remembered a port before it started (a busy port stuck across launches) | `desk.port` written only after a successful start / adopt | `5b3090b8` |
+| Service (launchd / systemd / Windows) ignored the tray port | Wrapper reads `<prefix>/data/port`; with a service installed, **Port…** writes it and restarts the service (admin prompt), tray starts on the service port | `5b3090b8` |
+| **Port…** and Quit asked for an admin password every time; Quit unloaded the service, and the reopened tray then ran its own server as the user (`credentials.yml: Permission denied`) | The wrapper (root) makes `data/port` user-writable (macOS `staff` 664, Linux 666, Windows `Users` modify) and restarts the server when it changes; `data/port` now wins over `RUST_REG_HTTP`. **Port…** only writes the file (elevated restart only as a fallback for old installs). Quit leaves the service running. A tray that finds the service down says so instead of starting a copy | this commit |
+| Tests wrote to the real `/Applications/reg-server.app` / assumed no `/Library/rust-reg` | Test-only guards | `5b3090b8` |
+
+Known environment note (this Mac): Docker `expocab-node` holds **8080** (and other containers 8090/8100/8110) — use port **8081** for the proof.
 
 ### Work (manual) — phases
 
-#### Phase 0 — Preflight (automated)
+#### Phase 0 — Preflight (automated) — **done**
 
-Re-run anytime before publishing:
+All green, run one by one (`test-upgrade-zips.sh` 6/6, `test-marker-packs.sh` 3/3, `parts` 14, `upgrade_probe` 4, `testpath` 2, `admin_pages testpath_` 2, desk `probe_` 3 + `icons_differ` 1). Re-run anytime before publishing:
 
 ```bash
 bash scripts/release/test-upgrade-zips.sh
@@ -399,83 +420,115 @@ cargo test --test admin_pages testpath_
 (cd desk && cargo test --bin rust-reg-desk probe_ && cargo test --bin rust-reg-desk icons_differ)
 ```
 
-#### Phase 1 — Publish three marker packs
+#### Phase 1 — Publish marker packs — **in progress**
 
-Three separate **Actions → Release → Run workflow** runs (mac only is enough for this step):
+**Actions → Release → Run workflow**, macOS only (`linux=false`, `windows=false`), one run at a time (each pushes a version-bump commit to `main`):
 
-| Run | `version` | `upgrade_probe` | Role |
-|---|---|---|---|
-| 1 | `2.0.0-alpha.6` | *(empty)* | **A** — install pkg |
-| 2 | `2.0.0-alpha.7` | `B` | **B** — upgrade zips |
-| 3 | `2.0.0-alpha.8` | `C` | **C** — upgrade zips |
-
-Wait until each creates prerelease `release-2.0.0-alpha.{6,7,8}` with pkg + three zips + `SHA256SUMS`.
-
-Local alternative per letter (bump `Cargo.toml` to match, then pack / upload):
+| Run | `version` | `upgrade_probe` | Role | Status |
+|---|---|---|---|---|
+| 1 | `2.0.0-alpha.9` | *(empty)* | **A** — install pkg | published + verified |
+| 2 | `2.0.0-alpha.10` | `B` | **B** — upgrade zips | published + verified (server/wrapper/tray digests ≠ A; Intel job re-run after a CI artifact timeout) |
+| 3 | `2.0.0-alpha.11` | `C` | **C** — upgrade zips | after A → B verified |
 
 ```bash
-unset RUST_REG_UPGRADE_PROBE   # or =B / =C
-REGISTRATION_RELEASE_TAG=v2.0.0-alpha.6 bash scripts/release/pack.sh
-# gh release create --prerelease …
+gh workflow run release.yml --ref main -f version=2.0.0-alpha.10 -f upgrade_probe=B \
+  -f linux=false -f mac=true -f windows=false
 ```
 
-#### Phase 2 — Install A on the Mac
+Per release check: prerelease with pkg + DMG + three zips per mac platform + `SHA256SUMS`; `SHA256SUMS` has no malformed lines; pkg payload has `Library/rust-reg/updates/live` and `relocatable="false"`; B file digests (`rust-reg-macos`, `rust-reg-run-macos`, `rust-reg-desk-macos`) ≠ A.
 
-1. Install `rust-reg-2.0.0-alpha.6.pkg` (and DMG tray if separate).
-2. Open **reg-server** from Applications.
-3. Confirm: no tray item **Upgrade probe**; `GET /testpath` → 404 (or no B).
-4. Record digests:
+Note: A (`alpha.9`) was built before `5b3090b8`, so A’s tray has the adopt/kill fixes but **not** the port-file / service Port… change; B and C have both.
+
+#### Phase 2 — Install A on the Mac — **done**
+
+1. Stop the alpha.6 test tray / installed tray (`kill <pid>` — not Quit on an old tray).
+2. `sudo bash scripts/release/mac-proof.sh install <rust-reg-2.0.0-alpha.9.pkg>` (pkg, prerelease env, daemon stderr → `/Library/rust-reg/proof.log`).
+3. `sudo bash scripts/release/mac-proof.sh port 8081` (after `install`; sets `RUST_REG_HTTP` for A’s wrapper and `data/port` for B/C).
+4. Open `/Applications/reg-server.app`; **Port…** → `8081` (A’s tray keeps its own port).
+5. Confirm: tray shows `localhost:8081`; no **Upgrade probe**; `GET /testpath` → 404; `proof.log` has no `upgrade-probe-` lines.
+6. Record digests:
 
 ```bash
 PREFIX=/Library/rust-reg
 shasum -a 256 "$PREFIX/bin/rust-reg-run" "$PREFIX/bin/rust-reg-desk" \
-  "$PREFIX/versions/2.0.0-alpha.6/rust-reg"
+  "$PREFIX/versions/2.0.0-alpha.9/rust-reg" /Applications/reg-server.app/Contents/MacOS/reg-server
 ```
 
-5. Ensure the installed updater sees prereleases (`REGISTRATION_UPDATE_PRERELEASE=1` in launchd `EnvironmentVariables`, or equivalent). Set `REGISTRATION_UPDATE_REPO` if assets are not on the default repo.
+**Result (A = alpha.9 installed):** daemon server `versions/2.0.0-alpha.9/rust-reg` on `0.0.0.0:8081`, `/health` ok, `/testpath` 404, 0 `upgrade-probe-` lines in `proof.log`, tray `localhost:8081`. Digests all match A’s `SHA256SUMS`:
+
+| File | sha256 (first 16) |
+|---|---|
+| `bin/rust-reg-run` | `1b9bc46822744e2d` |
+| `bin/rust-reg-desk` | `4aa5b013455a3888` |
+| `versions/2.0.0-alpha.9/rust-reg` | `fad870c08c58dd28` |
+| `reg-server.app/…/MacOS/reg-server` | `4aa5b013455a3888` |
+
+Gotcha: killing a test tray does not stop the server it spawned — an orphaned rust-reg on the same port gets adopted by the tray while the daemon loops on `Address already in use`. Check the listener’s path (`versions/<A>/rust-reg`, run by root).
 
 #### Phase 3 — Offer B and wait for `current`
 
-Port is usually `8080` (desk **Port…** if different). Use the desk update UI, or:
+`POST /api/update` needs an operator session — start the update from the desk / admin update UI. Status can be read with:
 
 ```bash
-curl -s "http://127.0.0.1:8080/api/update" | jq .
-curl -s -X POST "http://127.0.0.1:8080/api/update/check" | jq .
-curl -s -X POST "http://127.0.0.1:8080/api/update" | jq .
+curl -s "http://127.0.0.1:8081/api/update" | jq .
 # poll until phase is current after the restart cycle
 ```
 
 Then restart wrapper + tray:
 
 ```bash
-sudo launchctl kickstart -k system/com.opendops.rust-reg
-# Quit tray from menu → reopen reg-server.app
+sudo bash scripts/release/mac-proof.sh restart
+# Quit tray from menu → reopen /Applications/reg-server.app
 ```
 
-Confirm every **A → B** row in the [test plan](#step-11-macos-proof) (icon, **Upgrade probe**, wrapper/server logs, `/testpath` = B).
+Confirm every **A → B** row in the [test plan](#test-plan-10). Also live-check the new **Port…** on B’s tray: choose a free port → admin prompt → service moves (`data/port` updated, `/health` on the new port); cancel → stays on 8081.
 
 Optional: publish a B′ with only form changed and same run/desk digests → tray/wrapper **not** re-downloaded (matching digest skip).
 
+**Result (2026-11-09):** A → B started from the events page at 21:44:36. `versions/2.0.0-alpha.10.partial` → `versions/2.0.0-alpha.10` and `updates/live` = `2.0.0-alpha.10` five seconds later; `state.yml` phase `current`, from alpha.9 to alpha.10; A moved to `backup/2.0.0-alpha.9-20261109`.
+
+| Check | Result |
+|---|---|
+| `upgrade-probe-server-B` in `proof.log` | pass (right after the swap) |
+| `upgrade-probe-wrapper-B` in `proof.log` | pass, after `launchctl kickstart -k` (the A wrapper process kept running until then) |
+| `/testpath` | pass: 200, probe letter `B` |
+| digests: server / wrapper / tray | pass: `f39c949e03ce` / `6aa8fa3de69f` / `b1f7cf60882b`, equal to B |
+| tray icon and **Upgrade probe** item after Quit + reopen | pass: icon changed, **Upgrade probe** item present (operator, 2026-11-10) |
+| **Port…** on B's tray | pending (operator) |
+
+Found on the way (fixed on main, first shipped in C):
+
+- A fresh install had no `device_id`, so operator login failed with `no_device_id`. The server now writes a UUID v4 at startup (`bae2b18e`). For A, `data/credentials.yml` was written by hand.
+- The release check ran once at start, then every six hours. A GitHub 403 (anonymous rate limit, shared VPN exit IP) at start left no offer for hours. A failed check now retries after ten minutes; `GET /api/update` reports `check_failed` and `retry_in`; the events page shows the running version, a **Check for updates** button, and the unreachable message (`160aaa78`, `3a35bb2a`).
+- Login: an error stops the countdown and re-enables the button; Enter dismisses the old error and a repeated error flashes again (`f5647f8c`, `c1574acd`).
+- A's admin UI was replaced by hand with these builds for review; the A → B swap installed B's own admin.
+- Tray **Quit** stops the installed service (`launchctl bootout`, admin prompt). Approving it unloaded the daemon; the reopened tray then started its own `rust-reg-run` as the user against `/Library/rust-reg`, which looped on `credentials.yml: Permission denied`. The daemon was bootstrapped again by hand. Fixed for C (see Findings): Quit leaves the service, no user copy, **Port…** without a prompt.
+
 #### Phase 4 — Offer C
 
-Same check → update → kickstart → Quit/reopen tray. Confirm every **B → C** row (probe menu gone; icon ≠ B; logs / `/testpath` = C).
+Dispatch C (`alpha.11`, probe `C`). Same check → update → `mac-proof.sh restart` → Quit/reopen tray. Confirm every **B → C** row (probe menu gone; icon ≠ B; logs / `/testpath` = C).
+
+On C also check, with no password prompt anywhere: `ls -l /Library/rust-reg/data/port` shows group `staff`, mode `-rw-rw-r--`; **Port…** → 8082 moves the service (wrapper logs `listen … -> 0.0.0.0:8082; restarting the server`) and back to 8081; Quit closes only the tray and `/health` still answers.
 
 #### Phase 5 — Done
 
-When every row in the test plan passes, set status → `done`. Continue to [step 12](#step-12-linux-proof).
+When every row in the test plan passes, set status → `done`. Restore Docker / port settings as needed. Continue to [step 12](#step-12-linux-proof).
 
 ### Test plan
 
-| Check | Assert |
-|---|---|
-| A → B tray icon | New mark after Quit + reopen |
-| A → B tray menu | **Upgrade probe** present |
-| A → B wrapper | After service restart, log `upgrade-probe-wrapper-B`; `bin` digest = `versions/<B>/rust-reg-run` |
-| A → B server | Log `upgrade-probe-server-B` |
-| A → B frontend | `/testpath` shows probe B |
-| B → C tray | Probe item gone; icon ≠ B |
-| B → C wrapper / server / frontend | Probe C (or `/testpath` gone) |
-| Matching digest skip | Unchanged component not downloaded; its marker stays |
+| Check | Assert | Result |
+|---|---|---|
+| A → B tray icon | New mark after Quit + reopen | |
+| A → B tray menu | **Upgrade probe** present | |
+| A → B wrapper | After service restart, log `upgrade-probe-wrapper-B`; `bin` digest = `versions/<B>/rust-reg-run` | |
+| A → B server | Log `upgrade-probe-server-B` | |
+| A → B frontend | `/testpath` shows probe B | |
+| B → C tray | Probe item gone; icon ≠ B | |
+| B → C wrapper / server / frontend | Probe C (or `/testpath` gone) | |
+| Matching digest skip | Unchanged component not downloaded; its marker stays | |
+| Busy port at tray start | Error “port N is in use by another program; the server did not start”; not adopted | pass (fixed dev tray vs Docker on 8080) |
+| **Port…** to a free port | Server moves; other program on the old port untouched | pass (8080 → 8081, Docker kept 8080) |
+| **Port…** with installed service (B tray) | Admin prompt; `data/port` written; service on new port | |
 
 ### Done when
 

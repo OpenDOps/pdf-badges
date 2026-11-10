@@ -184,16 +184,16 @@ impl Session {
         self.address.lock().expect("address").clone()
     }
 
-    /// Quit path: stop the child this desk started, then the installed service
-    /// if it still holds the listen port, then any leftover listener.
+    /// Quit path: stop the server this desk started (and leftover copies of it).
+    /// An installed service keeps running: it is not this desk's to stop, and
+    /// stopping it would need an admin prompt.
     pub fn stop(&mut self) {
         desk_log(format!("stop begin port={}", self.port));
+        if self.child.is_none() && installed_service_prefix().is_some() {
+            desk_log("stop leaves the installed service running".to_string());
+            return;
+        }
         self.stop_owned();
-        // Only on Quit — never from Port restart (that blocked the Linux loop
-        // on pkexec and made Quit / Port… appear dead).
-        stop_installed_service();
-        // Service stop may leave the listener briefly; clear again.
-        stop_port(self.port);
         #[cfg(target_os = "linux")]
         if let Some(old) = self.inflight_old_port.take() {
             desk_log(format!("stop also clearing inflight old port {old}"));
@@ -234,6 +234,13 @@ impl Session {
             let shown = format!("localhost:{}", self.port);
             desk_log(format!("begin adopt existing {shown}"));
             *self.address.lock().expect("address") = shown;
+            return;
+        }
+        // The installed service owns this machine's server. A desk copy would run
+        // as this user against root-owned files (credentials, versions) and fail.
+        if installed_service_prefix().is_some() {
+            desk_log(format!("begin service not listening on {}", self.port));
+            self.fail(service_down(self.port));
             return;
         }
         desk_log(format!("begin spawn port={}", self.port));
@@ -1121,15 +1128,6 @@ fn stop_port(port: u16) {
     ));
 }
 
-fn stop_installed_service() {
-    #[cfg(target_os = "linux")]
-    crate::linux::stop_installed_service();
-    #[cfg(target_os = "macos")]
-    crate::macos::stop_installed_service();
-    #[cfg(target_os = "windows")]
-    crate::windows::stop_installed_service();
-}
-
 fn lock_file() -> io::Result<Option<File>> {
     let path = lock_path();
     if let Some(dir) = path.parent() {
@@ -1304,6 +1302,14 @@ pub(crate) fn installed_service_prefix() -> Option<PathBuf> {
     None
 }
 
+/// The installed service is not answering on `port`.
+pub(crate) fn service_down(port: u16) -> String {
+    format!(
+        "the rust-reg service is not running on port {port}. \
+         It starts with the computer; restart the computer or reinstall rust-reg."
+    )
+}
+
 /// Port the installed service listens on: `<prefix>/data/port`, else 8080.
 pub(crate) fn service_port(prefix: &Path) -> u16 {
     read_saved_port(&prefix.join("data").join("port")).unwrap_or(DEFAULT_PORT)
@@ -1316,7 +1322,14 @@ fn switch_service_port(prefix: &Path, port: u16) -> Result<(), ServiceSwitch> {
         return Err(ServiceSwitch::Unchanged(port_taken(port)));
     }
     desk_log(format!("service port → {port} at {}", prefix.display()));
-    if let Err(err) = set_service_port(prefix, port) {
+    // The installer makes `data/port` writable by desktop users; the service's
+    // wrapper sees the change and restarts the server on the new port. No prompt.
+    // Older installs (root-only file) fall back to the elevated restart.
+    let written = write_port_file(prefix, port);
+    if let Err(err) = &written {
+        desk_log(format!("port file not writable ({err}); asking for admin rights"));
+    }
+    if let Err(err) = written.or_else(|_| set_service_port(prefix, port)) {
         desk_log(format!("service port not changed: {err}"));
         return Err(ServiceSwitch::Unchanged(format!(
             "port not changed ({err}); the service stays on its previous port."
@@ -1333,6 +1346,17 @@ fn switch_service_port(prefix: &Path, port: u16) -> Result<(), ServiceSwitch> {
     Err(ServiceSwitch::NotListening(format!(
         "the service did not start on port {port}. Choose another port."
     )))
+}
+
+/// Overwrite `<prefix>/data/port` in place (the directory itself is root-only).
+pub(crate) fn write_port_file(prefix: &Path, port: u16) -> io::Result<()> {
+    let path = prefix.join("data").join("port");
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(&path)?;
+    file.write_all(format!("{port}\n").as_bytes())?;
+    file.sync_all()
 }
 
 fn set_service_port(prefix: &Path, port: u16) -> io::Result<()> {
@@ -1642,6 +1666,25 @@ mod tests {
         std::fs::write(prefix.join("data/port"), "nope").unwrap();
         assert_eq!(service_port(&prefix), DEFAULT_PORT);
         let _ = std::fs::remove_dir_all(&prefix);
+    }
+
+    #[test]
+    fn the_port_file_is_rewritten_in_place_without_a_prompt() {
+        let prefix = temp_dir("svc-write");
+        // No file yet (old install, or no service): nothing is created.
+        assert!(write_port_file(&prefix, 8082).is_err());
+        std::fs::create_dir_all(prefix.join("data")).unwrap();
+        std::fs::write(prefix.join("data/port"), "8081\n").unwrap();
+        write_port_file(&prefix, 8082).unwrap();
+        assert_eq!(std::fs::read_to_string(prefix.join("data/port")).unwrap(), "8082\n");
+        assert_eq!(service_port(&prefix), 8082);
+        let _ = std::fs::remove_dir_all(&prefix);
+    }
+
+    #[test]
+    fn service_down_says_the_service_is_not_running() {
+        let message = service_down(8081);
+        assert!(message.contains("service is not running on port 8081"));
     }
 
     #[test]
