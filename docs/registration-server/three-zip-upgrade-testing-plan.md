@@ -543,13 +543,15 @@ The root daemon was retired by hand the way D's pkg `postinstall` does it (`laun
 
 #### What is left
 
-1. **D tray markers:** Quit and reopen the tray → white icon, no **Upgrade probe** item (the running tray is still the pre-update build in memory).
-2. **Port… without a service:** move to 8082 and back to 8081 — no password, `/health` follows, Docker's 8080 untouched.
-3. **Quit:** stops the server (`/health` stops answering) with no prompt; reopening starts it again.
-4. **Matching digest skip:** never exercised — every release so far changed all three parts. Needs a release that changes only `admin/` / `form/` (e.g. E with the events-page label fix, then E′ with a frontend-only change) and a check that wrapper and tray zips are not downloaded.
-5. **Version label after an upgrade without a reload** (`b1f60041`): visible on the first update *from* a build that has it (needs E, then E → E′).
-6. **Fresh pkg install of D:** the `postinstall` path (retire an old daemon, chown the app, open the tray) has only been reproduced by hand, not run from the package.
-7. **Sleep:** with the display asleep and the screen locked, another machine can still reach `http://<mac>:8081/health`.
+| Check | Result |
+|---|---|
+| D tray after Quit + reopen: white icon, no **Upgrade probe** | pass (operator, 2026-11-10) |
+| **Port…** without a service: 8081 → 8082 → 8081, no password, Docker's 8080 untouched | pass (operator, 2026-11-10) |
+| Quit stops the server with no prompt; reopening starts it again | pass (operator, 2026-11-10) |
+| Matching digest skip | open — E (`alpha.13`) then E′ (`alpha.14`, frontend-only change); E → E′ must not download the tray zip (server and wrapper embed the version, so their digests always change) |
+| Version label after an upgrade without a reload (`b1f60041`) | open — E → E′ |
+| Sleep (display asleep, screen locked, server still reachable) | deferred → [manual-test-plan.md §1](manual-test-plan.md#1-server-stays-reachable-while-the-mac-looks-asleep) |
+| Fresh pkg install (`postinstall`) | deferred → [manual-test-plan.md §2](manual-test-plan.md#2-fresh-install-from-the-macos-pkg) |
 
 #### Phase 5 — Done
 
@@ -571,7 +573,7 @@ When every row in the test plan passes, set status → `done`. Restore Docker / 
 | Busy port at tray start | Error “port N is in use by another program; the server did not start”; not adopted | pass (fixed dev tray vs Docker on 8080) |
 | **Port…** to a free port | Server moves; other program on the old port untouched | pass (8080 → 8081, Docker kept 8080) |
 | **Port…** with installed service (B tray) | Admin prompt; `data/port` written; service on new port | superseded (no service since D) |
-| **Port…** / Quit in the no-root model | No prompt; server moves / stops | open |
+| **Port…** / Quit in the no-root model | No prompt; server moves / stops | pass |
 
 ### Done when
 
