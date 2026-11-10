@@ -97,6 +97,14 @@ pub fn update_prerelease(raw: Option<&str>) -> bool {
 
 pub fn update_prerelease_from_env() -> bool {
     update_prerelease(std::env::var(UPDATE_PRERELEASE_ENV).ok().as_deref())
+        // Tests pin the channel themselves (their build version is a pre-release).
+        || (cfg!(not(test)) && is_prerelease_version(release_version()))
+}
+
+/// `2.0.0-alpha.11` and the like. A pre-release build follows pre-releases
+/// without any setting; a stable build sees stable releases only.
+pub fn is_prerelease_version(version: &str) -> bool {
+    version.contains('-')
 }
 
 /// One ASCII letter from [`UPGRADE_PROBE_ENV`]. Empty, multi-character, and non-letters are silent.
@@ -3308,6 +3316,11 @@ async fn fetch_latest(
         api_base.trim_end_matches('/')
     );
     let response = client.get(&url).send().await.map_err(|_| ())?;
+    // 404: the repository has no stable release yet. That is "no update",
+    // not an unreachable update server.
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
     if !response.status().is_success() {
         return Err(());
     }
@@ -3481,6 +3494,17 @@ mod tests {
         assert_eq!(total, 1000);
         check.begin_apply();
         assert_eq!(check.progress().0, "applying");
+    }
+
+    mod channel {
+        use super::super::is_prerelease_version;
+
+        #[test]
+        fn a_prerelease_build_follows_prereleases() {
+            assert!(is_prerelease_version("2.0.0-alpha.11"));
+            assert!(is_prerelease_version("2.1.0-rc.1"));
+            assert!(!is_prerelease_version("2.0.0"));
+        }
     }
 
     mod service_port {
@@ -4172,6 +4196,19 @@ mod tests {
             assert_eq!(hits.lock().expect("hits").len(), 1);
             assert!(!look.due(five_hours + Duration::from_secs(5 * 60 * 60)));
             assert!(look.due(five_hours + UPDATE_EVERY));
+        }
+
+        #[tokio::test]
+        async fn no_stable_release_is_no_update_not_a_failure() {
+            let (base, _hits) =
+                stand_in(vec![(StatusCode::NOT_FOUND, r#"{"message":"Not Found"}"#)]).await;
+            let look = ReleaseCheck::with_prerelease(false);
+            let opened = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+            let result = look
+                .force(&Gate::new(), &client(), &base, UPDATE_REPO, "0.1.0", &[], opened)
+                .await;
+            assert!(matches!(result, Ok(None)));
+            assert_eq!(look.failed_retry_in(opened), None);
         }
 
         #[tokio::test]

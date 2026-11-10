@@ -821,6 +821,16 @@ fn spawn_server(port: u16, address: Arc<Mutex<String>>) -> io::Result<Child> {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
+    // A pre-release install follows pre-releases (servers before alpha.12 only
+    // learn that from this variable; the root service used to set it).
+    if launch
+        .prefix
+        .as_deref()
+        .and_then(read_live)
+        .is_some_and(|live| live.contains('-'))
+    {
+        command.env("REGISTRATION_UPDATE_PRERELEASE", "1");
+    }
     #[cfg(unix)]
     command.process_group(0);
     let mut child = command.spawn()?;
