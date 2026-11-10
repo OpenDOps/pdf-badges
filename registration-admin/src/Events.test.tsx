@@ -461,3 +461,37 @@ test("events_check_refused_is_not_called_unreachable", async () => {
   expect(screen.getByRole("alert")).toHaveTextContent(/^Не удалось проверить обновления$/);
   vi.unstubAllGlobals();
 });
+
+test("events_shows_the_new_version_right_after_the_upgrade", async () => {
+  let upgraded = false;
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (url.endsWith("/api/update") && method === "POST") {
+        upgraded = true;
+        return { ok: true, json: async () => ({ ok: true, data: {} }) };
+      }
+      if (url.endsWith("/api/update")) {
+        return {
+          ok: true,
+          json: async () => ({
+            ok: true,
+            data: upgraded
+              ? { version: "2.0.0-alpha.12", newer: null, phase: "idle" }
+              : { version: "2.0.0-alpha.11", newer: "2.0.0-alpha.12", phase: "idle" },
+          }),
+        };
+      }
+      return { ok: true, json: async () => ({ ok: true, data: {} }) };
+    }),
+  );
+  renderEvents({ version: "2.0.0-alpha.11", newer: "2.0.0-alpha.12" });
+  expect(screen.getByText("Версия v2.0.0-alpha.11")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Обновить до v2.0.0-alpha.12" }));
+  expect(await screen.findByText("Обновление установлено", {}, { timeout: 3000 })).toBeInTheDocument();
+  expect(screen.getByText("Версия v2.0.0-alpha.12")).toBeInTheDocument();
+  expect(screen.queryByText("Версия v2.0.0-alpha.11")).not.toBeInTheDocument();
+  vi.unstubAllGlobals();
+});

@@ -131,6 +131,7 @@ function EventsRoute({ onLeave }: { onLeave: () => void }) {
           if (!update) {
             return;
           }
+          setVersion(update.version);
           setNewer(update.newer);
           setCheckFailed(update.checkFailed);
           setRetryIn(update.retryIn);

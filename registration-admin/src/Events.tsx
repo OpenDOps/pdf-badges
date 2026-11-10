@@ -68,6 +68,12 @@ export default function Events({
   const [received, setReceived] = useState(0);
   const [total, setTotal] = useState<number | null>(null);
   const [target, setTarget] = useState<string | null>(newer);
+  // Running version shown in the header; an upgrade replaces it without a reload.
+  const [running, setRunning] = useState<string | null>(version);
+
+  useEffect(() => {
+    setRunning(version);
+  }, [version]);
   const [check, setCheck] = useState<"idle" | "checking" | "none" | "error" | "refused">(
     checkFailed ? "error" : "idle",
   );
@@ -135,6 +141,7 @@ export default function Events({
       ) {
         stopPoll();
         setTarget(null);
+        setRunning(status.version);
         setUpgrade("success");
         return;
       }
@@ -254,9 +261,9 @@ export default function Events({
   return (
     <main className="min-h-screen bg-zinc-50 px-4 pb-10 pt-16 text-zinc-900">
       <header className="fixed inset-x-0 top-0 z-10 flex h-12 items-center justify-start gap-3 bg-zinc-50 px-4 pr-72">
-        {version ? (
+        {running ? (
           <p className="select-text text-xs tabular-nums text-zinc-500">
-            {t("events.version", { version: versionLabel(version) })}
+            {t("events.version", { version: versionLabel(running) })}
           </p>
         ) : null}
         {upgrade === "downloading" || upgrade === "extracting" ? (
