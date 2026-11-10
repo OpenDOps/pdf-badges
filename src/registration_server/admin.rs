@@ -666,15 +666,18 @@ async fn create_key(
     if !key_caller(&state, &headers) {
         return api_error(StatusCode::UNAUTHORIZED, "unauthorized");
     }
-    let comment = serde_json::from_slice::<serde_json::Value>(&body)
-        .ok()
-        .and_then(|value| {
-            value
-                .get("comment")
-                .and_then(|item| item.as_str())
-                .map(str::to_string)
-        });
-    match insert_operator_key(&state, comment.as_deref()) {
+    let parsed = serde_json::from_slice::<serde_json::Value>(&body).ok();
+    let comment = parsed
+        .as_ref()
+        .and_then(|value| value.get("comment"))
+        .and_then(|item| item.as_str())
+        .map(str::to_string);
+    let is_admin = parsed
+        .as_ref()
+        .and_then(|value| value.get("is_admin"))
+        .and_then(|item| item.as_bool())
+        .unwrap_or(false);
+    match insert_key(&state, is_admin, comment.as_deref()) {
         Ok(row) => api_ok(row),
         Err(err) => {
             log::debug!("create key: {err}");
@@ -711,6 +714,11 @@ async fn edit_key(
     match update_key(&state, id, key.as_deref(), comment) {
         Ok(true) => api_ok(json!({})),
         Ok(false) => api_error(StatusCode::NOT_FOUND, "not_found"),
+        Err(rusqlite::Error::SqliteFailure(err, _))
+            if err.code == rusqlite::ErrorCode::ConstraintViolation =>
+        {
+            api_error(StatusCode::CONFLICT, "key_taken")
+        }
         Err(err) => {
             log::debug!("edit key: {err}");
             api_error(StatusCode::INTERNAL_SERVER_ERROR, "unknown_error")
@@ -730,8 +738,9 @@ async fn remove_key(
         return api_error(StatusCode::UNAUTHORIZED, "unauthorized");
     }
     match delete_key(&state, id) {
-        Ok(true) => api_ok(json!({})),
-        Ok(false) => api_error(StatusCode::NOT_FOUND, "not_found"),
+        Ok(Removed::Yes) => api_ok(json!({})),
+        Ok(Removed::Missing) => api_error(StatusCode::NOT_FOUND, "not_found"),
+        Ok(Removed::LastOfKind) => api_error(StatusCode::CONFLICT, "last_key"),
         Err(err) => {
             log::debug!("delete key: {err}");
             api_error(StatusCode::INTERNAL_SERVER_ERROR, "unknown_error")
@@ -828,22 +837,26 @@ fn key_rows(state: &OperatorState) -> Result<Vec<serde_json::Value>, rusqlite::E
         .ok_or(rusqlite::Error::QueryReturnedNoRows)?
 }
 
-fn insert_operator_key(
+fn insert_key(
     state: &OperatorState,
+    is_admin: bool,
     comment: Option<&str>,
 ) -> Result<serde_json::Value, rusqlite::Error> {
     crate::registration_server::current::CurrentEvent::lock(state.current())
         .with_db(|db| {
             for _ in 0..8 {
-                let key = format!("K{}", uuid::Uuid::new_v4().simple());
+                let key = crate::registration_server::event_db::new_key()
+                    .unwrap_or_else(|| format!("K{}", uuid::Uuid::new_v4().simple()));
                 match db.file().execute(
-                    "INSERT INTO keys (key, is_admin, comment) VALUES (?1, 0, ?2)",
-                    rusqlite::params![key, comment],
+                    "INSERT INTO keys (key, is_admin, comment) VALUES (?1, ?2, ?3)",
+                    rusqlite::params![key, i64::from(is_admin), comment],
                 ) {
                     Ok(_) => {
                         return Ok(json!({
                             "id": db.file().last_insert_rowid(),
                             "key": key,
+                            "comment": comment,
+                            "is_admin": is_admin,
                         }));
                     }
                     Err(rusqlite::Error::SqliteFailure(err, _))
@@ -883,11 +896,38 @@ fn update_key(
         .ok_or(rusqlite::Error::QueryReturnedNoRows)?
 }
 
-fn delete_key(state: &OperatorState, id: i64) -> Result<bool, rusqlite::Error> {
+enum Removed {
+    Yes,
+    Missing,
+    /// The event needs at least one admin key and one operator key.
+    LastOfKind,
+}
+
+fn delete_key(state: &OperatorState, id: i64) -> Result<Removed, rusqlite::Error> {
     crate::registration_server::current::CurrentEvent::lock(state.current())
         .with_db(|db| {
-            let changed = db.file().execute("DELETE FROM keys WHERE id = ?1", [id])?;
-            Ok(changed > 0)
+            let tx = db.file().unchecked_transaction()?;
+            let kind = tx
+                .query_row(
+                    "SELECT IFNULL(is_admin, 0) FROM keys WHERE id = ?1",
+                    [id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()?;
+            let Some(kind) = kind else {
+                return Ok(Removed::Missing);
+            };
+            let same: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM keys WHERE IFNULL(is_admin, 0) = ?1",
+                [kind],
+                |row| row.get(0),
+            )?;
+            if same <= 1 {
+                return Ok(Removed::LastOfKind);
+            }
+            tx.execute("DELETE FROM keys WHERE id = ?1", [id])?;
+            tx.commit()?;
+            Ok(Removed::Yes)
         })
         .ok_or(rusqlite::Error::QueryReturnedNoRows)?
 }

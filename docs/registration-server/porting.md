@@ -125,7 +125,7 @@ The browser talks JSON to `/api` on the HTTP server. That is not the floor gRPC 
 
 Choosing an event replaces the previous `event_id` and `project_token`. Sync cursors for the new event start empty. Opening that event's file is step 5.
 
-The event screen has a keys block. `GET /api/keys` returns an empty list until the key routes in the admin plan read the table step 4 creates.
+Once an event is chosen, the event screen shows its keys in two lists, admin and operator, each with an add button. A row can be edited (key text and comment) or deleted. The event file starts with one admin key and one operator key (step 4). The server refuses to delete the last key of either kind (`409` `last_key`) and refuses a key text another row already has (`409` `key_taken`). Before an event is chosen, the block says to choose one.
 
 ## Step 4 — Event database
 

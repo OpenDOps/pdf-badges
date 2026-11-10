@@ -530,9 +530,11 @@ Step 11 left the key routes empty. This plan replaces those handlers. Responses 
 | route | `data` |
 |---|---|
 | `GET /api/keys` | rows `{ "id", "key", "comment", "is_admin" }` |
-| `POST /api/keys` | insert an operator key, return `{ "id", "key" }` |
-| `PATCH /api/keys/:id` | update key text and comment |
-| `DELETE /api/keys/:id` | delete by id |
+| `POST /api/keys` | body `{ "is_admin", "comment" }`, both optional (`is_admin` defaults to `false`). Insert a key with a generated seven-character value, return `{ "id", "key", "comment", "is_admin" }` |
+| `PATCH /api/keys/:id` | update key text and comment. A key text another row has is `409` `key_taken` |
+| `DELETE /api/keys/:id` | delete by id. The last admin key or the last operator key is `409` `last_key` |
 | `POST /api/keys/print` | one print job for the current keys, on the server-thread print queue |
 
 Switching event switches the file. Keys from the previous event stay in the previous file. New strings go into `ru.json` under `keys.*`.
+
+Done. `Keys.tsx` renders on the event screen once an event is chosen: an admin list and an operator list, each with an add button, and per row edit (key and comment) and delete. Delete is disabled on the only key of its kind, and the server enforces the same rule.

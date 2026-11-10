@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { act, fireEvent, render, screen } from "@testing-library/react";
 
-import { fetchKeys, postSelect } from "./api";
+import { postSelect } from "./api";
 import "./i18n";
 import Events, { type Event } from "./Events";
 
@@ -42,6 +42,7 @@ function renderEvents(
       checkFailed={props.checkFailed ?? false}
       retryIn={props.retryIn ?? null}
       supervised={props.supervised ?? true}
+      manageKeys={false}
     />,
   );
 }
@@ -77,6 +78,7 @@ test("token_stored_line", () => {
       onSelect={() => {}}
       watchNetwork={false}
       keepSession={false}
+      manageKeys={false}
       timeoutSecs={0}
     />,
   );
@@ -203,7 +205,7 @@ test("select_shows_the_remote_error", async () => {
   );
 });
 
-test("screen_shows_stored_and_empty_keys", async () => {
+test("screen_shows_stored_token_and_event_keys", async () => {
   vi.stubGlobal(
     "fetch",
     vi.fn(async (url: string) => {
@@ -211,42 +213,53 @@ test("screen_shows_stored_and_empty_keys", async () => {
         return {
           json: async () => ({
             ok: true,
-            data: { id: "5245081", name: "TechCrunch", token_stored: true },
+            data: { id: "2", name: "Bo", token_stored: true },
           }),
         };
       }
       if (url.endsWith("/api/keys")) {
-        return { json: async () => ({ ok: true, data: [] }) };
+        return {
+          json: async () => ({
+            ok: true,
+            data: [
+              { id: 1, key: "ADM1234", comment: null, is_admin: true },
+              { id: 2, key: "OPR5678", comment: null, is_admin: false },
+            ],
+          }),
+        };
       }
       throw new Error(url);
     }),
   );
   function Harness() {
     const [tokenStored, setTokenStored] = useState(false);
+    const [current, setCurrent] = useState<Event | null>(null);
     return (
       <Events
         events={events}
-        current={events[0]}
+        current={current}
         tokenStored={tokenStored}
         watchNetwork={false}
         keepSession={false}
         timeoutSecs={0}
         onSelect={async (id, name) => {
           const selected = await postSelect(id, name);
-          const keys = await fetchKeys();
-          if (selected.ok && selected.tokenStored && keys.length === 0) {
-            setTokenStored(true);
+          if (selected.ok) {
+            setTokenStored(selected.tokenStored);
+            setCurrent({ id: selected.id, name: selected.name });
           }
         }}
       />
     );
   }
   render(<Harness />);
+  expect(screen.getByText("Выберите мероприятие, чтобы настроить ключи")).toBeInTheDocument();
   await act(async () => {
-    fireEvent.click(screen.getByRole("button", { name: "TechCrunch" }));
+    fireEvent.click(screen.getByRole("button", { name: "Bo" }));
   });
   expect(screen.getByText("Токен проекта сохранён")).toBeInTheDocument();
-  expect(screen.getByText("Нет ключей")).toBeInTheDocument();
+  expect(await screen.findByText("ADM1234")).toBeInTheDocument();
+  expect(screen.getByText("OPR5678")).toBeInTheDocument();
   vi.unstubAllGlobals();
 });
 
@@ -345,11 +358,10 @@ test("events_notes_a_rolled_back_upgrade", () => {
   expect(screen.getByText("Предыдущее обновление до v2.0.0-alpha.1 не удалось")).toBeInTheDocument();
 });
 
-test("keys_block_empty", () => {
-  renderEvents();
+test("keys_block_waits_for_an_event", () => {
+  renderEvents({ current: null });
   const keys = screen.getByRole("region", { name: "Ключи" });
-  expect(keys).toHaveTextContent("Ключи");
-  expect(keys).toHaveTextContent("Нет ключей");
+  expect(keys).toHaveTextContent("Выберите мероприятие, чтобы настроить ключи");
   expect(keys.querySelector("button")).toBeNull();
 });
 
@@ -424,6 +436,7 @@ test("events_shows_the_servers_failed_check", () => {
       onSelect={() => {}}
       watchNetwork={false}
       keepSession={false}
+      manageKeys={false}
       timeoutSecs={0}
       newer="2.0.0"
       checkFailed={false}

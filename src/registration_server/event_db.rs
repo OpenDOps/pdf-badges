@@ -1345,6 +1345,11 @@ fn insert_key(conn: &Connection, path: &Path, is_admin: i64) -> Result<(), Event
     ))
 }
 
+/// A fresh key in the default-key alphabet, for a key the operator adds.
+pub(crate) fn new_key() -> Option<String> {
+    generate_key().ok()
+}
+
 fn generate_key() -> Result<String, EventDbError> {
     let mut bytes = [0u8; 7];
     fill_random(&mut bytes)?;

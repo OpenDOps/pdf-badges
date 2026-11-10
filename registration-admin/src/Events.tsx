@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { fetchUpdate, postSession, postUpdate, postUpdateCheck } from "./api";
+import Keys from "./Keys";
 import NetworkSignal, { useNetwork } from "./NetworkSignal";
 
 const SESSION_PING_MS = 30_000;
@@ -34,6 +35,8 @@ type EventsProps = {
   retryIn?: number | null;
   /** `false` when this process was not started by `rust-reg-run`. */
   supervised?: boolean;
+  /** Load and edit `/api/keys` for the current event. Tests that do not mock it leave this off. */
+  manageKeys?: boolean;
 };
 
 /** The server retries a failed release check after this long. */
@@ -53,6 +56,7 @@ export default function Events({
   checkFailed = false,
   retryIn = null,
   supervised = true,
+  manageKeys = true,
 }: EventsProps) {
   const { t } = useTranslation();
   const network = useNetwork(watchNetwork);
@@ -437,15 +441,19 @@ export default function Events({
             ? t("events.token_stored")
             : t("events.token_empty")}
         </p>
-        <section
-          aria-labelledby="keys-title"
-          className="rounded-2xl border border-dashed border-zinc-300 bg-white p-5"
-        >
-          <h2 id="keys-title" className="text-sm font-medium text-zinc-500">
-            {t("keys.title")}
-          </h2>
-          <p className="mt-1 text-sm text-zinc-500">{t("keys.empty")}</p>
-        </section>
+        {current && manageKeys ? (
+          <Keys eventId={current.id} />
+        ) : (
+          <section
+            aria-labelledby="keys-title"
+            className="rounded-2xl border border-dashed border-zinc-300 bg-white p-5"
+          >
+            <h2 id="keys-title" className="text-sm font-medium text-zinc-500">
+              {t("keys.title")}
+            </h2>
+            <p className="mt-1 text-sm text-zinc-500">{t("keys.no_event")}</p>
+          </section>
+        )}
       </div>
     </main>
   );

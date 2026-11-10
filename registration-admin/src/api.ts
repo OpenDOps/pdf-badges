@@ -213,8 +213,80 @@ export async function postUpdateCheck(): Promise<
   return { ok: true, newer: typeof newer === "string" && newer !== "" ? newer : null };
 }
 
-export async function fetchKeys(): Promise<unknown[]> {
-  const response = await fetch("/api/keys", { credentials: "same-origin" });
-  const body = (await response.json()) as { data?: unknown[] };
-  return body.data ?? [];
+export type KeyRow = {
+  id: number;
+  key: string;
+  comment: string | null;
+  isAdmin: boolean;
+};
+
+export type KeyResult<T> = { ok: true; data: T } | { ok: false; code: string };
+
+type Envelope = { ok?: boolean; data?: unknown; error?: { code?: string } };
+
+async function keyCall(url: string, init: RequestInit): Promise<KeyResult<unknown>> {
+  const response = await fetch(url, { credentials: "same-origin", ...init });
+  let body: Envelope = {};
+  try {
+    body = (await response.json()) as Envelope;
+  } catch {
+    // Not JSON: reported as unknown_error below.
+  }
+  if (body.ok !== true) {
+    const code = body.error?.code ?? "unknown_error";
+    return { ok: false, code: code === "unauthorized" ? "session_expired" : code };
+  }
+  return { ok: true, data: body.data };
+}
+
+function keyRow(raw: unknown): KeyRow {
+  const row = raw as { id: number; key: string; comment?: string | null; is_admin?: boolean };
+  return {
+    id: row.id,
+    key: row.key,
+    comment: typeof row.comment === "string" && row.comment !== "" ? row.comment : null,
+    isAdmin: row.is_admin === true,
+  };
+}
+
+/** `GET /api/keys`: the admin and operator keys of the open event. */
+export async function fetchKeys(): Promise<KeyResult<KeyRow[]>> {
+  const result = await keyCall("/api/keys", {});
+  if (!result.ok) {
+    return result;
+  }
+  return { ok: true, data: Array.isArray(result.data) ? result.data.map(keyRow) : [] };
+}
+
+/** `POST /api/keys`: a new key with a generated value. */
+export async function postKey(isAdmin: boolean): Promise<KeyResult<KeyRow>> {
+  const result = await keyCall("/api/keys", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ is_admin: isAdmin }),
+  });
+  if (!result.ok) {
+    return result;
+  }
+  return { ok: true, data: keyRow(result.data) };
+}
+
+/** `PATCH /api/keys/:id`: new key text and comment. */
+export async function patchKey(
+  id: number,
+  key: string,
+  comment: string,
+): Promise<KeyResult<null>> {
+  const result = await keyCall(`/api/keys/${id}`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ key, comment }),
+  });
+  return result.ok ? { ok: true, data: null } : result;
+}
+
+/** `DELETE /api/keys/:id`. The last admin or the last operator key is refused (`last_key`). */
+export async function deleteKey(id: number): Promise<KeyResult<null>> {
+  const result = await keyCall(`/api/keys/${id}`, { method: "DELETE" });
+  return result.ok ? { ok: true, data: null } : result;
 }

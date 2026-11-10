@@ -29,6 +29,16 @@ const CATALOG_KEYS = [
   "events.waiting",
   "keys.title",
   "keys.empty",
+  "keys.no_event",
+  "keys.admin",
+  "keys.operator",
+  "keys.add",
+  "keys.edit",
+  "keys.delete",
+  "keys.save",
+  "keys.cancel",
+  "error.last_key",
+  "error.key_taken",
 ];
 
 test("ru_has_every_key", () => {

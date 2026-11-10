@@ -3152,6 +3152,66 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn keys_keep_one_of_each_kind() {
+            let venue = open_event("EVT");
+            let cookie = sign_in(&venue.app).await;
+            let (_, body, _) = send(&venue.app, "GET", "/api/keys", b"", Some(&cookie)).await;
+            let rows = json_body(&body)["data"].as_array().unwrap().clone();
+            let admin = rows.iter().find(|row| row["is_admin"] == true).unwrap();
+            let operator = rows.iter().find(|row| row["is_admin"] == false).unwrap();
+            let admin_id = admin["id"].as_i64().unwrap();
+            let operator_id = operator["id"].as_i64().unwrap();
+
+            for id in [admin_id, operator_id] {
+                let (status, body, _) = send(
+                    &venue.app,
+                    "DELETE",
+                    &format!("/api/keys/{id}"),
+                    b"",
+                    Some(&cookie),
+                )
+                .await;
+                assert_eq!(status, StatusCode::CONFLICT);
+                assert_eq!(json_body(&body)["error"]["code"], "last_key");
+            }
+
+            let (status, body, _) = send(
+                &venue.app,
+                "POST",
+                "/api/keys",
+                br#"{"is_admin":true,"comment":"boss"}"#,
+                Some(&cookie),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            let created = json_body(&body)["data"].clone();
+            assert_eq!(created["is_admin"], true);
+            assert_eq!(created["key"].as_str().unwrap().len(), 7);
+
+            let (status, _, _) = send(
+                &venue.app,
+                "DELETE",
+                &format!("/api/keys/{admin_id}"),
+                b"",
+                Some(&cookie),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+
+            let taken = serde_json::json!({ "key": operator["key"] }).to_string();
+            let (status, body, _) = send(
+                &venue.app,
+                "PATCH",
+                &format!("/api/keys/{}", created["id"].as_i64().unwrap()),
+                taken.as_bytes(),
+                Some(&cookie),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CONFLICT);
+            assert_eq!(json_body(&body)["error"]["code"], "key_taken");
+        }
+
+        #[tokio::test]
         async fn desk_key_required() {
             let venue = open_event("EVT");
             let (status, body, _) = send(
