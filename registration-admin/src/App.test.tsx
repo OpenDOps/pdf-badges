@@ -15,7 +15,7 @@ function json(body: unknown) {
   return { json: async () => body };
 }
 
-function mockApi() {
+function mockApi(selectBody?: unknown) {
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -59,6 +59,9 @@ function mockApi() {
         return json({ ok: true });
       }
       if (url.endsWith("/api/events/select")) {
+        if (selectBody) {
+          return json(selectBody);
+        }
         return json({
           ok: true,
           data: { id: "5245081", name: "TechCrunch", token_stored: true },
@@ -103,4 +106,15 @@ test("app_opens_events_after_login", async () => {
     await screen.findByRole("heading", { name: "Мероприятия" }),
   ).toBeInTheDocument();
   expect(window.location.pathname).toBe("/admin/events");
+});
+
+test("app_select_with_an_expired_session_returns_to_login", async () => {
+  mockApi({ ok: false, error: { code: "session_expired" } });
+  window.history.pushState({}, "", "/admin/events");
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: "TechCrunch" }));
+  expect(
+    await screen.findByRole("heading", { name: "Вход в систему" }),
+  ).toBeInTheDocument();
+  expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
 });

@@ -227,16 +227,15 @@ export default function Events({
         window.clearInterval(tick);
       }
     }, 1000);
-    const hold = new Promise<void>((resolve) => {
-      window.setTimeout(resolve, budget * 1000);
-    });
     try {
       const result = await onSelect(id, name);
       if (typeof result === "string" && result) {
         setError(result);
       }
+    } catch {
+      setError("unknown_error");
     } finally {
-      await hold;
+      // The answer is in (switched, refused, or the session ended): close the dialog now.
       window.clearInterval(tick);
       inFlight.current = false;
       setBusy(false);

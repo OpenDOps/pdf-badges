@@ -126,28 +126,55 @@ test("events_pings_the_session", async () => {
   vi.unstubAllGlobals();
 });
 
-test("select_counts_down_and_disables_choices", async () => {
+test("select_counts_down_and_closes_when_switched", async () => {
   vi.useFakeTimers();
-  const onSelect = vi.fn().mockResolvedValue(undefined);
-  renderEvents({ onSelect, timeoutSecs: 3 });
+  let switched: () => void = () => {};
+  const onSelect = vi.fn(() => new Promise<void>((resolve) => (switched = resolve)));
+  renderEvents({ onSelect, timeoutSecs: 20 });
   const chosen = screen.getByRole("button", { name: "TechCrunch" });
   act(() => {
     fireEvent.click(chosen);
   });
   expect(chosen).toBeDisabled();
   expect(screen.getByRole("button", { name: "Bo" })).toBeDisabled();
-  expect(screen.getByRole("progressbar")).toHaveTextContent("Подождите 3 с");
+  expect(screen.getByRole("progressbar")).toHaveTextContent("Подождите 20 с");
   await act(async () => {
     await vi.advanceTimersByTimeAsync(1000);
   });
-  expect(screen.getByRole("progressbar")).toHaveTextContent("Подождите 2 с");
+  expect(screen.getByRole("progressbar")).toHaveTextContent("Подождите 19 с");
+  // The server answers early: the dialog closes without waiting out the 20 s.
   await act(async () => {
-    await vi.advanceTimersByTimeAsync(2000);
+    switched();
   });
   expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
   expect(chosen).toBeEnabled();
   expect(onSelect).toHaveBeenCalledTimes(1);
   vi.useRealTimers();
+});
+
+test("select_error_closes_the_dialog_at_once", async () => {
+  vi.useFakeTimers();
+  renderEvents({ timeoutSecs: 20, onSelect: async () => "select_in_progress" });
+  await act(async () => {
+    fireEvent.click(screen.getByRole("button", { name: "TechCrunch" }));
+  });
+  expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
+  expect(screen.getByRole("alert")).toHaveTextContent("Выбор мероприятия уже выполняется");
+  vi.useRealTimers();
+});
+
+test("select_failure_to_reach_the_server_closes_the_dialog", async () => {
+  renderEvents({
+    timeoutSecs: 20,
+    onSelect: async () => {
+      throw new Error("offline");
+    },
+  });
+  await act(async () => {
+    fireEvent.click(screen.getByRole("button", { name: "TechCrunch" }));
+  });
+  expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
+  expect(screen.getByRole("alert")).toHaveTextContent("Неизвестная ошибка");
 });
 
 test("select_shows_already_in_progress", async () => {

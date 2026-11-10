@@ -236,6 +236,8 @@ pub struct OperatorState {
     session_ttl: Duration,
     current: Arc<Mutex<CurrentEvent>>,
     prints: Option<crate::registration_server::PrintQueue>,
+    /// Sync thread wake and its running flag. A switched event starts syncing at once.
+    sync: Option<(Arc<tokio::sync::Notify>, Arc<std::sync::atomic::AtomicBool>)>,
 }
 
 struct OperatorLease {
@@ -254,6 +256,25 @@ impl OperatorState {
             session_ttl: OPERATOR_SESSION,
             current,
             prints: None,
+            sync: None,
+        }
+    }
+
+    /// Wake the sync thread after a switch. The registration router attaches it.
+    pub(crate) fn with_sync(
+        mut self,
+        notify: Arc<tokio::sync::Notify>,
+        running: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Self {
+        self.sync = Some((notify, running));
+        self
+    }
+
+    fn wake_sync(&self) {
+        if let Some((notify, running)) = &self.sync {
+            if !running.load(std::sync::atomic::Ordering::Acquire) {
+                notify.notify_one();
+            }
         }
     }
 
@@ -549,6 +570,8 @@ async fn select_event(
                     timeout_secs,
                 );
             }
+            // The database is open and its keys are seeded; start the first sync now.
+            state.wake_sync();
             api_ok(json!({
                 "id": id,
                 "name": name,
@@ -1283,5 +1306,50 @@ mod tests {
             let response = call(&root, request).await;
             assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
         }
+    }
+}
+
+#[cfg(test)]
+mod sync_wake_tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use tokio::sync::Notify;
+
+    use super::OperatorState;
+    use crate::registration_server::credentials::CredentialFile;
+    use crate::registration_server::remote::Remote;
+
+    fn operator(notify: &Arc<Notify>, running: &Arc<AtomicBool>) -> OperatorState {
+        let dir = std::env::temp_dir().join(format!("rust-reg-wake-{}", std::process::id()));
+        OperatorState::new(
+            CredentialFile::new(dir.join("credentials.yml")),
+            Remote::new("http://127.0.0.1:1").unwrap(),
+        )
+        .with_sync(Arc::clone(notify), Arc::clone(running))
+    }
+
+    #[tokio::test]
+    async fn a_switch_wakes_the_sync_thread() {
+        let notify = Arc::new(Notify::new());
+        let running = Arc::new(AtomicBool::new(false));
+        operator(&notify, &running).wake_sync();
+        tokio::time::timeout(Duration::from_millis(200), notify.notified())
+            .await
+            .expect("sync was woken");
+    }
+
+    #[tokio::test]
+    async fn a_running_sync_is_left_alone() {
+        let notify = Arc::new(Notify::new());
+        let running = Arc::new(AtomicBool::new(true));
+        operator(&notify, &running).wake_sync();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), notify.notified())
+                .await
+                .is_err()
+        );
+        running.store(false, Ordering::Release);
     }
 }

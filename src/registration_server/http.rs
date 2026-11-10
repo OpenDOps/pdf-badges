@@ -27,6 +27,7 @@ pub fn router(app: App) -> Router {
         .operator
         .clone()
         .with_current(Arc::clone(&app.current))
+        .with_sync(Arc::clone(&app.sync_notify), Arc::clone(&app.sync_running))
         .with_prints(app.prints.clone());
     let pages = Router::new()
         .route("/health", get(health))

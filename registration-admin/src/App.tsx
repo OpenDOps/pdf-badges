@@ -167,6 +167,10 @@ function EventsRoute({ onLeave }: { onLeave: () => void }) {
       onSelect={async (id, name) => {
         const result = await postSelect(id, name);
         if (!result.ok) {
+          if (result.code === "session_expired") {
+            onLeave();
+            return;
+          }
           return result.code;
         }
         setTokenStored(result.tokenStored);
