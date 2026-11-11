@@ -549,7 +549,7 @@ The root daemon was retired by hand the way D's pkg `postinstall` does it (`laun
 | **Port…** without a service: 8081 → 8082 → 8081, no password, Docker's 8080 untouched | pass (operator, 2026-11-10) |
 | Quit stops the server with no prompt; reopening starts it again | pass (operator, 2026-11-10) |
 | Matching digest skip | open — E (`alpha.13`) then E′ (`alpha.14`, frontend-only change); E → E′ must not download the tray zip (server and wrapper embed the version, so their digests always change) |
-| Version label after an upgrade without a reload (`b1f60041`) | open — E → E′ |
+| Version label after an upgrade without a reload (`b1f60041`) | pass: D → E (`alpha.13`), D carrying the hand-installed `b1f60041` admin build (operator, 2026-11-11) |
 | Sleep (display asleep, screen locked, server still reachable) | deferred → [manual-test-plan.md §1](manual-test-plan.md#1-server-stays-reachable-while-the-mac-looks-asleep) |
 | Fresh pkg install (`postinstall`) | deferred → [manual-test-plan.md §2](manual-test-plan.md#2-fresh-install-from-the-macos-pkg) |
 
