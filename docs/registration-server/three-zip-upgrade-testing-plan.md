@@ -379,9 +379,9 @@ Done. Fixture packs + asserts: `bash scripts/release/test-marker-packs.sh` (`thr
 **Depends on:** [6](#step-6-automated-parts-suite), [10](#step-10-marker-packs-abc)  
 **Unlocks:** [12](#step-12-linux-proof) (recommended), [13](#step-13-cleanup)
 
-Prefix: `/Library/rust-reg` (pkg). Tray: `/Applications/reg-server.app`. Root-side steps use [mac-proof.sh](../../scripts/release/mac-proof.sh) (`install`, `fixup`, `port`, `restart`).
+Phases 0–4 (A, B, C) ran in the old model: a root LaunchDaemon with prefix `/Library/rust-reg`, driven by [mac-proof.sh](../../scripts/release/mac-proof.sh) (`install`, `fixup`, `port`, `restart`). From Phase 4b on there is no root service: the tray runs the server as the user from `~/Library/Application Support/rust-reg`, and `/Library/rust-reg` is only the pkg's template. Tray: `/Applications/reg-server.app` (owned by the user).
 
-Versions: **A = `2.0.0-alpha.9`, B = `alpha.10`, C = `alpha.11`** (numeric prerelease only — not `9a`). The first attempt (`alpha.6` A / `alpha.7` B) was published but superseded: those pkgs/trays carry the bugs listed under [Findings](#findings-during-the-proof). Clients need `REGISTRATION_UPDATE_PRERELEASE=1` (`mac-proof.sh install` sets it).
+Versions: **A = `2.0.0-alpha.9`, B = `alpha.10`, C = `alpha.11`**, then shipping builds **D = `alpha.12`**, **E = `alpha.13`**, **E′ = `alpha.14`** (numeric prerelease only — not `9a`). The first attempt (`alpha.6` A / `alpha.7` B) was published but superseded: those pkgs/trays carry the bugs listed under [Findings](#findings-during-the-proof). Clients need `REGISTRATION_UPDATE_PRERELEASE=1` (`mac-proof.sh install` sets it).
 
 **Order matters:** the updater offers the *newest* release, so publish C only after A → B is verified (otherwise A jumps straight to C).
 
@@ -399,7 +399,7 @@ Bugs found while running Phases 1–2 and fixed on `main` (each with tests):
 | Quit / **Port…** sent TERM/KILL to **every** listener on the port (would kill Docker’s forwarder) | `stop_port` signals only `rust-reg` / `rust-reg-run` | `c99571d4` |
 | Tray remembered a port before it started (a busy port stuck across launches) | `desk.port` written only after a successful start / adopt | `5b3090b8` |
 | Service (launchd / systemd / Windows) ignored the tray port | Wrapper reads `<prefix>/data/port`; with a service installed, **Port…** writes it and restarts the service (admin prompt), tray starts on the service port | `5b3090b8` |
-| **Port…** and Quit asked for an admin password every time; Quit unloaded the service, and the reopened tray then ran its own server as the user (`credentials.yml: Permission denied`) | The wrapper (root) makes `data/port` user-writable (macOS `staff` 664, Linux 666, Windows `Users` modify) and restarts the server when it changes; `data/port` now wins over `RUST_REG_HTTP`. **Port…** only writes the file (elevated restart only as a fallback for old installs). Quit leaves the service running. A tray that finds the service down says so instead of starting a copy | this commit |
+| **Port…** and Quit asked for an admin password every time; Quit unloaded the service, and the reopened tray then ran its own server as the user (`credentials.yml: Permission denied`) | The wrapper (root) makes `data/port` user-writable (macOS `staff` 664, Linux 666, Windows `Users` modify) and restarts the server when it changes; `data/port` now wins over `RUST_REG_HTTP`. **Port…** only writes the file (elevated restart only as a fallback for old installs). Quit leaves the service running. A tray that finds the service down says so instead of starting a copy | `3a909639` (superseded by the next row) |
 | Even without per-action prompts, a root service still needed admin rights to start, stop, or recover (the old B tray's Quit unloaded it again) | **No root at runtime.** The tray runs the server as the desktop user from a per-user prefix (macOS `~/Library/Application Support/rust-reg`, Linux `~/.local/share/rust-reg`, Windows `%LOCALAPPDATA%\rust-reg`). The installed copy (`/Library/rust-reg`, `/opt/rust-reg`, `C:\Program Files\rust-reg`) only seeds it: first run copies it without `data/`, a newer installed version refreshes `bin/` and `versions/`. Packages no longer install a LaunchDaemon / systemd unit / Windows service and retire an old one; the macOS pkg gives `reg-server.app` to the console user so self-update can replace it. macOS: `caffeinate -i -w <server>` keeps the system from idle sleep while the server runs (display may sleep). | `5cc4a547` (D = `alpha.12`) |
 | After the move off the root service the server lost `REGISTRATION_UPDATE_PRERELEASE`, asked GitHub for `releases/latest` (404: only pre-releases exist) and showed “update server unreachable” | A pre-release build follows pre-releases by itself; a 404 from `releases/latest` is “no update”; the tray passes the variable to older servers | `135eca54` |
 | Old wrapper and new server both copied the parts through `<name>.new` when the phase turned `current`; one rename failed (`No such file or directory` in the log, result still correct) | Per-process temp name | `faf9b40a` |
@@ -434,6 +434,8 @@ cargo test --test admin_pages testpath_
 | 2 | `2.0.0-alpha.10` | `B` | **B** — upgrade zips | published + verified (server/wrapper/tray digests ≠ A; Intel job re-run after a CI artifact timeout) |
 | 3 | `2.0.0-alpha.11` | `C` | **C** — upgrade zips | published + verified (server `c2244fda8b9b`, wrapper `4ed31bef4a44`, tray `047d1c54542c`, all ≠ B) |
 | 4 | `2.0.0-alpha.12` | *(empty)* | **D** — shipping build, no root (white icon, no probe) | published + verified (pkg has `postinstall`, no LaunchDaemon in the payload) |
+| 5 | `2.0.0-alpha.13` | *(empty)* | **E** — shipping build with the pre-release and label fixes | published + verified (server `2589a03aa76f`, wrapper `52a3d0733cd6`, tray `6248c57bc503`) |
+| 6 | `2.0.0-alpha.14` | *(empty)* | **E′** — same code as E plus the version bump (matching-digest skip) | building (run `43070186030`) |
 
 ```bash
 gh workflow run release.yml --ref main -f version=2.0.0-alpha.10 -f upgrade_probe=B \
@@ -548,7 +550,8 @@ The root daemon was retired by hand the way D's pkg `postinstall` does it (`laun
 | D tray after Quit + reopen: white icon, no **Upgrade probe** | pass (operator, 2026-11-10) |
 | **Port…** without a service: 8081 → 8082 → 8081, no password, Docker's 8080 untouched | pass (operator, 2026-11-10) |
 | Quit stops the server with no prompt; reopening starts it again | pass (operator, 2026-11-10) |
-| Matching digest skip | open — E (`alpha.13`) then E′ (`alpha.14`, frontend-only change); E → E′ must not download the tray zip (server and wrapper embed the version, so their digests always change) |
+| D → E (`alpha.13`) as the user | pass: `live` = `2.0.0-alpha.13`, phase `current`; server / wrapper / tray = `2589a03aa76f` / `52a3d0733cd6` / `6248c57bc503` (operator, 2026-11-11) |
+| Matching digest skip | open — E′ (`alpha.14`) is E's code plus the version bump. Server and wrapper embed the version, so they always change; the tray does not, so E′'s `rust-reg-desk-macos` line must equal E's and E → E′ must not download the tray zip (`versions/2.0.0-alpha.14/` has no `rust-reg-desk`; the app binary stays `6248c57bc503`) |
 | Version label after an upgrade without a reload (`b1f60041`) | pass: D → E (`alpha.13`), D carrying the hand-installed `b1f60041` admin build (operator, 2026-11-11) |
 | Sleep (display asleep, screen locked, server still reachable) | deferred → [manual-test-plan.md §1](manual-test-plan.md#1-server-stays-reachable-while-the-mac-looks-asleep) |
 | Fresh pkg install (`postinstall`) | deferred → [manual-test-plan.md §2](manual-test-plan.md#2-fresh-install-from-the-macos-pkg) |
