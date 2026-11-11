@@ -375,7 +375,7 @@ Done. Fixture packs + asserts: `bash scripts/release/test-marker-packs.sh` (`thr
 
 [Back to summary](#summary)
 
-**Status:** in progress — Phases 0, 1, 2, 3, 4 done; Phase 4b (C → D, no root) done; [What is left](#what-is-left) before Phase 5  
+**Status:** in progress — Phases 0–4 and 4b done; D → E and E → E′ (matching-digest skip) done; open: the C tray's **Upgrade probe** check, and the two checks deferred to [manual-test-plan.md](manual-test-plan.md)  
 **Depends on:** [6](#step-6-automated-parts-suite), [10](#step-10-marker-packs-abc)  
 **Unlocks:** [12](#step-12-linux-proof) (recommended), [13](#step-13-cleanup)
 
@@ -435,7 +435,7 @@ cargo test --test admin_pages testpath_
 | 3 | `2.0.0-alpha.11` | `C` | **C** — upgrade zips | published + verified (server `c2244fda8b9b`, wrapper `4ed31bef4a44`, tray `047d1c54542c`, all ≠ B) |
 | 4 | `2.0.0-alpha.12` | *(empty)* | **D** — shipping build, no root (white icon, no probe) | published + verified (pkg has `postinstall`, no LaunchDaemon in the payload) |
 | 5 | `2.0.0-alpha.13` | *(empty)* | **E** — shipping build with the pre-release and label fixes | published + verified (server `2589a03aa76f`, wrapper `52a3d0733cd6`, tray `6248c57bc503`) |
-| 6 | `2.0.0-alpha.14` | *(empty)* | **E′** — same code as E plus the version bump (matching-digest skip) | building (run `43070186030`) |
+| 6 | `2.0.0-alpha.14` | *(empty)* | **E′** — same code as E plus the version bump (matching-digest skip) | published + verified (server `17528321db9b`, wrapper `ab55b668fdbc`, tray `6248c57bc503` = E) |
 
 ```bash
 gh workflow run release.yml --ref main -f version=2.0.0-alpha.10 -f upgrade_probe=B \
@@ -551,7 +551,7 @@ The root daemon was retired by hand the way D's pkg `postinstall` does it (`laun
 | **Port…** without a service: 8081 → 8082 → 8081, no password, Docker's 8080 untouched | pass (operator, 2026-11-10) |
 | Quit stops the server with no prompt; reopening starts it again | pass (operator, 2026-11-10) |
 | D → E (`alpha.13`) as the user | pass: `live` = `2.0.0-alpha.13`, phase `current`; server / wrapper / tray = `2589a03aa76f` / `52a3d0733cd6` / `6248c57bc503` (operator, 2026-11-11) |
-| Matching digest skip | open — E′ (`alpha.14`) is E's code plus the version bump. Server and wrapper embed the version, so they always change; the tray does not, so E′'s `rust-reg-desk-macos` line must equal E's and E → E′ must not download the tray zip (`versions/2.0.0-alpha.14/` has no `rust-reg-desk`; the app binary stays `6248c57bc503`) |
+| Matching digest skip | pass: E → E′ (`alpha.14`, 2026-11-11). `live` = `2.0.0-alpha.14`, phase `current`; server and wrapper downloaded (`17528321db9b` / `ab55b668fdbc`); the tray zip was not fetched — `versions/2.0.0-alpha.14/` has no `rust-reg-desk`, and `bin/rust-reg-desk` and the app binary stay `6248c57bc503`, unchanged since D → E |
 | Version label after an upgrade without a reload (`b1f60041`) | pass: D → E (`alpha.13`), D carrying the hand-installed `b1f60041` admin build (operator, 2026-11-11) |
 | Sleep (display asleep, screen locked, server still reachable) | deferred → [manual-test-plan.md §1](manual-test-plan.md#1-server-stays-reachable-while-the-mac-looks-asleep) |
 | Fresh pkg install (`postinstall`) | deferred → [manual-test-plan.md §2](manual-test-plan.md#2-fresh-install-from-the-macos-pkg) |
@@ -572,7 +572,7 @@ When every row in the test plan passes, set status → `done`. Restore Docker / 
 | B → C tray | Probe item gone; icon ≠ B | icon pass; probe item not checked |
 | B → C wrapper / server / frontend | Probe C (or `/testpath` gone) | pass |
 | C → D without root | Update as the user, no password; all three parts replaced | pass |
-| Matching digest skip | Unchanged component not downloaded; its marker stays | open |
+| Matching digest skip | Unchanged component not downloaded; its marker stays | pass (E → E′: tray skipped) |
 | Busy port at tray start | Error “port N is in use by another program; the server did not start”; not adopted | pass (fixed dev tray vs Docker on 8080) |
 | **Port…** to a free port | Server moves; other program on the old port untouched | pass (8080 → 8081, Docker kept 8080) |
 | **Port…** with installed service (B tray) | Admin prompt; `data/port` written; service on new port | superseded (no service since D) |
