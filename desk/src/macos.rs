@@ -8,7 +8,8 @@ use std::time::Duration;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObjectProtocol, ProtocolObject};
 use objc2::{
-    define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly,
+    define_class, msg_send, sel, AnyThread, ClassType, DefinedClass, MainThreadMarker,
+    MainThreadOnly,
 };
 use objc2_app_kit::{
     NSAlert, NSAlertStyle, NSApplication, NSApplicationActivationOptions,
@@ -450,11 +451,21 @@ fn system_pencil_alpha() -> Option<Vec<u8>> {
     let (x, y, w, h) = server::pencil_symbol_rect();
     let name = NSString::from_str("pencil");
     let symbol = NSImage::imageWithSystemSymbolName_accessibilityDescription(&name, None)?;
-    let symbol = symbol
-        .imageWithSymbolConfiguration(
-            &NSImageSymbolConfiguration::configurationPreferringMonochrome(),
-        )
-        .unwrap_or(symbol);
+    // macOS 13+. Monterey raises NSInvalidArgumentException for this selector,
+    // and Rust aborts on that foreign exception, so the menu-bar process exits
+    // after the server is already listening.
+    let symbol = if NSImageSymbolConfiguration::class()
+        .metaclass()
+        .responds_to(sel!(configurationPreferringMonochrome))
+    {
+        symbol
+            .imageWithSymbolConfiguration(
+                &NSImageSymbolConfiguration::configurationPreferringMonochrome(),
+            )
+            .unwrap_or(symbol)
+    } else {
+        symbol
+    };
     symbol.setTemplate(false);
     let rep = unsafe {
         NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel(
