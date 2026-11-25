@@ -333,6 +333,21 @@ export class FormClient {
     return this.getJson("/api/printers");
   }
 
+  printersSearch(wait?: { generation: number; running: boolean }): Promise<unknown> {
+    if (!wait) return this.getJson("/api/printers/search");
+    const params = new URLSearchParams({
+      generation: String(wait.generation),
+      running: wait.running ? "true" : "false",
+    });
+    return this.getJson(`/api/printers/search?${params}`);
+  }
+
+  refreshPrinters(): Promise<unknown> {
+    return this.send("/api/printers/refresh", "{}", { "Content-Type": "application/json" }).then(
+      (body) => unwrapData(body),
+    );
+  }
+
   async patchPrinter(
     id: string,
     body: {

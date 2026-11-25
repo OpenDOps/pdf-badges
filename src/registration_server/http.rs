@@ -70,6 +70,8 @@ pub fn router(app: App) -> Router {
             get(desk_barcodes).patch(desk_barcodes_patch),
         )
         .route("/api/printers", get(printers_index))
+        .route("/api/printers/search", get(printers_search))
+        .route("/api/printers/refresh", post(printers_refresh))
         .route("/api/printers/{*id}", patch(printer_patch))
         .route("/api/sync", get(sync_status).post(sync_wake_request))
         .route("/api/update", get(update_status).post(update_install))
@@ -2023,6 +2025,85 @@ async fn printers_index(State(app): State<App>, headers: HeaderMap) -> Response 
     api_ok(serde_json::Value::Array(
         rows.iter().map(printer_json).collect(),
     ))
+}
+
+const PRINTERS_SEARCH_HOLD: std::time::Duration = std::time::Duration::from_secs(25);
+const PRINTERS_SEARCH_TICK: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// Start a printer search when idle (single flight). Returns progress + current list.
+async fn printers_refresh(State(app): State<App>, headers: HeaderMap) -> Response {
+    if let Err(response) = require_desk(&app, &headers) {
+        return response;
+    }
+    let started = if let Some(search) = app.search.lock().expect("search").clone() {
+        search.refresh()
+    } else {
+        false
+    };
+    printers_search_response(&app, started)
+}
+
+/// Long-poll printer search progress. With `generation` / `running`, waits until either changes.
+async fn printers_search(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Query(query): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    if let Err(response) = require_desk(&app, &headers) {
+        return response;
+    }
+    let wait_generation = query.get("generation").and_then(|raw| raw.parse::<u64>().ok());
+    let wait_running = query.get("running").and_then(|raw| match raw.as_str() {
+        "1" | "true" => Some(true),
+        "0" | "false" => Some(false),
+        _ => None,
+    });
+    let waiting = wait_generation.is_some() || wait_running.is_some();
+    let started = tokio::time::Instant::now();
+    loop {
+        let progress = search_progress_of(&app);
+        let changed = wait_generation.is_some_and(|generation| generation != progress.generation)
+            || wait_running.is_some_and(|running| running != progress.running);
+        if !waiting || changed || started.elapsed() >= PRINTERS_SEARCH_HOLD {
+            return printers_search_response(&app, false);
+        }
+        tokio::time::sleep(PRINTERS_SEARCH_TICK).await;
+    }
+}
+
+fn search_progress_of(app: &App) -> cups::SearchProgress {
+    app.search
+        .lock()
+        .expect("search")
+        .as_ref()
+        .map(cups::Search::progress)
+        .unwrap_or(cups::SearchProgress {
+            generation: 0,
+            running: false,
+            error: None,
+        })
+}
+
+fn printers_search_response(app: &App, started: bool) -> Response {
+    let progress = search_progress_of(app);
+    let rows = printer_rows(app);
+    let mut body = serde_json::json!({
+        "started": started,
+        "running": progress.running,
+        "generation": progress.generation,
+        "error": progress.error,
+        "printers": rows.iter().map(printer_json).collect::<Vec<_>>(),
+    });
+    // `started` is only meaningful on POST refresh; omit noise on GET.
+    if !started {
+        body.as_object_mut().expect("object").remove("started");
+    }
+    let mut response = api_ok(body);
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    response
 }
 
 async fn printer_patch(
@@ -3989,6 +4070,52 @@ mod tests {
                 .await
                 .unwrap();
             (status, bytes.to_vec())
+        }
+
+        #[tokio::test]
+        async fn printers_refresh_requires_desk_and_returns_progress() {
+            let venue = open_event("EVT");
+            let search = Search::parked("http://127.0.0.1:9");
+            let front = "ipp://192.0.2.10:631/ipp/print";
+            search.set_files(&venue.dir.0, "EVT");
+            search.testing_insert(sample("ECOSYS", front, "192.0.2.10", "idle"));
+            *venue.app.search.lock().unwrap() = Some(search.clone());
+
+            let (status, _) =
+                send(&venue.app, "POST", "/api/printers/refresh", b"{}", None).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+            let cookie = admin_cookie(&venue.app);
+            let (status, body) = send(
+                &venue.app,
+                "POST",
+                "/api/printers/refresh",
+                b"{}",
+                Some(&cookie),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            let data = json_body(&body)["data"].clone();
+            assert_eq!(data["started"], true);
+            assert_eq!(data["running"], true);
+            assert!(data["generation"].as_u64().unwrap() >= 1);
+            assert_eq!(data["printers"].as_array().unwrap().len(), 1);
+
+            let generation = data["generation"].as_u64().unwrap();
+            let (status, body) = send(
+                &venue.app,
+                "GET",
+                &format!("/api/printers/search?generation={generation}&running=true"),
+                b"",
+                Some(&cookie),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            let waited = json_body(&body)["data"].clone();
+            assert!(waited.get("started").is_none());
+            assert_eq!(waited["running"], false);
+            assert_eq!(waited["generation"], generation);
+            let _ = search.wait();
         }
 
         #[tokio::test]

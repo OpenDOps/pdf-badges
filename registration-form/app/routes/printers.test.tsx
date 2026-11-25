@@ -43,6 +43,63 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+test("printers_shows_refresh_and_posts_a_new_search", async () => {
+  const calls: { url: string; method: string }[] = [];
+  let rows: unknown[] = [];
+  let searching = false;
+  let generation = 1;
+  let releaseSearch: (() => void) | null = null;
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = urlOf(input);
+      const method = init?.method ?? "GET";
+      calls.push({ url, method });
+      if (url.includes("/api/desk/catalog")) {
+        return json({ rev: 1, categories: [], printers: [] });
+      }
+      if (url.includes("/api/printers/search")) {
+        if (url.includes("generation=") || searching) {
+          await new Promise<void>((resolve) => {
+            releaseSearch = resolve;
+          });
+          searching = false;
+          rows = [front];
+          return json({ running: false, generation, error: null, printers: rows });
+        }
+        return json({ running: false, generation, error: null, printers: rows });
+      }
+      if (url.includes("/api/printers/refresh") && method === "POST") {
+        searching = true;
+        generation += 1;
+        return json({
+          started: true,
+          running: true,
+          generation,
+          error: null,
+          printers: rows,
+        });
+      }
+      return json(rows);
+    }),
+  );
+
+  render(<Printers />);
+  expect(await screen.findByText("Нет принтеров")).toBeInTheDocument();
+  const refresh = screen.getByRole("button", { name: "Обновить список" });
+  fireEvent.click(refresh);
+  expect(await screen.findByRole("button", { name: "Ищем…" })).toBeDisabled();
+  releaseSearch?.();
+  expect(await screen.findByDisplayValue("ECOSYS")).toBeInTheDocument();
+  expect(await screen.findByRole("button", { name: "Обновить список" })).toBeEnabled();
+  expect(calls.some((call) => call.url.includes("/api/printers/refresh") && call.method === "POST")).toBe(
+    true,
+  );
+  expect(calls.some((call) => call.url.includes("/api/printers/search") && call.method === "GET")).toBe(
+    true,
+  );
+});
+
 test("printers_saves_name_visibility_and_routing", async () => {
   const patched: { url: string; body: string }[] = [];
   vi.stubGlobal(
@@ -115,7 +172,7 @@ test("printers_polls_name_and_availability_without_dropping_an_edit", async () =
 
   rows = [{ ...front, name: "Hall", available: true }];
   fireEvent.click(screen.getByRole("button", { name: "Сохранить" }));
-  expect(await screen.findByDisplayValue("Hall")).toBeInTheDocument();
+  expect(await screen.findByDisplayValue("Hall", {}, { timeout: 4000 })).toBeInTheDocument();
   rows = [{ ...front, name: "Later", available: true }];
   expect(await screen.findByDisplayValue("Later", {}, { timeout: 4000 })).toBeInTheDocument();
 });

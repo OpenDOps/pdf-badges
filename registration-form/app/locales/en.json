@@ -116,6 +116,8 @@
   },
   "printers": {
     "empty": "No printers",
+    "refresh": "Refresh list",
+    "refreshing": "Searching…",
     "address": "Address",
     "name": "Name",
     "show": "Show",

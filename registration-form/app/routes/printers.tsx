@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 
@@ -26,6 +26,14 @@ export type PrinterRow = {
   print_cert: boolean;
   kind: string;
   params: PrinterParam[];
+};
+
+export type PrinterSearchStatus = {
+  running: boolean;
+  generation: number;
+  started?: boolean;
+  error: string | null;
+  printers: unknown;
 };
 
 type Draft = PrinterRow & { saved: boolean };
@@ -82,6 +90,18 @@ export function printerRows(body: unknown): PrinterRow[] {
   return rows;
 }
 
+export function searchStatus(body: unknown): PrinterSearchStatus | null {
+  if (!isRecord(body)) return null;
+  if (typeof body.generation !== "number" || typeof body.running !== "boolean") return null;
+  return {
+    running: body.running,
+    generation: body.generation,
+    started: body.started === true ? true : body.started === false ? false : undefined,
+    error: typeof body.error === "string" ? body.error : null,
+    printers: body.printers,
+  };
+}
+
 function mergeRows(current: Draft[], incoming: PrinterRow[], dirty: Set<string>): Draft[] {
   const localDefault = current.some((row) => dirty.has(row.id) && row.default);
   return incoming.map((row) => {
@@ -107,6 +127,27 @@ function EyeIcon({ off }: { off: boolean }) {
   );
 }
 
+function SpinnerIcon() {
+  return (
+    <svg viewBox="0 0 24 24" className="h-4 w-4 animate-spin" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="2">
+      <circle cx="12" cy="12" r="9" className="opacity-25" />
+      <path d="M21 12a9 9 0 0 0-9-9" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+async function waitUntilIdle(client: FormClient, status: PrinterSearchStatus): Promise<PrinterSearchStatus> {
+  let current = status;
+  while (current.running) {
+    const next = searchStatus(
+      await client.printersSearch({ generation: current.generation, running: true }),
+    );
+    if (!next) break;
+    current = next;
+  }
+  return current;
+}
+
 export default function Printers() {
   const { t, i18n } = useTranslation();
   const catalog = useDeskCatalog();
@@ -114,6 +155,28 @@ export default function Printers() {
   const [dirty, setDirty] = useState<Set<string>>(() => new Set());
   const [optionsFor, setOptionsFor] = useState<string | null>(null);
   const [optionDraft, setOptionDraft] = useState<Record<string, string>>({});
+  const [refreshing, setRefreshing] = useState(false);
+  const dirtyRef = useRef(dirty);
+  const refreshToken = useRef(0);
+  dirtyRef.current = dirty;
+
+  function applyPrinters(body: unknown) {
+    setRows((current) => mergeRows(current, printerRows(body), dirtyRef.current));
+  }
+
+  async function followUntilIdle(client: FormClient, status: PrinterSearchStatus) {
+    const token = ++refreshToken.current;
+    setRefreshing(true);
+    try {
+      const done = await waitUntilIdle(client, status);
+      if (refreshToken.current !== token) return;
+      applyPrinters(done.printers);
+    } catch {
+      // Poll will retry; keep the button usable.
+    } finally {
+      if (refreshToken.current === token) setRefreshing(false);
+    }
+  }
 
   useEffect(() => {
     const client = new FormClient();
@@ -122,18 +185,52 @@ export default function Printers() {
       try {
         const body = await client.printers();
         if (stop) return;
-        setRows((current) => mergeRows(current, printerRows(body), dirty));
+        applyPrinters(body);
       } catch {
         // The next poll asks again.
       }
     };
+    const followSearch = async () => {
+      try {
+        const initial = searchStatus(await client.printersSearch());
+        if (stop || !initial) return;
+        applyPrinters(initial.printers);
+        if (!initial.running) return;
+        await followUntilIdle(client, initial);
+      } catch {
+        // Poll will retry.
+      }
+    };
     void load();
+    void followSearch();
     const timer = setInterval(() => void load(), PRINTER_POLL_MS);
     return () => {
       stop = true;
+      refreshToken.current += 1;
       clearInterval(timer);
     };
-  }, [dirty]);
+  }, []);
+
+  async function refreshList() {
+    if (refreshing) return;
+    const token = ++refreshToken.current;
+    setRefreshing(true);
+    const client = new FormClient();
+    try {
+      const started = searchStatus(await client.refreshPrinters());
+      if (refreshToken.current !== token) return;
+      if (!started) return;
+      applyPrinters(started.printers);
+      if (!started.running) return;
+      const done = await waitUntilIdle(client, started);
+      if (refreshToken.current !== token) return;
+      applyPrinters(done.printers);
+    } catch {
+      // Poll will retry; keep the button usable.
+    } finally {
+      if (refreshToken.current === token) setRefreshing(false);
+    }
+  }
 
   function edit(id: string, patch: Partial<PrinterRow>) {
     setDirty((current) => new Set(current).add(id));
@@ -188,7 +285,19 @@ export default function Printers() {
 
   return (
     <ScreenFrame screen="printers" title={t("screen.printers")} className="flex flex-col gap-2 px-4 py-3">
-      {rows.length === 0 ? <p>{t("printers.empty")}</p> : null}
+      <div className="flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          className="inline-flex min-h-0 shrink-0 items-center gap-2 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm font-semibold text-gray-900 disabled:opacity-60"
+          disabled={refreshing}
+          aria-busy={refreshing}
+          onClick={() => void refreshList()}
+        >
+          {refreshing ? <SpinnerIcon /> : null}
+          {refreshing ? t("printers.refreshing") : t("printers.refresh")}
+        </button>
+        {rows.length === 0 ? <p className="text-gray-700">{t("printers.empty")}</p> : null}
+      </div>
       <ul className="flex flex-col gap-2">
         {rows.map((row) => (
           <li key={row.id} data-printer={row.id} className="relative rounded-lg border border-slate-300 bg-white px-3 py-2">

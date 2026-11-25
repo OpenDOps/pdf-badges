@@ -197,6 +197,14 @@ struct Inner {
 }
 
 /// The current list, filled from tool events. `refresh` starts another listing.
+/// Snapshot of the background printer listing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SearchProgress {
+    pub generation: u64,
+    pub running: bool,
+    pub error: Option<String>,
+}
+
 #[derive(Clone)]
 pub struct Search {
     inner: Arc<Inner>,
@@ -535,9 +543,10 @@ impl Search {
         remember_print(&mut slot, name, at);
     }
 
-    /// List both tools again. Returns while that listing is still running.
-    pub fn refresh(&self) {
-        begin(&self.inner);
+    /// List both tools again when idle. Returns `true` when a new search started.
+    /// A search that is already running is left alone (single flight).
+    pub fn refresh(&self) -> bool {
+        begin_if_idle(&self.inner)
     }
 
     /// Wait until the listing that is running has settled.
@@ -549,6 +558,16 @@ impl Search {
         match &slot.error {
             Some(message) => Err(Error::new(message.clone())),
             None => Ok(()),
+        }
+    }
+
+    /// Generation, whether a search is in flight, and the last error (if any).
+    pub fn progress(&self) -> SearchProgress {
+        let slot = self.inner.slot.lock().expect("printers");
+        SearchProgress {
+            generation: slot.generation,
+            running: slot.running,
+            error: slot.error.clone(),
         }
     }
 
@@ -573,8 +592,24 @@ impl Browse for SilentBrowse {
 }
 
 fn begin(inner: &Arc<Inner>) {
+    let _ = begin_if_idle_forced(inner, true);
+}
+
+/// Start a search when idle. When `force` is true (startup), always start.
+fn begin_if_idle(inner: &Arc<Inner>) -> bool {
+    begin_if_idle_forced(inner, false)
+}
+
+fn begin_if_idle_forced(inner: &Arc<Inner>, force: bool) -> bool {
     let generation = {
         let mut slot = inner.slot.lock().expect("printers");
+        if slot.running && !force {
+            log::debug!(
+                "printer search skipped; generation {} still running",
+                slot.generation
+            );
+            return false;
+        }
         slot.generation += 1;
         slot.native_done = false;
         slot.ipp_done = false;
@@ -590,9 +625,10 @@ fn begin(inner: &Arc<Inner>) {
         slot.generation
     };
     *inner.details.lock().expect("details") = None;
-    log::debug!("printer search");
+    log::debug!("printer search generation={generation}");
     let inner = Arc::clone(inner);
     thread::spawn(move || pass(inner, generation));
+    true
 }
 
 enum Side {
@@ -3504,9 +3540,36 @@ mod tests {
             if let Some(handle) = ipp.handle.take() {
                 let _ = handle.join();
             }
-            search.refresh();
+            assert!(search.refresh());
             search.wait().unwrap();
             assert!(search.printers().is_empty());
+        }
+
+        #[test]
+        fn refresh_is_single_flight_while_running() {
+            let cups = Cups::open_held(&[], true);
+            let browse = Arc::new(FixedBrowse {
+                services: Vec::new(),
+                calls: AtomicUsize::new(0),
+                held: Mutex::new(true),
+                cv: Condvar::new(),
+            });
+            let search = Search::start(&cups.base, Arc::clone(&browse));
+            assert!(search.progress().running);
+            let generation = search.progress().generation;
+            assert!(!search.refresh());
+            assert_eq!(search.progress().generation, generation);
+            assert!(search.progress().running);
+            {
+                let mut held = browse.held.lock().unwrap();
+                *held = false;
+                browse.cv.notify_all();
+            }
+            cups.hold.store(false, Ordering::SeqCst);
+            search.wait().unwrap();
+            assert!(!search.progress().running);
+            assert!(search.refresh());
+            search.wait().unwrap();
         }
 
         #[test]
