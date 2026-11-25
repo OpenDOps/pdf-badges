@@ -2276,7 +2276,7 @@ dependencies = [
 
 [[package]]
 name = "rust-reg"
-version = "2.0.0-alpha.14"
+version = "2.0.0-alpha.15"
 dependencies = [
  "axum",
  "clap",
