@@ -6,6 +6,7 @@
 //! `{event_id}/broken/{index}-{unix_millis}/` and an empty database is created.
 //! That event id is appended to `full_reload` in `{base}/base.config`.
 
+use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -1345,21 +1346,25 @@ fn insert_key(conn: &Connection, path: &Path, is_admin: i64) -> Result<(), Event
     ))
 }
 
-/// A fresh key in the default-key alphabet, for a key the operator adds.
-pub(crate) fn new_key() -> Option<String> {
-    generate_key().ok()
+/// A fresh 7-character key from the uppercase default-key alphabet.
+pub(crate) fn new_key() -> String {
+    generate_key().unwrap_or_else(|_| key_from_bytes(&uuid::Uuid::new_v4().into_bytes()))
 }
 
 fn generate_key() -> Result<String, EventDbError> {
     let mut bytes = [0u8; 7];
     fill_random(&mut bytes)?;
+    Ok(key_from_bytes(&bytes))
+}
+
+fn key_from_bytes(bytes: &[u8]) -> String {
     let alphabet: Vec<char> = KEY_ALPHABET.chars().collect();
     let mut out = String::with_capacity(7);
-    for byte in bytes {
-        let index = byte as usize % alphabet.len();
-        out.push(alphabet[index]);
+    for i in 0..7 {
+        let byte = bytes.get(i).copied().unwrap_or(0);
+        out.push(alphabet[byte as usize % alphabet.len()]);
     }
-    Ok(out)
+    out
 }
 
 fn fill_random(bytes: &mut [u8]) -> Result<(), EventDbError> {
@@ -1549,6 +1554,127 @@ pub fn document_phone(document: &serde_json::Value) -> String {
         .into_iter()
         .next()
         .unwrap_or_default()
+}
+
+/// Flat field map for badge print, matching Scala `Persistence` / `PersistenceHelper`.
+/// Nested `personalData` fills name/company; `cups_*` are uppercase copies.
+pub fn visitor_print_fields(document: &serde_json::Value) -> HashMap<String, String> {
+    let mut fields = HashMap::new();
+    if let Some(object) = document.as_object() {
+        for (key, item) in object {
+            let Some(text) = (match item {
+                serde_json::Value::String(text) => Some(text.clone()),
+                serde_json::Value::Number(number) => Some(number.to_string()),
+                serde_json::Value::Bool(flag) => Some(flag.to_string()),
+                _ => None,
+            }) else {
+                continue;
+            };
+            let name = if key.starts_with("ctxt") || key.starts_with("memberId") {
+                key.to_ascii_lowercase()
+            } else {
+                key.clone()
+            };
+            fields.insert(name, text);
+        }
+    }
+
+    let name = nonempty_field(&fields, "name").unwrap_or_else(|| person_text(document, "name"));
+    let surname =
+        nonempty_field(&fields, "surname").unwrap_or_else(|| person_text(document, "surname"));
+    let patronymic = nonempty_field(&fields, "patronymic")
+        .unwrap_or_else(|| person_text(document, "patronymic"));
+    let position = nonempty_field(&fields, "position")
+        .or_else(|| nonempty_field(&fields, "c_position"))
+        .unwrap_or_else(|| person_text(document, "position"));
+    let company = nonempty_field(&fields, "company")
+        .or_else(|| nonempty_field(&fields, "c_name"))
+        .unwrap_or_else(|| company_name(document));
+
+    let name = name.trim().to_string();
+    let surname = surname.trim().to_string();
+    let patronymic = patronymic.trim().to_string();
+    let position = position.trim().to_string();
+    let company = company.trim().to_string();
+
+    fields.insert("name".to_string(), name.clone());
+    fields.insert("surname".to_string(), surname.clone());
+    fields.insert("patronymic".to_string(), patronymic.clone());
+    fields.insert("position".to_string(), position.clone());
+    fields.insert("company".to_string(), company.clone());
+    fields.insert("cups_name".to_string(), name.to_uppercase());
+    fields.insert("cups_surname".to_string(), surname.to_uppercase());
+    fields.insert("cups_patronymic".to_string(), patronymic.to_uppercase());
+    fields.insert("cups_position".to_string(), position.to_uppercase());
+    fields.insert("cups_company".to_string(), company.to_uppercase());
+
+    // Scala getValues keys: badge templates use hyphens (`{{booth-id}}`, `{{hall-number}}`).
+    if let Some(booth) = nonempty_field(&fields, "booth-id")
+        .or_else(|| nonempty_field(&fields, "booth_id"))
+    {
+        fields.insert("booth-id".to_string(), booth);
+    }
+    if let Some(hall) = nonempty_field(&fields, "hall-number")
+        .or_else(|| nonempty_field(&fields, "hall_num"))
+    {
+        fields.insert("hall-number".to_string(), hall);
+    }
+
+    if !fields.contains_key("barcode") {
+        if let Some(text) = document.get("barcode").and_then(json_text) {
+            fields.insert("barcode".to_string(), text);
+        }
+    }
+    fields
+}
+
+fn nonempty_field(fields: &HashMap<String, String>, key: &str) -> Option<String> {
+    fields
+        .get(key)
+        .map(|text| text.trim())
+        .filter(|text| !text.is_empty())
+        .map(str::to_string)
+}
+
+#[cfg(test)]
+mod visitor_print_fields_tests {
+    use super::visitor_print_fields;
+
+    #[test]
+    fn personal_data_fills_cups_fields() {
+        let document = serde_json::json!({
+            "category": 3,
+            "memberId": "3122656",
+            "personalData": {
+                "name": "Наталья",
+                "companies": [{"name": {"ru": {"str": "Тибетские рецепты"}}}]
+            }
+        });
+        let fields = visitor_print_fields(&document);
+        assert_eq!(fields.get("name").map(String::as_str), Some("Наталья"));
+        assert_eq!(fields.get("cups_name").map(String::as_str), Some("НАТАЛЬЯ"));
+        assert_eq!(
+            fields.get("company").map(String::as_str),
+            Some("Тибетские рецепты")
+        );
+        assert_eq!(
+            fields.get("cups_company").map(String::as_str),
+            Some("ТИБЕТСКИЕ РЕЦЕПТЫ")
+        );
+        assert_eq!(fields.get("memberid").map(String::as_str), Some("3122656"));
+    }
+
+    #[test]
+    fn booth_and_hall_use_scala_hyphen_keys() {
+        let document = serde_json::json!({
+            "booth_id": "50-13",
+            "hall_num": "A1",
+            "personalData": { "name": "Елена" }
+        });
+        let fields = visitor_print_fields(&document);
+        assert_eq!(fields.get("booth-id").map(String::as_str), Some("50-13"));
+        assert_eq!(fields.get("hall-number").map(String::as_str), Some("A1"));
+    }
 }
 
 fn index_visitor(visitor: &VisitorWrite) -> IndexedVisitor {
@@ -3026,6 +3152,21 @@ mod tests {
             for (key, _) in &rows {
                 assert_eq!(key.chars().count(), 7);
                 assert!(key.chars().all(|ch| KEY_ALPHABET.contains(ch)));
+                assert!(key.chars().all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit()));
+            }
+        }
+
+        #[test]
+        fn new_key_is_seven_uppercase() {
+            for _ in 0..32 {
+                let key = super::super::new_key();
+                assert_eq!(key.chars().count(), 7, "{key}");
+                assert!(
+                    key.chars()
+                        .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit()),
+                    "{key}"
+                );
+                assert!(key.chars().all(|ch| KEY_ALPHABET.contains(ch)), "{key}");
             }
         }
 

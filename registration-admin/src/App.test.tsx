@@ -84,7 +84,7 @@ test("app_shows_events", async () => {
   window.history.pushState({}, "", "/admin/events");
   render(<App />);
   expect(
-    await screen.findByRole("heading", { name: "Мероприятия" }),
+    await screen.findByRole("heading", { name: "Текущее мероприятие" }),
   ).toBeInTheDocument();
   expect(
     await screen.findByRole("button", { name: "TechCrunch" }),
@@ -103,7 +103,7 @@ test("app_opens_events_after_login", async () => {
   });
   fireEvent.click(screen.getByRole("button", { name: "Войти" }));
   expect(
-    await screen.findByRole("heading", { name: "Мероприятия" }),
+    await screen.findByRole("heading", { name: "Текущее мероприятие" }),
   ).toBeInTheDocument();
   expect(window.location.pathname).toBe("/admin/events");
 });

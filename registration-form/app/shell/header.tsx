@@ -5,7 +5,7 @@ import { Link, useBlocker, useLocation, useNavigate } from "react-router";
 import { chooseDeskCatalog, useDeskCatalog } from "./catalog";
 import { ClosedSelect } from "../picker";
 import { NetworkCorner } from "./network";
-import { closeVisitor, useOpenVisitor, useVisitorDirty, visitorHref } from "./open-visitor";
+import { closeVisitor, leaveOpenedVisitor, useOpenVisitor, useVisitorDirty, visitorHref } from "./open-visitor";
 import { loadScreen } from "./screens";
 
 const backTo: Record<string, string | undefined> = {
@@ -170,7 +170,7 @@ export function DeskNav() {
             type="button"
             aria-label={t("nav.close")}
             onClick={() => {
-              if (visitorOpen) navigate("/visitors");
+              if (visitorOpen) leaveOpenedVisitor(navigate);
               else closeVisitor();
             }}
           >
@@ -192,6 +192,7 @@ export function DeskNav() {
               <button
                 type="button"
                 onClick={() => {
+                  closeVisitor();
                   blocker.proceed();
                 }}
               >

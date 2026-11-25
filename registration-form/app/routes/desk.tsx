@@ -7,7 +7,7 @@ import { build, loadVisitor, type FormState } from "../form/engine";
 import { Step } from "../form/step";
 import { kioskFrame, StepFrameContext, type StepFrame } from "../layouts/frame";
 import { chooseDeskCatalog, useDeskCatalog } from "../shell/catalog";
-import { openVisitor, setVisitorDirty, useOpenVisitor, useVisitorDirty, visitorHref } from "../shell/open-visitor";
+import { leaveOpenedVisitor, openVisitor, setVisitorDirty, useOpenVisitor, useVisitorDirty, visitorHref } from "../shell/open-visitor";
 import { ClosedSelect } from "../picker";
 
 const BUSINESS = new Set(["no_ticket_code", "no_printer", "invalid_phone_email_combo"]);
@@ -205,7 +205,7 @@ export default function Desk() {
   }
 
   function leaveVisitor() {
-    navigate("/visitors");
+    leaveOpenedVisitor(navigate);
   }
 
   async function saveAndLeave() {
@@ -216,7 +216,13 @@ export default function Desk() {
     if (!opened) return;
     if (dirty && !(await saveVisitor())) return;
     try {
-      await client.print([opened.uid], catalog.printer || undefined);
+      const body = (await client.print([opened.uid], catalog.printer || undefined)) as {
+        data?: { jobs?: Array<{ offline?: boolean; png?: string; pdf?: string }> };
+      };
+      const job = body?.data?.jobs?.[0];
+      if (job?.offline) {
+        if (job.png) window.open(job.png, "_blank", "noopener,noreferrer");
+      }
       setSaveError("");
       leaveVisitor();
     } catch (error) {

@@ -72,13 +72,17 @@ test("keys_add_admin_key_then_delete_one", async () => {
   const calls = serve(defaults());
   render(<Keys eventId="EVT" />);
   const admin = await screen.findByRole("region", { name: "Ключи администратора" });
+  const operator = screen.getByRole("region", { name: "Ключи оператора" });
   await act(async () => {
-    fireEvent.click(within(admin).getByRole("button", { name: "Добавить" }));
+    fireEvent.click(within(admin).getByRole("button", { name: /Добавить/ }));
   });
   expect(calls).toContain("POST /api/keys");
-  // The new key opens in the editor.
+  // The new key opens in the admin editor, not under operators.
   expect(within(admin).getByLabelText("Ключ")).toHaveValue("NEW11");
+  expect(within(operator).queryByLabelText("Ключ")).toBeNull();
   fireEvent.click(within(admin).getByRole("button", { name: "Отмена" }));
+  expect(admin).toHaveTextContent("NEW11");
+  expect(operator).not.toHaveTextContent("NEW11");
   const remove = within(admin).getAllByRole("button", { name: "Удалить" });
   expect(remove).toHaveLength(2);
   expect(remove[0]).toBeEnabled();
@@ -88,6 +92,47 @@ test("keys_add_admin_key_then_delete_one", async () => {
   expect(calls).toContain("DELETE /api/keys/1");
   expect(admin).not.toHaveTextContent("ADMIN01");
   expect(within(admin).getByRole("button", { name: "Удалить" })).toBeDisabled();
+});
+
+test("keys_add_posts_is_admin_true_for_admin_section", async () => {
+  const bodies: unknown[] = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: string, init?: RequestInit) => {
+      if (url === "/api/keys" && (init?.method ?? "GET") === "GET") {
+        return {
+          json: async () => ({
+            ok: true,
+            data: [
+              { id: 1, key: "ADMIN01", comment: null, is_admin: true },
+              { id: 2, key: "OPER001", comment: null, is_admin: false },
+            ],
+          }),
+        };
+      }
+      if (url === "/api/keys" && init?.method === "POST") {
+        bodies.push(JSON.parse(String(init.body)));
+        return {
+          json: async () => ({
+            ok: true,
+            // Deliberately omit is_admin: the UI must still place the key under admin.
+            data: { id: 9, key: "FORCED1", comment: null },
+          }),
+        };
+      }
+      throw new Error(url);
+    }),
+  );
+  render(<Keys eventId="EVT" />);
+  const admin = await screen.findByRole("region", { name: "Ключи администратора" });
+  await act(async () => {
+    fireEvent.click(within(admin).getByRole("button", { name: /Добавить/ }));
+  });
+  expect(bodies).toEqual([{ is_admin: true }]);
+  expect(within(admin).getByLabelText("Ключ")).toHaveValue("FORCED1");
+  expect(screen.getByRole("region", { name: "Ключи оператора" }).textContent).not.toContain(
+    "FORCED1",
+  );
 });
 
 test("keys_edit_saves_key_and_comment", async () => {

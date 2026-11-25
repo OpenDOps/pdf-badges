@@ -78,6 +78,11 @@ export default function Events({
     checkFailed ? "error" : "idle",
   );
   const [retrySecs, setRetrySecs] = useState<number | null>(retryIn);
+  const [keysOpen, setKeysOpen] = useState(false);
+
+  useEffect(() => {
+    setKeysOpen(false);
+  }, [current?.id]);
 
   // The server's own scheduled check (every 10 min after a failure) updates these props.
   useEffect(() => {
@@ -310,21 +315,16 @@ export default function Events({
             {t("events.previous_failed", { version: versionLabel(failed) })}
           </p>
         ) : null}
-        {target && upgrade === "idle" ? (
+        {supervised && target && upgrade === "idle" ? (
           <button
             type="button"
-            disabled={!supervised}
             onClick={beginUpgrade}
-            className={
-              supervised
-                ? "cursor-pointer select-text rounded-full border border-amber-300 bg-amber-50 px-3 py-1 text-sm font-medium text-amber-950"
-                : "cursor-not-allowed select-text rounded-full border border-zinc-200 bg-zinc-100 px-3 py-1 text-sm font-medium text-zinc-500"
-            }
+            className="cursor-pointer select-text rounded-full border border-amber-300 bg-amber-50 px-3 py-1 text-sm font-medium text-amber-950"
           >
             {t("events.upgrade", { version: versionLabel(target) })}
           </button>
         ) : null}
-        {!target && upgrade === "idle" ? (
+        {supervised && !target && upgrade === "idle" ? (
           <button
             type="button"
             onClick={() => void checkForUpdate()}
@@ -334,17 +334,17 @@ export default function Events({
             {check === "checking" ? t("events.checking") : t("events.check")}
           </button>
         ) : null}
-        {check === "none" && !target ? (
+        {supervised && check === "none" && !target ? (
           <p role="status" className="text-xs text-zinc-600">
             {t("events.up_to_date")}
           </p>
         ) : null}
-        {check === "refused" ? (
+        {supervised && check === "refused" ? (
           <p role="alert" className="text-xs text-red-600">
             {t("events.check_error")}
           </p>
         ) : null}
-        {check === "error" ? (
+        {supervised && check === "error" ? (
           <p role="alert" className="text-xs text-red-600">
             {t("events.check_failed")}
             {retrySecs !== null
@@ -381,24 +381,73 @@ export default function Events({
           </div>
         </div>
       ) : null}
-      <div className="mx-auto flex w-full max-w-lg flex-col gap-6">
-        <h1 className="text-2xl font-semibold tracking-tight">
-          {t("events.title")}
-        </h1>
-        <section
-          aria-labelledby="current-event"
-          className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm"
-        >
-          <h2
-            id="current-event"
-            className="text-sm font-medium text-zinc-500"
-          >
-            {t("events.current")}
-          </h2>
-          <p className="mt-1 text-lg font-medium">
-            {current?.name ?? ""}
-          </p>
-        </section>
+      <section
+        aria-labelledby="current-event"
+        className={
+          current
+            ? "w-full rounded-2xl border border-zinc-200 bg-white p-4 shadow-sm"
+            : "w-full rounded-2xl border border-dashed border-zinc-300 bg-white p-4"
+        }
+      >
+        {current && manageKeys ? (
+          <div className="flex items-start gap-3">
+            <button
+              type="button"
+              aria-expanded={keysOpen}
+              aria-controls="current-event-keys"
+              onClick={() => setKeysOpen((open) => !open)}
+              className="min-w-0 flex-1 text-left"
+            >
+              <h2 id="current-event" className="text-xs font-medium text-zinc-500">
+                {t("events.current")}
+              </h2>
+              <p className="mt-0.5 truncate text-base font-medium">{current.name}</p>
+              <p className="mt-0.5 select-all truncate font-mono text-xs text-zinc-500">
+                {current.id}
+              </p>
+            </button>
+            <button
+              type="button"
+              aria-expanded={keysOpen}
+              aria-controls="current-event-keys"
+              aria-label={keysOpen ? t("keys.hide") : t("keys.show")}
+              onClick={() => setKeysOpen((open) => !open)}
+              className="mt-0.5 rounded-md px-2 py-1 text-zinc-500 hover:bg-zinc-100"
+            >
+              <span
+                aria-hidden="true"
+                className={
+                  keysOpen ? "inline-block transition-transform" : "inline-block -rotate-90 transition-transform"
+                }
+              >
+                ▾
+              </span>
+            </button>
+          </div>
+        ) : (
+          <div>
+            <h2 id="current-event" className="text-xs font-medium text-zinc-500">
+              {t("events.current")}
+            </h2>
+            {current ? (
+              <>
+                <p className="mt-0.5 truncate text-base font-medium">{current.name}</p>
+                <p className="mt-0.5 select-all truncate font-mono text-xs text-zinc-500">
+                  {current.id}
+                </p>
+              </>
+            ) : (
+              <p className="mt-1 text-sm text-zinc-500">{t("keys.no_event")}</p>
+            )}
+          </div>
+        )}
+        {current && manageKeys && keysOpen ? (
+          <div id="current-event-keys" className="mt-3">
+            <Keys eventId={current.id} embedded />
+          </div>
+        ) : null}
+      </section>
+      <div className="mx-auto mt-6 flex w-full max-w-lg flex-col gap-6">
         <section aria-labelledby="choose-event">
           <h2 id="choose-event" className="text-sm font-medium text-zinc-500">
             {t("events.choose")}
@@ -448,19 +497,6 @@ export default function Events({
             ? t("events.token_stored")
             : t("events.token_empty")}
         </p>
-        {current && manageKeys ? (
-          <Keys eventId={current.id} />
-        ) : (
-          <section
-            aria-labelledby="keys-title"
-            className="rounded-2xl border border-dashed border-zinc-300 bg-white p-5"
-          >
-            <h2 id="keys-title" className="text-sm font-medium text-zinc-500">
-              {t("keys.title")}
-            </h2>
-            <p className="mt-1 text-sm text-zinc-500">{t("keys.no_event")}</p>
-          </section>
-        )}
       </div>
     </main>
   );

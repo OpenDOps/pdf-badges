@@ -113,7 +113,8 @@ impl From<EventDbError> for CurrentError {
     }
 }
 
-/// Directory that holds `{event_id}/db.sqlite`, next to the credential file.
+/// Directory that holds `{event_id}/` and `printer_conf/`, next to the credential file
+/// (local default `data/credentials.yml` → `data/`).
 pub fn base_dir(credentials_path: &Path) -> PathBuf {
     match credentials_path.parent() {
         Some(dir) if !dir.as_os_str().is_empty() => dir.to_path_buf(),

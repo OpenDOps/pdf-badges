@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from "react";
+import type { NavigateFunction } from "react-router";
 
 export type OpenVisitor = { uid: string };
 
@@ -29,6 +30,16 @@ export function closeVisitor() {
   dirty = false;
   emit();
   emitDirty();
+}
+
+/** Leave `/visitor` by popping history (the list that opened it), not pushing `/visitors`. */
+export function leaveOpenedVisitor(navigate: NavigateFunction) {
+  const idx = (window.history.state as { idx?: number } | null)?.idx;
+  if (typeof idx === "number" && idx > 0) {
+    navigate(-1);
+    return;
+  }
+  navigate("/visitors", { replace: true });
 }
 
 export function resetOpenVisitor() {

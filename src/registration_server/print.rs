@@ -474,21 +474,20 @@ pub fn prepare_layout(dir: &Path) -> Option<Result<PreparedLayout, String>> {
             families,
             weight,
             style,
+            parts,
             ..
         } = &area.kind
         {
-            let face = ticket_render::capture_face(families, weight, style);
-            if !faces.iter().any(|kept: &PreparedFace| {
-                kept.families == face.families
-                    && kept.weight == face.weight
-                    && kept.style == face.style
-            }) {
-                faces.push(face);
+            // Parts can name a different weight/style than the area (e.g. bold company).
+            keep_face(&mut faces, families, weight, style);
+            for part in parts {
+                keep_face(&mut faces, &part.families, &part.weight, &part.style);
             }
         }
     }
     let mut scaled = HashMap::new();
-    for dpi in [203, 300] {
+    // 203/300 for queues; 720 for the offline genbadges path (capped later if needed).
+    for dpi in [203, 300, 720] {
         match ticket_render::scale_background(&layout, &background, dpi) {
             Ok(image) => {
                 scaled.insert(dpi, image);
@@ -502,6 +501,15 @@ pub fn prepare_layout(dir: &Path) -> Option<Result<PreparedLayout, String>> {
         faces,
         scaled: Mutex::new(scaled),
     }))
+}
+
+fn keep_face(faces: &mut Vec<PreparedFace>, families: &[String], weight: &str, style: &str) {
+    let face = ticket_render::capture_face(families, weight, style);
+    if !faces.iter().any(|kept: &PreparedFace| {
+        kept.families == face.families && kept.weight == face.weight && kept.style == face.style
+    }) {
+        faces.push(face);
+    }
 }
 
 pub fn prepare_page(dir: &Path) -> Option<Result<PreparedPage, String>> {
@@ -1198,6 +1206,28 @@ contents:
         const SECOND_CFG: &[u8] =
             include_bytes!("../../modules/ticket-render/fixtures/event/badge.cfg");
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+        #[test]
+        fn prepare_layout_captures_text_part_weights() {
+            let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+            let category = root.join("GVCSMU1W5P/badge/3");
+            if !category.join("badge.cfg").is_file() {
+                return;
+            }
+            let previous = std::env::current_dir().unwrap();
+            std::env::set_current_dir(root).unwrap();
+            let prepared = prepare_layout(&category).unwrap().unwrap();
+            std::env::set_current_dir(previous).unwrap();
+            let weights: Vec<&str> = prepared.faces.iter().map(|face| face.weight.as_str()).collect();
+            assert!(
+                weights.iter().any(|weight| *weight == "normal"),
+                "faces={weights:?}"
+            );
+            assert!(
+                weights.iter().any(|weight| *weight == "bold"),
+                "part bold face missing: {weights:?}"
+            );
+        }
 
         #[test]
         fn switch_prepares_cfg_and_page() {

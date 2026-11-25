@@ -49,6 +49,7 @@ pub fn router(app: App) -> Router {
         )
         .route("/api/print", post(registration_print))
         .route("/api/print/preview", post(print_preview))
+        .route("/api/genbadges/{kind}/{name}", get(genbadges_file))
         .route("/api/certificates", post(print_certificates))
         .route(
             "/api/registrations/{id}/photo",
@@ -77,6 +78,7 @@ pub fn router(app: App) -> Router {
         .route("/print", post(enqueue_print))
         .route("/ws", get(ws))
         .route("/", get(form_index).head(form_index))
+        .route("/forms/form.json", get(folded_form).head(folded_form))
         .route("/testpath", get(testpath_page).head(testpath_page))
         .route("/admin", get(admin_index).head(admin_index))
         .route("/admin/events", get(admin_index).head(admin_index))
@@ -146,6 +148,77 @@ async fn track_inflight(State(gate): State<Arc<Gate>>, request: Request, next: N
 
 async fn form_index(State(app): State<App>, request: Request) -> Response {
     crate::registration_server::admin::serve_index(&app.form, request).await
+}
+
+/// Same folded document Vite serves in form-app dev (`foldForm` / `GET /forms/form.json`).
+async fn folded_form(State(app): State<App>) -> Response {
+    match fold_form_json(&app.form.join("forms")) {
+        Ok(body) => (
+            StatusCode::OK,
+            [(
+                axum::http::header::CONTENT_TYPE,
+                "application/json; charset=utf-8",
+            )],
+            body,
+        )
+            .into_response(),
+        Err(err) => {
+            log::debug!("forms/form.json: {err}");
+            api_error(StatusCode::NOT_FOUND, "not_found")
+        }
+    }
+}
+
+fn fold_form_json(forms_dir: &std::path::Path) -> Result<Vec<u8>, String> {
+    let vars = read_form_part(forms_dir, "user_vars.json")?;
+    let struct_doc = read_form_part(forms_dir, "user_struct.json")?;
+    let model = strip_jv_rights(read_form_part(forms_dir, "user_model.json")?);
+    let questions = read_form_part(forms_dir, "quest_conf.json")?;
+    let settings = read_form_part(forms_dir, "glob_stngs.json")?;
+    let barcodes = read_form_part(forms_dir, "totalbarcodes.json")?;
+    let conf = questions
+        .get("conf")
+        .cloned()
+        .unwrap_or(serde_json::Value::Array(Vec::new()));
+    let hiddenq = questions
+        .get("hiddenq")
+        .cloned()
+        .unwrap_or(serde_json::Value::Array(Vec::new()));
+    serde_json::to_vec(&serde_json::json!({
+        "vars": vars,
+        "struct": struct_doc,
+        "model": model,
+        "conf": conf,
+        "hiddenq": hiddenq,
+        "settings": settings,
+        "barcodes": barcodes,
+    }))
+    .map_err(|err| err.to_string())
+}
+
+fn read_form_part(dir: &std::path::Path, name: &str) -> Result<serde_json::Value, String> {
+    let path = dir.join(name);
+    let bytes = std::fs::read(&path).map_err(|err| format!("{}: {err}", path.display()))?;
+    serde_json::from_slice(&bytes).map_err(|err| format!("{}: {err}", path.display()))
+}
+
+fn strip_jv_rights(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.into_iter().map(strip_jv_rights).collect())
+        }
+        serde_json::Value::Object(map) => {
+            let mut out = serde_json::Map::new();
+            for (key, child) in map {
+                if key == "jv_rights" || key.ends_with("_jv_rights") {
+                    continue;
+                }
+                out.insert(key, strip_jv_rights(child));
+            }
+            serde_json::Value::Object(out)
+        }
+        other => other,
+    }
 }
 
 /// Marker page from `form/testpath.html` when packed with [`crate::registration_server::update::write_upgrade_probe_testpath`].
@@ -904,7 +977,7 @@ async fn registration_print(State(app): State<App>, body: axum::body::Bytes) -> 
     let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(&body) else {
         return api_error(StatusCode::BAD_REQUEST, "bad_request");
     };
-    print_ids(&app, &parsed, false)
+    print_ids(&app, &parsed, false).await
 }
 
 async fn print_certificates(State(app): State<App>, body: axum::body::Bytes) -> Response {
@@ -1025,7 +1098,7 @@ async fn print_preview(State(app): State<App>, body: axum::body::Bytes) -> Respo
     }
 }
 
-fn print_ids(app: &App, parsed: &serde_json::Value, certificate: bool) -> Response {
+async fn print_ids(app: &App, parsed: &serde_json::Value, certificate: bool) -> Response {
     let Some(ids) = id_list(parsed) else {
         return api_error(StatusCode::BAD_REQUEST, "bad_request");
     };
@@ -1067,48 +1140,191 @@ fn print_ids(app: &App, parsed: &serde_json::Value, certificate: bool) -> Respon
             serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({}));
         let category = category_override.unwrap_or_else(|| field_i64(&value, "category"));
         let internet = json_flag(&value, "internet") || json_flag(&value, "is_internet");
-        let Some(printer) = pick_queue(
+        match pick_queue(
             &search,
             &printer_name,
             &zone,
             certificate,
             category,
             internet,
-        ) else {
-            return api_error(StatusCode::CONFLICT, "no_printer");
-        };
-        if !noprint {
-            let address = crate::registration_server::cups::printer_address(&printer);
-            log::debug!(
-                "print enqueue id={id} address={address} name={} uri={}",
-                printer.name,
-                printer.device_uri
-            );
-            if let Err(response) = enqueue_print_job(
-                app,
-                &id,
-                address,
-                zone.clone(),
-                certificate,
-                Some(category),
-            ) {
-                return response;
+        ) {
+            Some(printer) => {
+                if !noprint {
+                    let address = crate::registration_server::cups::printer_address(&printer);
+                    log::debug!(
+                        "print enqueue id={id} address={address} name={} uri={}",
+                        printer.name,
+                        printer.device_uri
+                    );
+                    if let Err(response) = enqueue_print_job(
+                        app,
+                        &id,
+                        address,
+                        zone.clone(),
+                        certificate,
+                        Some(category),
+                    ) {
+                        return response;
+                    }
+                } else if let Err(err) = record_now(app, &id) {
+                    log::debug!("print row: {err}");
+                    return api_error(StatusCode::INTERNAL_SERVER_ERROR, "unknown_error");
+                }
+                jobs.push(serde_json::json!({
+                    "printer": printer.name,
+                    "zone": printer.routing.zone,
+                    "certificate": certificate,
+                    "zone_name": printer.routing.sector_name,
+                }));
             }
-        } else if let Err(err) = record_now(app, &id) {
-            log::debug!("print row: {err}");
-            return api_error(StatusCode::INTERNAL_SERVER_ERROR, "unknown_error");
+            None if certificate => {
+                // Certificates still need a routed queue (Scala kept certs on a printer).
+                return api_error(StatusCode::CONFLICT, "no_printer");
+            }
+            None if noprint => {
+                if let Err(err) = record_now(app, &id) {
+                    log::debug!("print row: {err}");
+                    return api_error(StatusCode::INTERNAL_SERVER_ERROR, "unknown_error");
+                }
+                jobs.push(serde_json::json!({
+                    "printer": "",
+                    "zone": zone.clone().unwrap_or_default(),
+                    "certificate": false,
+                    "zone_name": "",
+                    "offline": true,
+                }));
+            }
+            None => match print_offline_badge(app, &search, &id, &value, category, &zone).await {
+                Ok(job) => jobs.push(job),
+                Err(response) => return response,
+            },
         }
-        jobs.push(serde_json::json!({
-            "printer": printer.name,
-            "zone": printer.routing.zone,
-            "certificate": certificate,
-            "zone_name": printer.routing.sector_name,
-        }));
     }
     if jobs.is_empty() && skipped.is_empty() {
         return api_error(StatusCode::BAD_REQUEST, "bad_request");
     }
     api_ok(serde_json::json!({ "jobs": jobs, "skipped": skipped }))
+}
+
+/// No connected queue: draw PNG+PDF under the event `genbadges-*` dirs (Scala catch path).
+async fn print_offline_badge(
+    app: &App,
+    search: &crate::registration_server::cups::Search,
+    id: &str,
+    value: &serde_json::Value,
+    category: i64,
+    zone: &Option<String>,
+) -> Result<serde_json::Value, Response> {
+    prepare_search(app, search, id, value);
+    let (transliterate, double_print) = {
+        let current = CurrentEvent::lock(&app.current);
+        let Some(event_id) = current.event_id() else {
+            return Err(api_error(StatusCode::CONFLICT, "no_printer"));
+        };
+        event_print_flags(&current.base_dir().join(event_id).join("settings.json"))
+    };
+    let request = crate::registration_server::cups::PrintRequest {
+        id: id.to_string(),
+        category,
+        internet: json_flag(value, "internet") || json_flag(value, "is_internet"),
+        zone: zone.clone(),
+        name: None,
+        certificate: false,
+        transliterate,
+        double_print,
+        rule: None,
+        pixel_cap: None,
+    };
+    let printed = match search.print(&request, &app.gate).await {
+        Ok(printed) => printed,
+        Err(err) if err.to_string() == "no queue" || err.to_string() == "no badge" => {
+            log::debug!("print offline: {err}");
+            return Err(api_error(StatusCode::CONFLICT, "no_printer"));
+        }
+        Err(err) => {
+            log::debug!("print offline: {err}");
+            return Err(api_error(StatusCode::INTERNAL_SERVER_ERROR, "unknown_error"));
+        }
+    };
+    if let Err(err) = record_now(app, id) {
+        log::debug!("print row: {err}");
+        return Err(api_error(StatusCode::INTERNAL_SERVER_ERROR, "unknown_error"));
+    }
+    Ok(serde_json::json!({
+        "printer": "",
+        "zone": zone.clone().unwrap_or_default(),
+        "certificate": false,
+        "zone_name": "",
+        "offline": true,
+        "png": genbadges_url(printed.png.as_deref(), "png"),
+        "pdf": genbadges_url(printed.pdf.as_deref(), "pdf"),
+    }))
+}
+
+fn genbadges_url(path: Option<&std::path::Path>, kind: &str) -> Option<String> {
+    let name = path?.file_name()?.to_str()?;
+    Some(format!("/api/genbadges/{kind}/{name}"))
+}
+
+fn event_print_flags(path: &std::path::Path) -> (bool, bool) {
+    let Ok(bytes) = std::fs::read(path) else {
+        return (false, false);
+    };
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return (false, false);
+    };
+    (
+        json_flag(&value, "transliterate"),
+        json_flag(&value, "double_print"),
+    )
+}
+
+async fn genbadges_file(
+    State(app): State<App>,
+    axum::extract::Path((kind, name)): axum::extract::Path<(String, String)>,
+) -> Response {
+    if !matches!(kind.as_str(), "png" | "pdf") {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    if name.is_empty()
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains("..")
+        || name.starts_with('.')
+    {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let path = {
+        let current = CurrentEvent::lock(&app.current);
+        let Some(event_id) = current.event_id() else {
+            return StatusCode::NOT_FOUND.into_response();
+        };
+        current
+            .base_dir()
+            .join(event_id)
+            .join(format!("genbadges-{kind}"))
+            .join(&name)
+    };
+    let Ok(bytes) = std::fs::read(&path) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let content_type = if kind == "png" {
+        "image/png"
+    } else {
+        "application/pdf"
+    };
+    (
+        StatusCode::OK,
+        [
+            (axum::http::header::CONTENT_TYPE, content_type),
+            (
+                axum::http::header::CONTENT_DISPOSITION,
+                "inline",
+            ),
+        ],
+        bytes,
+    )
+        .into_response()
 }
 
 fn enqueue_print_job(
@@ -1178,7 +1394,7 @@ fn prepare_search(
     }
     search.set_badges(current.badges());
     drop(current);
-    search.set_visitor(id, visitor_fields(value));
+    search.set_visitor(id, crate::registration_server::event_db::visitor_print_fields(value));
 }
 
 fn stored_row(app: &App, id: &str) -> Option<String> {
@@ -1281,24 +1497,6 @@ fn json_flag(value: &serde_json::Value, key: &str) -> bool {
     }
 }
 
-fn visitor_fields(value: &serde_json::Value) -> std::collections::HashMap<String, String> {
-    let Some(object) = value.as_object() else {
-        return std::collections::HashMap::new();
-    };
-    let mut fields = std::collections::HashMap::new();
-    for (key, item) in object {
-        let Some(text) = (match item {
-            serde_json::Value::String(text) => Some(text.clone()),
-            serde_json::Value::Number(number) => Some(number.to_string()),
-            serde_json::Value::Bool(flag) => Some(flag.to_string()),
-            _ => None,
-        }) else {
-            continue;
-        };
-        fields.insert(key.clone(), text);
-    }
-    fields
-}
 
 async fn registration_patch(
     State(app): State<App>,
@@ -2419,6 +2617,39 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn folded_form_json_matches_vite_fold() {
+            let mut venue = open_event("EVT");
+            let forms = venue.dir.0.join("form").join("forms");
+            std::fs::create_dir_all(&forms).unwrap();
+            std::fs::write(forms.join("user_vars.json"), br#"{"a":1}"#).unwrap();
+            std::fs::write(forms.join("user_struct.json"), br#"{"b":2}"#).unwrap();
+            std::fs::write(
+                forms.join("user_model.json"),
+                br#"{"uniqueId":"X","jv_rights":{"x":1},"name_jv_rights":{}}"#,
+            )
+            .unwrap();
+            std::fs::write(
+                forms.join("quest_conf.json"),
+                br#"{"conf":[{"advice":"Hi"}],"hiddenq":[9]}"#,
+            )
+            .unwrap();
+            std::fs::write(forms.join("glob_stngs.json"), br#"{}"#).unwrap();
+            std::fs::write(forms.join("totalbarcodes.json"), br#"[]"#).unwrap();
+            venue.app.form = venue.dir.0.join("form");
+
+            let (status, body) = call(&venue.app, "/forms/form.json").await;
+            assert_eq!(status, StatusCode::OK);
+            let value: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(value["vars"]["a"], 1);
+            assert_eq!(value["struct"]["b"], 2);
+            assert_eq!(value["model"]["uniqueId"], "X");
+            assert!(value["model"].get("jv_rights").is_none());
+            assert!(value["model"].get("name_jv_rights").is_none());
+            assert_eq!(value["conf"][0]["advice"], "Hi");
+            assert_eq!(value["hiddenq"][0], 9);
+        }
+
+        #[tokio::test]
         async fn background_is_the_file_bytes() {
             let venue = open_event("EVT");
             let png = b"\x89PNG\r\n\x1a\nbackground";
@@ -2951,14 +3182,22 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn no_printer_is_conflict() {
+        async fn no_printer_writes_genbadges() {
             let venue = open_event("EVT");
             let search = Search::parked("http://127.0.0.1:9");
             plant(&venue.app, &search, Vec::new());
             let (status, body) =
                 post(&venue.app, "/api/print", br#"{"ids":["5"],"printer":"HP"}"#).await;
-            assert_eq!(status, axum::http::StatusCode::CONFLICT);
-            assert_eq!(json_body(&body)["error"]["code"], "no_printer");
+            assert_eq!(status, axum::http::StatusCode::OK);
+            let job = &json_body(&body)["data"]["jobs"][0];
+            assert_eq!(job["offline"], true);
+            assert_eq!(job["printer"], "");
+            let png = job["png"].as_str().unwrap();
+            assert!(png.starts_with("/api/genbadges/png/"), "{png}");
+            assert!(job["pdf"].is_null());
+            let (png_status, png_body) = super::call(&venue.app, png).await;
+            assert_eq!(png_status, axum::http::StatusCode::OK);
+            assert_eq!(&png_body[..8], b"\x89PNG\r\n\x1a\n");
         }
 
         #[tokio::test]

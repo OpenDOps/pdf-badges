@@ -132,11 +132,36 @@ async fn sync_wake(
         return;
     };
     pump_open(app);
+    reset_visitors_cursor_if_empty(app);
     app.gate.wait_until_idle().await;
     if probe(app, remote, timeout).await == Probe::Accepted {
         drain_queue(app, remote, catalog(app), in_flight, timeout).await;
     }
     app.sync_passes.fetch_add(1, Ordering::Release);
+}
+
+/// When the open event has no visitors but the visitors cursor is past zero,
+/// the next download would skip the whole history. Reset it before probe.
+fn reset_visitors_cursor_if_empty(app: &App) {
+    let current = CurrentEvent::lock(&app.current);
+    let Some(event_id) = current.event_id() else {
+        return;
+    };
+    let loaded = current.loaded_count().unwrap_or(0);
+    if loaded > 0 {
+        return;
+    }
+    let cursor = current
+        .cursor(&event_id, VISITOR_CURSOR)
+        .unwrap_or_else(|_| "0".to_string());
+    if cursor == "0" {
+        return;
+    }
+    if let Err(err) = current.set_cursor(&event_id, VISITOR_CURSOR, "0") {
+        eprintln!("registration-server visitors cursor reset: {err}");
+        return;
+    }
+    log::debug!("visitors cursor reset to 0; mem_u empty (was {cursor})");
 }
 
 struct Busy<'a>(&'a AtomicBool);
@@ -212,14 +237,10 @@ async fn probe(app: &App, remote: &RemoteServer, timeout: Duration) -> Probe {
             }
             Probe::Stopped
         }
-        Err(
-            RemoteServerError::InvalidCred
-            | RemoteServerError::NoConnection
-            | RemoteServerError::Status(_)
-            | RemoteServerError::BadResponse(_)
-            | RemoteServerError::Url(_)
-            | RemoteServerError::Dropped,
-        ) => Probe::Stopped,
+        Err(err) => {
+            log::debug!("probe stopped: {err}");
+            Probe::Stopped
+        }
     }
 }
 
@@ -377,12 +398,14 @@ async fn drain_queue(
                 }
                 outcomes.push((sent.job.path, "dropped"));
             }
-            Err(_) => {
-                stop = true;
-                ready.clear();
-                planner.clear();
+            Err(err) => {
+                // One failed download (timeout, etc.) must not drop the rest of the catalog.
+                log::debug!("sync {} error: {err}", sent.job.path);
                 if tracks_path(&sent.job) {
                     path_busy.remove(&sent.job.path);
+                }
+                if !stop {
+                    planner.extend(sent.job.after);
                 }
                 outcomes.push((sent.job.path, "error"));
             }
@@ -594,12 +617,20 @@ async fn parse_job(app: &App, job: &Job, bytes: &[u8]) {
         let mut hold = hold.clone();
         let _ = hold.wait_for(|go| *go).await;
     }
-    for cursor in &job.cursors {
-        if let Some(value) = cursor_value(bytes, cursor.take_from) {
-            if let Err(err) =
-                CurrentEvent::lock(&app.current).set_cursor(&job.event_id, &cursor.name, &value)
-            {
-                eprintln!("registration-server cursor: {err}");
+    // Tracked downloads set their cursor in store_* after rows are written.
+    // Applying from_time here first can advance the cursor with an empty mem_u.
+    let tracked = matches!(
+        endpoint(&job.path),
+        "tracked/UniRegUser" | "tracked/OrgRegUser" | "tracked/ScanUserRef"
+    );
+    if !tracked {
+        for cursor in &job.cursors {
+            if let Some(value) = cursor_value(bytes, cursor.take_from) {
+                if let Err(err) =
+                    CurrentEvent::lock(&app.current).set_cursor(&job.event_id, &cursor.name, &value)
+                {
+                    eprintln!("registration-server cursor: {err}");
+                }
             }
         }
     }
@@ -620,6 +651,8 @@ async fn parse_job(app: &App, job: &Job, bytes: &[u8]) {
     }
     if endpoint(&job.path) == "boxapi/getconf" && field(job, "conf_id").is_empty() {
         remember_zone(app, job, bytes);
+        // Scala `setCategories(cats)` on the empty-form getconf.
+        store_getconf_categories(app, job, bytes);
     }
     if endpoint(&job.path) == "boxapi/getbadge" {
         store_getbadge(app, job, bytes);
@@ -790,8 +823,18 @@ fn visitors_job(event_id: &str) -> Job {
 
 fn store_tracked(app: &App, job: &Job, bytes: &[u8], cursor: &str) {
     let Some(page) = visitor_page(bytes) else {
+        log::debug!(
+            "{}: body has no visitor arr ({} bytes)",
+            endpoint(&job.path),
+            bytes.len()
+        );
         return;
     };
+    log::debug!(
+        "{}: storing {} visitors",
+        endpoint(&job.path),
+        page.visitors.len()
+    );
     for visitor in &page.visitors {
         let written = CurrentEvent::lock(&app.current).write(&job.event_id, visitor);
         match written {
@@ -1422,6 +1465,17 @@ fn visitor_page(bytes: &[u8]) -> Option<VisitorPage> {
             visitors.push(visitor);
         }
     }
+    if !arr.is_empty() && visitors.is_empty() {
+        let sample = arr
+            .first()
+            .map(|item| item.to_string())
+            .unwrap_or_default();
+        let clipped: String = sample.chars().take(400).collect();
+        log::debug!(
+            "visitor arr has {} items but none parsed; first={clipped}",
+            arr.len()
+        );
+    }
     Some(VisitorPage {
         visitors,
         from_time: if from_time > 0 { Some(from_time) } else { None },
@@ -1430,7 +1484,8 @@ fn visitor_page(bytes: &[u8]) -> Option<VisitorPage> {
 
 fn visitor_from_item(item: &serde_json::Value) -> Option<VisitorWrite> {
     let obj = item.get("obj").unwrap_or(item);
-    let uid = json_text(obj.get("uid").or_else(|| obj.get("id"))?)?;
+    // Scala `getFlatData`: `uid = obj_map.get("uniqueId")`. Not `memberId` / `uid` / `id`.
+    let uid = json_text(obj.get("uniqueId")?)?;
     if uid.is_empty() {
         return None;
     }
@@ -1438,6 +1493,24 @@ fn visitor_from_item(item: &serde_json::Value) -> Option<VisitorWrite> {
         .or_else(|| json_i64(item.get("ts")))
         .or_else(|| json_i64(obj.get("added_ts")))
         .unwrap_or(0);
+    // Scala: ticket_status from the object, else `subscribtion.jvrel_prop.ticket_status`.
+    let ticket_status = json_i64(obj.get("ticket_status"))
+        .or_else(|| json_i64(obj.pointer("/subscribtion/jvrel_prop/ticket_status")))
+        .unwrap_or(0);
+    // Scala: give_packet = "1" when any `ext_packets` entry has `has` > 0.
+    let give_packet = json_i64(obj.get("give_packet")).unwrap_or_else(|| {
+        let marked = obj
+            .get("ext_packets")
+            .and_then(|value| value.as_array())
+            .map(|rows| {
+                rows.iter()
+                    .any(|row| json_i64(row.get("has")).unwrap_or(0) > 0)
+            })
+            .unwrap_or(false);
+        i64::from(marked)
+    });
+    // Top-level name/surname/c_name/email often empty on live UniRegUser rows;
+    // `event_db::index_visitor` fills them from `personalData` like Scala.
     Some(VisitorWrite {
         uid,
         data: serde_json::to_string(obj).unwrap_or_else(|_| "{}".to_string()),
@@ -1445,9 +1518,9 @@ fn visitor_from_item(item: &serde_json::Value) -> Option<VisitorWrite> {
         surname: obj.get("surname").and_then(json_text).unwrap_or_default(),
         c_name: obj.get("c_name").and_then(json_text).unwrap_or_default(),
         category: json_i64(obj.get("category")).unwrap_or(0),
-        ticket_status: json_i64(obj.get("ticket_status")).unwrap_or(0),
+        ticket_status,
         gotsome: json_i64(obj.get("gotsome")).unwrap_or(0),
-        give_packet: json_i64(obj.get("give_packet")).unwrap_or(0),
+        give_packet,
         added_ts,
         org_id: json_i64(obj.get("org_id")),
         email: obj.get("email").and_then(json_text).unwrap_or_default(),
@@ -1493,6 +1566,11 @@ fn info_job(event_id: &str) -> Job {
 }
 
 fn getbadge_job(event_id: &str, cat_id: i64, is_cert: bool) -> Job {
+    // Per-category cursor: a shared last_synch skips later cats after the first store.
+    let cursor = format!(
+        "getbadge:{cat_id}:{}",
+        if is_cert { "cert" } else { "badge" }
+    );
     Job {
         lane: Lane::Download,
         method: CallMethod::Post,
@@ -1506,7 +1584,7 @@ fn getbadge_job(event_id: &str, cat_id: i64, is_cert: bool) -> Job {
             ),
         ],
         cursors: vec![Cursor {
-            name: "getbadge".to_string(),
+            name: cursor,
             send_as: "last_synch",
             take_from: "last_synch",
         }],
@@ -1518,28 +1596,95 @@ fn getbadge_job(event_id: &str, cat_id: i64, is_cert: bool) -> Job {
 }
 
 fn badge_head(event_id: &str, bytes: &[u8]) -> Vec<Job> {
+    // Separate jobs (not one `after` chain): one remote error must not drop the rest.
     let ids = cat_ids(bytes);
-    let jobs = ids
-        .iter()
+    ids.iter()
         .map(|id| getbadge_job(event_id, *id, false))
-        .chain(ids.iter().map(|id| getbadge_job(event_id, *id, true)));
-    chain(jobs).into_iter().collect()
+        .chain(ids.iter().map(|id| getbadge_job(event_id, *id, true)))
+        .collect()
 }
 
+/// Desk preset exhibitor (`Экспонент`). Not always listed in getconf `cats`, but still needs getbadge.
+const EXHIBITOR_CAT_ID: i64 = -2;
+/// Default visitor badge. Print falls back here when a category has no template.
+const DEFAULT_CAT_ID: i64 = -1;
+
 fn cat_ids(bytes: &[u8]) -> Vec<i64> {
+    let mut ids = match serde_json::from_slice::<serde_json::Value>(bytes) {
+        Ok(value) => cats_list(&value)
+            .into_iter()
+            .flatten()
+            .filter_map(|item| {
+                json_text(item.get("cat_id").or_else(|| item.get("id"))?)
+                    .and_then(|text| text.parse().ok())
+            })
+            // Keep -1 (default visitor); drop other negatives except presets added below.
+            .filter(|id| *id >= -1)
+            .collect::<Vec<_>>(),
+        Err(_) => Vec::new(),
+    };
+    if !ids.contains(&EXHIBITOR_CAT_ID) {
+        ids.insert(0, EXHIBITOR_CAT_ID);
+    }
+    if !ids.contains(&DEFAULT_CAT_ID) {
+        ids.push(DEFAULT_CAT_ID);
+    }
+    ids
+}
+
+/// Live `boxapi/getconf` returns `cats` as a JSON string; fixtures may use an array.
+fn cats_list(value: &serde_json::Value) -> Option<Vec<serde_json::Value>> {
+    match value.get("cats")? {
+        serde_json::Value::Array(items) => Some(items.clone()),
+        serde_json::Value::String(text) => {
+            serde_json::from_str::<Vec<serde_json::Value>>(text).ok()
+        }
+        _ => None,
+    }
+}
+
+/// Write `{event}/forms/categories.json` from getconf `cats` (Scala `setCategories`).
+fn store_getconf_categories(app: &App, job: &Job, bytes: &[u8]) {
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
-        return Vec::new();
+        return;
     };
-    let Some(list) = value.get("cats").and_then(|cats| cats.as_array()) else {
-        return Vec::new();
+    let Some(list) = cats_list(&value) else {
+        return;
     };
-    list.iter()
-        .filter_map(|item| {
-            json_text(item.get("cat_id").or_else(|| item.get("id"))?)
-                .and_then(|text| text.parse().ok())
-        })
-        .filter(|id| *id > -1)
-        .collect()
+    if list.is_empty() {
+        return;
+    }
+    let dir = CurrentEvent::lock(&app.current)
+        .base_dir()
+        .join(&job.event_id)
+        .join("forms");
+    if let Err(err) = std::fs::create_dir_all(&dir) {
+        eprintln!(
+            "registration-server categories dir {}: {err}",
+            dir.display()
+        );
+        return;
+    }
+    let path = dir.join("categories.json");
+    let body = match serde_json::to_vec(&serde_json::Value::Array(list.clone())) {
+        Ok(body) => body,
+        Err(err) => {
+            eprintln!("registration-server categories encode: {err}");
+            return;
+        }
+    };
+    if let Err(err) = std::fs::write(&path, body) {
+        eprintln!(
+            "registration-server categories {}: {err}",
+            path.display()
+        );
+        return;
+    }
+    log::debug!(
+        "getconf: stored {} categories at {}",
+        list.len(),
+        path.display()
+    );
 }
 
 struct Pool {
@@ -1882,9 +2027,8 @@ fn field<'a>(job: &'a Job, name: &str) -> &'a str {
         .unwrap_or("")
 }
 
-/// `boxapi/getbadge` is a zip of `badge.cfg` and `bg.png`. Writing those files
-/// rebuilds that category in the open event. A certificate is stored at
-/// `cat_id + 1000`. A body that is not that zip is left unused.
+/// Live `boxapi/getbadge` is Scala's framed body (`cfg` + `bg.png` + `upd_time`).
+/// Tests may still send a zip of those files. A certificate is stored at `cat_id + 1000`.
 fn store_getbadge(app: &App, job: &Job, bytes: &[u8]) {
     let Ok(cat_id) = field(job, "cat_id").parse::<i64>() else {
         return;
@@ -1894,14 +2038,40 @@ fn store_getbadge(app: &App, job: &Job, bytes: &[u8]) {
     } else {
         cat_id
     };
+    if badge_removed(bytes) {
+        let dir = CurrentEvent::lock(&app.current)
+            .base_dir()
+            .join(&job.event_id)
+            .join("badge")
+            .join(category.to_string());
+        let _ = std::fs::remove_dir_all(&dir);
+        CurrentEvent::lock(&app.current).store_badge_cfg(&job.event_id, category);
+        log::debug!("getbadge cat_id={category}: remote no_badge, cleared");
+        return;
+    }
     let dir = CurrentEvent::lock(&app.current)
         .base_dir()
         .join(&job.event_id)
         .join("badge")
         .join(category.to_string());
     let Ok(wrote) = unpack_badge(&dir, bytes) else {
+        log::debug!(
+            "getbadge cat_id={category}: unpack failed ({} bytes)",
+            bytes.len()
+        );
         return;
     };
+    if let Some(upd) = wrote.upd_time {
+        if let Some(cursor) = job.cursors.first() {
+            if let Err(err) = CurrentEvent::lock(&app.current).set_cursor(
+                &job.event_id,
+                &cursor.name,
+                &upd.to_string(),
+            ) {
+                eprintln!("registration-server getbadge cursor: {err}");
+            }
+        }
+    }
     let current = CurrentEvent::lock(&app.current);
     if wrote.cfg || (wrote.background && dir.join("badge.cfg").is_file()) {
         current.store_badge_cfg(&job.event_id, category);
@@ -1909,21 +2079,94 @@ fn store_getbadge(app: &App, job: &Job, bytes: &[u8]) {
     if wrote.page {
         current.store_page_file(&job.event_id, category);
     }
+    log::debug!(
+        "getbadge cat_id={category}: stored cfg={} bg={} page={}",
+        wrote.cfg,
+        wrote.background,
+        wrote.page
+    );
 }
 
 struct UnpackedBadge {
     cfg: bool,
     background: bool,
     page: bool,
+    upd_time: Option<i64>,
+}
+
+fn badge_removed(bytes: &[u8]) -> bool {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return false;
+    };
+    value.get("error_msg").and_then(|v| v.as_str()) == Some("no_badge")
 }
 
 fn unpack_badge(dir: &Path, bytes: &[u8]) -> Result<UnpackedBadge, ()> {
+    if let Ok(wrote) = unpack_badge_scala(dir, bytes) {
+        return Ok(wrote);
+    }
+    unpack_badge_zip(dir, bytes)
+}
+
+/// Scala `Synchronizer` getbadge frame: 8 zero bytes, cfg len, cfg, bg len, bg, upd_time.
+fn unpack_badge_scala(dir: &Path, bytes: &[u8]) -> Result<UnpackedBadge, ()> {
+    if bytes.len() < 32 || bytes[..8] != [0; 8] {
+        return Err(());
+    }
+    let cfg_len = read_be_u64(&bytes[8..16])? as usize;
+    if cfg_len == 0 || cfg_len > 64 * 1024 * 1024 {
+        return Err(());
+    }
+    let cfg_end = 16usize.checked_add(cfg_len).ok_or(())?;
+    let bg_len_at = cfg_end;
+    let bg_at = bg_len_at.checked_add(8).ok_or(())?;
+    if bytes.len() < bg_at {
+        return Err(());
+    }
+    let bg_len = read_be_u64(&bytes[bg_len_at..bg_at])? as usize;
+    if bg_len == 0 || bg_len > 64 * 1024 * 1024 {
+        return Err(());
+    }
+    let bg_end = bg_at.checked_add(bg_len).ok_or(())?;
+    let upd_at = bg_end;
+    let end = upd_at.checked_add(8).ok_or(())?;
+    if bytes.len() < end {
+        return Err(());
+    }
+    let cfg = &bytes[16..cfg_end];
+    let bg = &bytes[bg_at..bg_end];
+    let upd_time = read_be_u64(&bytes[upd_at..end])? as i64;
+    // Live cfg is Java-serialized OutputAreasHolder (`aced…`).
+    if cfg.len() < 2 || cfg[0] != 0xac || cfg[1] != 0xed {
+        return Err(());
+    }
+    if bg.len() < 8 || &bg[..8] != b"\x89PNG\r\n\x1a\n" {
+        return Err(());
+    }
+    std::fs::create_dir_all(dir).map_err(|_| ())?;
+    std::fs::write(dir.join("badge.cfg"), cfg).map_err(|_| ())?;
+    std::fs::write(dir.join("bg.png"), bg).map_err(|_| ())?;
+    Ok(UnpackedBadge {
+        cfg: true,
+        background: true,
+        page: false,
+        upd_time: Some(upd_time),
+    })
+}
+
+fn read_be_u64(bytes: &[u8]) -> Result<u64, ()> {
+    let arr: [u8; 8] = bytes.try_into().map_err(|_| ())?;
+    Ok(u64::from_be_bytes(arr))
+}
+
+fn unpack_badge_zip(dir: &Path, bytes: &[u8]) -> Result<UnpackedBadge, ()> {
     let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(|_| ())?;
     std::fs::create_dir_all(dir).map_err(|_| ())?;
     let mut wrote = UnpackedBadge {
         cfg: false,
         background: false,
         page: false,
+        upd_time: None,
     };
     for index in 0..archive.len() {
         let mut file = archive.by_index(index).map_err(|_| ())?;
@@ -2112,10 +2355,12 @@ fn soft_error(bytes: &[u8]) -> bool {
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
         return false;
     };
-    matches!(
-        value.get("error_msg").and_then(serde_json::Value::as_str),
-        Some(msg) if !msg.is_empty()
-    )
+    match value.get("error_msg").and_then(serde_json::Value::as_str) {
+        // Scala keeps downloading other categories when one has no badge.
+        Some("no_badge") => false,
+        Some(msg) if !msg.is_empty() => true,
+        _ => false,
+    }
 }
 
 pub async fn sync_once(
@@ -4481,6 +4726,25 @@ mod tests {
                 .to_string()
         }
 
+        fn cats_body_stringified() -> String {
+            // Live kuprin getconf returns `cats` as a JSON string, not an array.
+            r#"{"status":"ok","last_synch":1,"cats":"[{\"cat_id\":3},{\"cat_id\":7}]","forms":{"list":[],"change":1}}"#
+                .to_string()
+        }
+
+        #[test]
+        fn cat_ids_accepts_array_and_stringified_cats() {
+            assert_eq!(
+                super::super::cat_ids(cats_body().as_bytes()),
+                vec![-2, 3, 7, -1]
+            );
+            assert_eq!(
+                super::super::cat_ids(cats_body_stringified().as_bytes()),
+                vec![-2, 3, 7, -1]
+            );
+            assert_eq!(super::super::cat_ids(br"{}"), vec![-2, -1]);
+        }
+
         fn pool_body() -> String {
             "1\n3\n4\n1\n1\nABC\n".to_string()
         }
@@ -4655,6 +4919,41 @@ mod tests {
             cursor.into_inner()
         }
 
+        /// Live kuprin `getbadge` body (Scala Synchronizer frame).
+        fn badge_scala_frame(cfg: &[u8], png: &[u8], upd_time: u64) -> Vec<u8> {
+            let mut out = Vec::new();
+            out.extend_from_slice(&[0; 8]);
+            out.extend_from_slice(&(cfg.len() as u64).to_be_bytes());
+            out.extend_from_slice(cfg);
+            out.extend_from_slice(&(png.len() as u64).to_be_bytes());
+            out.extend_from_slice(png);
+            out.extend_from_slice(&upd_time.to_be_bytes());
+            out
+        }
+
+        #[tokio::test]
+        async fn getbadge_accepts_scala_framed_body() {
+            let (venue, dir) = venue("EVT1");
+            let cfg = include_bytes!("../../modules/ticket-render/fixtures/event/badge.cfg");
+            let png = red_png();
+            parse_job(
+                &venue.app,
+                &getbadge_job("EVT1", 3, false),
+                &badge_scala_frame(cfg, &png, 99),
+            )
+            .await;
+            let badge = dir.join("EVT1").join("badge").join("3");
+            assert!(badge.join("badge.cfg").is_file());
+            assert!(badge.join("bg.png").is_file());
+            assert_eq!(
+                std::fs::read(badge.join("badge.cfg")).unwrap(),
+                cfg.as_slice()
+            );
+            let current = CurrentEvent::lock(&venue.app.current);
+            assert!(current.badge_layout(3).unwrap().is_ok());
+            assert_eq!(current.cursor("EVT1", "getbadge:3:badge").unwrap(), "99");
+        }
+
         #[tokio::test]
         async fn badges_follow_the_categories() {
             let mut bodies = HashMap::new();
@@ -4698,7 +4997,7 @@ mod tests {
                 .map(|hit| form_map(&hit.body))
                 .collect();
             assert_eq!(badges.len(), 1);
-            assert_eq!(badges[0].get("cat_id").map(String::as_str), Some("3"));
+            assert_eq!(badges[0].get("cat_id").map(String::as_str), Some("-2"));
             assert_eq!(badges[0].get("is_cert").map(String::as_str), Some("false"));
             assert!(stand
                 .hits()
@@ -4720,7 +5019,7 @@ mod tests {
                 .map(|hit| form_map(&hit.body))
                 .collect();
             assert_eq!(badges.len(), 2);
-            assert_eq!(badges[1].get("cat_id").map(String::as_str), Some("7"));
+            assert_eq!(badges[1].get("cat_id").map(String::as_str), Some("3"));
             assert_eq!(badges[1].get("is_cert").map(String::as_str), Some("false"));
             assert!(stand
                 .hits()
@@ -4884,12 +5183,34 @@ mod tests {
             let arr = (0..count)
                 .map(|i| {
                     format!(
-                        r#"{{"ts":{ts},"obj":{{"uid":"{ts}-{i}","name":"ivan","surname":"{surname}","email":"u{i}@example.com"}}}}"#
+                        r#"{{"ts":{ts},"obj":{{"uniqueId":"{ts}-{i}","name":"ivan","surname":"{surname}","email":"u{i}@example.com"}}}}"#
                     )
                 })
                 .collect::<Vec<_>>()
                 .join(",");
             format!(r#"{{"arr":[{arr}]}}"#)
+        }
+
+        #[test]
+        fn visitor_from_item_uses_unique_id_like_scala() {
+            let item: serde_json::Value = serde_json::from_str(
+                r#"{"ts":9,"obj":{"uniqueId":"GVCSMU1W5P_4823411","memberId":"4396313","name":"Ann","surname":"Lee","category":-2,"subscribtion":{"jvrel_prop":{"ticket_status":1}},"ext_packets":[{"has":2,"given":0}]}}"#,
+            )
+            .unwrap();
+            let visitor = super::super::visitor_from_item(&item).expect("uniqueId row");
+            assert_eq!(visitor.uid, "GVCSMU1W5P_4823411");
+            assert_eq!(visitor.surname, "Lee");
+            assert_eq!(visitor.ticket_status, 1);
+            assert_eq!(visitor.give_packet, 1);
+        }
+
+        #[test]
+        fn visitor_from_item_ignores_member_id_without_unique_id() {
+            let item: serde_json::Value = serde_json::from_str(
+                r#"{"ts":9,"obj":{"memberId":"4396313","name":"Ann","surname":"Lee","category":-2}}"#,
+            )
+            .unwrap();
+            assert!(super::super::visitor_from_item(&item).is_none());
         }
 
         async fn until(stand: &Stand, n: usize) {

@@ -59,7 +59,7 @@ The layout is `badge/{category}/badge.cfg`, or `badge/{category+1000}/badge.cfg`
 
 The send is `lp`. ZPL is `lp -o raw -d NAME /tmp/badges/{id}.zpl`. A raster filter uses `lp -o raw` on the `.raw` file. PostScript is `lp -d NAME` on the `.ps` file. `rawPrint` reads `request id is NAME-JOB (1 file(s))`, then polls `lpstat -l -o NAME` until the line `Alerts: job-printing` disappears. The line `Status: Unable to send data to printer.` cancels the job with `lprm` and retries, up to ten times, with a 100 ms sleep between polls.
 
-One single-thread pool per category renders. One single-thread pool per queue sends. A failed ZPL send used to keep the badge and retry it later. That retry list is commented out. A thrown error in `printBadge` renders a PNG into `genbadges/` with a disconnected printer and returns no queue.
+One single-thread pool per category renders. One single-thread pool per queue sends. A failed ZPL send used to keep the badge and retry it later. That retry list is commented out. A thrown error in `printBadge` renders a PNG into `genbadges/` with a disconnected printer and returns no queue. The Rust offline path writes `{event}/genbadges-png/` and `{event}/genbadges-pdf/` and drops files in those directories older than one hour when a new pair is written.
 
 ZPL options are not CUPS options at send time. `getExtraParams` formats `^PR` speed, `^MD` darkness, `^MM` mode, `^LS` shift, `^LT` top, and `~TA` tear-off. The C renderer writes those lines into the ZPL file between `^XA` and the graphic.
 
@@ -104,8 +104,12 @@ Files in a directory are ordered by weight, low to high. The same weight puts `n
 ```text
 fonts/pf-beau-sans-pro/pf-beau-sans-pro-400-normal.ttf
 fonts/pf-beau-sans-pro/pf-beau-sans-pro-700-normal.ttf
+fonts/pf-beau-sans-pro/PFBeauSansPro-Regular.otf
+fonts/pf-beau-sans-pro/PFBeauSansPro-Bold.otf
 fonts/dejavu-sans/dejavu-sans-400-normal.ttf
 ```
+
+Vendor stems from the Scala tree are accepted too: `PFBeauSansPro-Regular.otf`, `PFBeauSansPro-Bold.otf`, `regular.ttf`, `bold.ttf`. Mapped weights are XThin 100, Thin 200, Light 300, Regular 400, Bbook/Book/Medium 500, SemiBold 600, Bold 700, ExtraBold 800, Black 900. An `Italic` / truncated `Itali` suffix selects italic.
 
 `normal` from a `badge.cfg` is weight 400. `bold` is 700. A number from 1 to 1000 is that weight. `italic` and `oblique` select the italic file. When the same weight and style exist as both `.otf` and `.ttf`, the `.otf` file is drawn. A requested italic with no italic file uses the roman file. A missing weight uses the CSS rule: below 400 the next lighter face, otherwise the next heavier; 400 prefers 500; 500 prefers 400; above 500 the next heavier face, otherwise the next lighter.
 
@@ -162,7 +166,7 @@ Finding builds one `Printer` per queue, plus one for each device that could not 
 | `values` | `base/printer_conf/{name}.yml` | the operator's saved options. Written when the operator saves. Applied as IPP options on the job |
 | `routing` | `base/{event_id}/pr_{name}.yml`, then the address file | this event only. See below. `zone`, `category`, and `print_cert` on the address file replace those three fields from the YAML |
 
-Search writes `base/printer_conf/{hex}.json` when the event files are set and that address has no file. The file is `id`, `name`, `hidden`, `default`, `zone`, `category`, and `print_cert`. A later search reads it and does not replace `name`. `PATCH /api/printers/{id}` updates an existing file. The path is the address, percent-encoded. An admin desk key is required. An unknown address is 404 and no file is created. `default` true clears that flag on the other files. `GET /api/printers` requires a desk cookie and returns every file, including a hidden printer and one that is not available. Available means connected, accepting jobs, and not stopped. A file whose printer is gone stays in that list with `available` false.
+Search writes `base/printer_conf/{hex}.json` when the event files are set and that address has no file. The file is `id`, `name`, `hidden`, `default`, `zone`, `category`, and `print_cert`. A later search reads it and does not replace `name`. `PATCH /api/printers/{id}` updates an existing file. The path is the address, percent-encoded. An admin desk key is required. An unknown address is 404 and no file is created. `default` true clears that flag on the other files. `GET /api/printers` requires a desk cookie and returns every file, including a hidden printer and one that is not available. Available means connected, accepting jobs, not stopped, and without offline IPP state reasons (`offline-report`, `connecting-to-device`, and similar). A file whose printer is gone stays in that list with `available` false.
 
 `values` survive an event switch. They describe the printer on this device. The YAML routing file does not: it lives in the event directory. The address file sits next to the credentials, so its name, `hidden`, `default`, `zone`, `category`, and `print_cert` are shared by events. Those three routing fields replace the same fields from the event YAML. The printer settings screen writes them. A pick reads the current list. That list gains a printer when a search finds a device it did not already have, and it loses a printer only after both tools finish a search that did not find it. The list is not cleared and refilled as a whole, so a pick never observes a map that was emptied and not yet rebuilt. `getPrintersData` in the Scala client clears that map on every call.
 

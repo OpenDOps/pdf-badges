@@ -159,6 +159,7 @@
     "unique": "This value is already used",
     "email": "Enter an email address",
     "no_printer": "No printer for this badge.",
+    "printed_offline": "No printer connected — badge saved as PNG/PDF.",
     "no_ticket_code": "No ticket code is left.",
     "invalid_phone_email_combo": "This email and phone belong to different people.",
     "invalid_key": "Unknown key"

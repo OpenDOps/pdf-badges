@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -154,7 +153,10 @@ fn load_request(
     let event = base.join(&event_id);
     search.set_files(&base, &event_id);
     search.set_badges(badges);
-    search.set_visitor(&job.id, fields_of(&value));
+    search.set_visitor(
+        &job.id,
+        crate::registration_server::event_db::visitor_print_fields(&value),
+    );
     let (transliterate, double_print) = settings_flags(&event.join("settings.json"));
     Ok(PrintRequest {
         id: job.id.clone(),
@@ -170,25 +172,6 @@ fn load_request(
         rule: None,
         pixel_cap: None,
     })
-}
-
-fn fields_of(value: &serde_json::Value) -> HashMap<String, String> {
-    let Some(object) = value.as_object() else {
-        return HashMap::new();
-    };
-    let mut fields = HashMap::new();
-    for (key, item) in object {
-        let Some(text) = (match item {
-            serde_json::Value::String(text) => Some(text.clone()),
-            serde_json::Value::Number(number) => Some(number.to_string()),
-            serde_json::Value::Bool(flag) => Some(flag.to_string()),
-            _ => None,
-        }) else {
-            continue;
-        };
-        fields.insert(key.clone(), text);
-    }
-    fields
 }
 
 fn json_i64(value: &serde_json::Value, key: &str) -> i64 {

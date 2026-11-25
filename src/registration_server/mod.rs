@@ -120,7 +120,7 @@ impl App {
         let (prints, worker) = PrintQueue::pair(Arc::clone(&gate));
         let link = Arc::new(Link::new());
         let operator = OperatorState::new(
-            CredentialFile::new("credentials.yml"),
+            CredentialFile::new("data/credentials.yml"),
             Remote::new("http://127.0.0.1:1").expect("loopback remote url"),
         )
         .with_link(Arc::clone(&link));
@@ -133,7 +133,7 @@ impl App {
                 operator,
                 dist: PathBuf::from("registration-admin/dist"),
                 form: PathBuf::from("registration-form/build/client"),
-                current: Arc::new(Mutex::new(CurrentEvent::new("."))),
+                current: Arc::new(Mutex::new(CurrentEvent::new("data"))),
                 sync_running: Arc::new(AtomicBool::new(false)),
                 sync_notify: Arc::new(Notify::new()),
                 sync_passes: Arc::new(AtomicU64::new(0)),

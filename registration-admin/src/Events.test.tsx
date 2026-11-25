@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 
 import { postSelect } from "./api";
 import "./i18n";
@@ -206,9 +206,13 @@ test("select_shows_the_remote_error", async () => {
 });
 
 test("screen_shows_stored_token_and_event_keys", async () => {
+  const keyRows = [
+    { id: 1, key: "ADM1234", comment: null, is_admin: true },
+    { id: 2, key: "OPR5678", comment: null, is_admin: false },
+  ];
   vi.stubGlobal(
     "fetch",
-    vi.fn(async (url: string) => {
+    vi.fn(async (url: string, init?: RequestInit) => {
       if (url.endsWith("/api/events/select")) {
         return {
           json: async () => ({
@@ -217,16 +221,14 @@ test("screen_shows_stored_token_and_event_keys", async () => {
           }),
         };
       }
+      if (url.endsWith("/api/keys") && (init?.method ?? "GET") === "POST") {
+        const body = JSON.parse(String(init?.body)) as { is_admin: boolean };
+        const row = { id: 3, key: "ADM9999", comment: null, is_admin: body.is_admin };
+        keyRows.push(row);
+        return { json: async () => ({ ok: true, data: row }) };
+      }
       if (url.endsWith("/api/keys")) {
-        return {
-          json: async () => ({
-            ok: true,
-            data: [
-              { id: 1, key: "ADM1234", comment: null, is_admin: true },
-              { id: 2, key: "OPR5678", comment: null, is_admin: false },
-            ],
-          }),
-        };
+        return { json: async () => ({ ok: true, data: keyRows }) };
       }
       throw new Error(url);
     }),
@@ -258,8 +260,20 @@ test("screen_shows_stored_token_and_event_keys", async () => {
     fireEvent.click(screen.getByRole("button", { name: "Bo" }));
   });
   expect(screen.getByText("Токен проекта сохранён")).toBeInTheDocument();
+  expect(screen.getByText("2")).toBeInTheDocument();
+  expect(screen.queryByText("ADM1234")).not.toBeInTheDocument();
+  await act(async () => {
+    fireEvent.click(screen.getByRole("button", { name: "Показать ключи" }));
+  });
   expect(await screen.findByText("ADM1234")).toBeInTheDocument();
   expect(screen.getByText("OPR5678")).toBeInTheDocument();
+  const admin = screen.getByRole("region", { name: "Ключи администратора" });
+  const operator = screen.getByRole("region", { name: "Ключи оператора" });
+  await act(async () => {
+    fireEvent.click(within(admin).getByRole("button", { name: /Добавить/ }));
+  });
+  expect(await within(admin).findByLabelText("Ключ")).toHaveValue("ADM9999");
+  expect(within(operator).queryByLabelText("Ключ")).toBeNull();
   vi.unstubAllGlobals();
 });
 
@@ -340,15 +354,14 @@ test("events_shows_extract_progress", async () => {
   vi.unstubAllGlobals();
 });
 
-test("events_disables_upgrade_without_the_wrapper", () => {
+test("events_hides_update_controls_without_the_wrapper", () => {
   const fetchMock = vi.fn();
   vi.stubGlobal("fetch", fetchMock);
-  renderEvents({ newer: "2.0.0", supervised: false });
-  const offer = screen.getByRole("button", { name: "Обновить до v2.0.0" });
-  expect(offer).toBeDisabled();
-  expect(offer).toHaveClass("cursor-not-allowed");
+  renderEvents({ newer: "2.0.0", supervised: false, checkFailed: true, retryIn: 120 });
+  expect(screen.queryByRole("button", { name: "Обновить до v2.0.0" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Проверить обновления" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   expect(screen.getByText("Программа запущена без обёртки")).toBeInTheDocument();
-  fireEvent.click(offer);
   expect(fetchMock).not.toHaveBeenCalled();
   vi.unstubAllGlobals();
 });
@@ -360,9 +373,9 @@ test("events_notes_a_rolled_back_upgrade", () => {
 
 test("keys_block_waits_for_an_event", () => {
   renderEvents({ current: null });
-  const keys = screen.getByRole("region", { name: "Ключи" });
-  expect(keys).toHaveTextContent("Выберите мероприятие, чтобы настроить ключи");
-  expect(keys.querySelector("button")).toBeNull();
+  const current = screen.getByRole("region", { name: "Текущее мероприятие" });
+  expect(current).toHaveTextContent("Выберите мероприятие, чтобы настроить ключи");
+  expect(screen.queryByRole("button", { name: /Текущее мероприятие/ })).toBeNull();
 });
 
 test("events_shows_the_running_version", () => {

@@ -19,7 +19,7 @@ These pieces are the same for every visitor of a category. They are built at the
 | Piece | Old `badge.cfg` | YAML page |
 |---|---|---|
 | Document | The layout from step 3, with `layout.json` written beside the cfg | The `Page` and the `TemplateIndex` |
-| Fonts | The face the layout names, `.otf` or `.ttf`, parsed once. The file name is [Fonts](printing.md#fonts) | The font bytes and the parsed face. `draw_text` today reads the file for every box |
+| Fonts | Each text area and each text part's family/weight/style, `.otf` or `.ttf`, parsed once. The file name is [Fonts](printing.md#fonts) | The font bytes and the parsed face. `draw_text` today reads the file for every box |
 | Images | `bg.png` decoded once | JPEG bytes kept as stored. BMP decoded to samples once. `paint_contents` today reads and decodes them on every page |
 
 `render_rows` still fills the holes and builds a PDF. It takes the font bytes and the image samples from this memory.
@@ -36,7 +36,7 @@ The YAML page only. Images and static text become one PDF form when the page is 
 
 ### PNG and ZPL
 
-Both renderers. The static layer is built at 203 dpi and at 300 dpi, the two densities the queues use. A print copies that buffer and draws the fields, the barcode, the QR code, and the photo into their boxes.
+Both renderers. The static layer is built at 203 dpi and at 300 dpi, the two densities the queues use, and at 720 dpi for the offline genbadges path. A print copies that buffer and draws the fields, the barcode, the QR code, and the photo into their boxes.
 
 For ZPL the static layer is already 1 bit. Only the boxes that change are thresholded into it. The job still sends one full `~DG`. The saved work is the decode, the scale, and the full-page threshold.
 

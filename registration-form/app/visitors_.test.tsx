@@ -387,8 +387,10 @@ test("visitors_closes_the_tab_on_leave", async () => {
   fireEvent.click(screen.getByRole("button", { name: "Закрыть" }));
   expect(await screen.findByRole("dialog")).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "Продолжить" }));
-  await waitFor(() => expect(router.state.location.pathname).toBe("/visitors"));
-  expect(screen.queryByRole("link", { name: "Посетитель" })).not.toBeInTheDocument();
+  await waitFor(() => {
+    expect(router.state.location.pathname).toBe("/visitors");
+    expect(screen.queryByRole("link", { name: "Посетитель" })).not.toBeInTheDocument();
+  });
 });
 
 async function openBorisOn(router: { state: { location: { pathname: string } } }) {

@@ -770,7 +770,7 @@ fn publish_native(inner: &Inner, slot: &mut Slot, queue: &Queue) -> (Vec<Change>
             printer.formats = existing.formats.clone();
             printer.settings = existing.settings.clone();
             printer.toner = existing.toner.clone();
-            printer.connected = true;
+            printer.connected = !ipp_offline(&existing.settings.state_reasons);
         }
     } else if slot.seen_devices.contains(&queue.device_uri) {
         printer.connected = true;
@@ -974,12 +974,31 @@ fn listed(slot: &Slot) -> Vec<&Printer> {
 }
 
 pub(crate) fn printer_available(printer: &Printer) -> bool {
-    printer.connected && printer.accepting && printer.state != "stopped"
+    printer.connected
+        && printer.accepting
+        && printer.state != "stopped"
+        && !ipp_offline(&printer.settings.state_reasons)
+}
+
+/// IPP `printer-state-reasons` that mean the device is not online for print.
+fn ipp_offline(reasons: &[String]) -> bool {
+    reasons.iter().any(|reason| {
+        matches!(
+            reason.as_str(),
+            "offline-report"
+                | "connecting-to-device"
+                | "cups-waiting-for-printer-to-connect"
+                | "shutdown"
+                | "timed-out"
+        )
+    })
 }
 
 fn unavailable_reason(printer: &Printer) -> String {
     let mut reasons = Vec::new();
-    if !printer.connected {
+    if ipp_offline(&printer.settings.state_reasons) {
+        reasons.push("offline");
+    } else if !printer.connected {
         reasons.push("not connected");
     }
     if !printer.accepting {
@@ -1106,7 +1125,9 @@ fn apply_details(printer: &mut Printer, found: &IppPrinter) {
     printer.formats = found.formats.clone();
     printer.settings = found.settings.clone();
     printer.toner = found.toner.clone();
-    printer.connected = true;
+    // Get-Printer-Attributes can succeed against a local CUPS queue while the
+    // physical device is unreachable. Treat those IPP reasons as not connected.
+    printer.connected = !ipp_offline(&found.settings.state_reasons);
 }
 
 fn emit(inner: &Inner, changes: Vec<Change>) {
@@ -1180,7 +1201,7 @@ fn from_discovered(found: &IppPrinter) -> Printer {
         width_in,
         choices: Vec::new(),
         installed: true,
-        connected: true,
+        connected: !ipp_offline(&found.settings.state_reasons),
         class: "ipp".to_string(),
         values: Values::default(),
         routing: Routing::default(),
@@ -2471,6 +2492,54 @@ fn queued_jobs(service: &str, name: &str) -> Option<i32> {
 
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod tests {
+    mod available {
+        use super::super::{ipp_offline, printer_available, Printer, Routing, Values};
+        use crate::registration_server::native_print::Kind;
+        use ipp_tool::Settings;
+
+        fn printer() -> Printer {
+            Printer {
+                name: "desk".to_string(),
+                device_uri: "ipp://192.0.2.10/ipp/print".to_string(),
+                make_model: "Kyocera".to_string(),
+                state: "idle".to_string(),
+                accepting: true,
+                host: "192.0.2.10".to_string(),
+                kind: Kind::Raster,
+                dpi: 300,
+                width_in: Some(4.0),
+                choices: Vec::new(),
+                installed: true,
+                connected: true,
+                class: "ipp".to_string(),
+                values: Values::default(),
+                routing: Routing::default(),
+                last_print: 0,
+                formats: ipp_tool::Formats::default(),
+                settings: Settings::default(),
+                toner: ipp_tool::Toner::default(),
+            }
+        }
+
+        #[test]
+        fn online_when_reasons_are_none_or_empty() {
+            assert!(!ipp_offline(&[]));
+            assert!(!ipp_offline(&["none".to_string()]));
+            assert!(!ipp_offline(&["toner-low".to_string(), "media-empty".to_string()]));
+            assert!(printer_available(&printer()));
+        }
+
+        #[test]
+        fn offline_report_marks_printer_unavailable() {
+            let mut desk = printer();
+            desk.settings.state_reasons =
+                vec!["offline-report".to_string(), "connecting-to-device".to_string()];
+            desk.state = "processing".to_string();
+            assert!(ipp_offline(&desk.settings.state_reasons));
+            assert!(!printer_available(&desk));
+        }
+    }
+
     mod cards {
         use std::path::PathBuf;
 
@@ -5299,16 +5368,9 @@ contents:
                 .join("event")
                 .join("genbadges-png")
                 .join(format!("{stem}.png"));
-            let pdf = dir
-                .join("event")
-                .join("genbadges-pdf")
-                .join(format!("{stem}.pdf"));
             assert_eq!(printed.png.as_deref(), Some(png.as_path()));
-            assert_eq!(printed.pdf.as_deref(), Some(pdf.as_path()));
+            assert!(printed.pdf.is_none());
             assert_eq!(&std::fs::read(&png).unwrap()[..8], b"\x89PNG\r\n\x1a\n");
-            let doc = lopdf::Document::load(&pdf).unwrap();
-            assert_eq!(doc.get_pages().len(), 1);
-            assert!(doc.extract_text(&[1]).unwrap().contains("Ann"));
             assert!(print_bodies(&cups).is_empty());
             assert!(super::super::Error::new("no queue").is_no_queue());
             assert!(!super::super::Error::new("queue stopped").is_no_queue());
@@ -5326,38 +5388,17 @@ contents:
                 .join("event")
                 .join("genbadges-png")
                 .join(format!("{stem}.png"));
-            let pdf = dir
-                .join("event")
-                .join("genbadges-pdf")
-                .join(format!("{stem}.pdf"));
             assert_eq!(printed.png.as_deref(), Some(png.as_path()));
-            assert_eq!(printed.pdf.as_deref(), Some(pdf.as_path()));
+            assert!(printed.pdf.is_none());
             let image = image::load_from_memory(&std::fs::read(&png).unwrap())
                 .unwrap()
                 .to_rgba8();
             assert_eq!(image.dimensions(), (1440, 720));
-            let doc = lopdf::Document::load(&pdf).unwrap();
-            assert_eq!(doc.get_pages().len(), 1);
-            let page_id = doc.get_pages()[&1];
-            let media = doc
-                .get_dictionary(page_id)
-                .unwrap()
-                .get(b"MediaBox")
-                .unwrap();
-            let box_width = media.as_array().unwrap()[2].as_float().unwrap();
-            let box_height = media.as_array().unwrap()[3].as_float().unwrap();
-            assert!((box_width - 144.0).abs() < 0.1, "{box_width}");
-            assert!((box_height - 72.0).abs() < 0.1, "{box_height}");
             let tr = dir
                 .join("event")
                 .join("genbadges-png")
                 .join(format!("{stem}-tr.png"));
-            let tr_pdf = dir
-                .join("event")
-                .join("genbadges-pdf")
-                .join(format!("{stem}-tr.pdf"));
             assert!(tr.is_file());
-            assert!(tr_pdf.is_file());
 
             let mut again = request(4);
             again.double_print = true;
@@ -5519,6 +5560,27 @@ contents:
             assert_eq!(width, (100.0_f64 / 72.0 * 300.0).round() as u32);
             assert!(width < 600, "{width}");
             assert_eq!(search.held_pages(), 0);
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[tokio::test]
+        async fn missing_category_falls_back_to_default_badge() {
+            let (_cups, search, dir) =
+                started(&[queue("hp", "socket://192.0.2.20:9100", "HP LaserJet")]);
+            let fields = visitor("Ann");
+            let mut badges = Badges::default();
+            store_layout(&mut badges, -1, 144, 72);
+            let expected = badges
+                .layout_entry(-1)
+                .unwrap()
+                .unwrap()
+                .png(&fields, 300, None)
+                .unwrap();
+            search.set_badges(badges);
+            search.set_visitor("5", fields);
+            // Category 42 has no template; preview must use -1.
+            let page = search.preview(&request(42)).unwrap();
+            assert_eq!(page, expected);
             let _ = std::fs::remove_dir_all(&dir);
         }
     }

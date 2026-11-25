@@ -142,8 +142,8 @@ struct RegistrationServerArgs {
     #[arg(long, default_value = "registration-form/build/client")]
     form: PathBuf,
 
-    /// Credential document
-    #[arg(long, default_value = "credentials.yml")]
+    /// Credential document (parent directory is the data base: events + printer_conf)
+    #[arg(long, default_value = "data/credentials.yml")]
     credentials: PathBuf,
 
     /// Debug lines for HTTP, login, events, select, sync, and print

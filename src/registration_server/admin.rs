@@ -675,7 +675,12 @@ async fn create_key(
     let is_admin = parsed
         .as_ref()
         .and_then(|value| value.get("is_admin"))
-        .and_then(|item| item.as_bool())
+        .map(|item| {
+            item.as_bool()
+                .unwrap_or(false)
+                || item.as_i64().unwrap_or(0) != 0
+                || item.as_str().is_some_and(|text| text == "1" || text.eq_ignore_ascii_case("true"))
+        })
         .unwrap_or(false);
     match insert_key(&state, is_admin, comment.as_deref()) {
         Ok(row) => api_ok(row),
@@ -845,8 +850,7 @@ fn insert_key(
     crate::registration_server::current::CurrentEvent::lock(state.current())
         .with_db(|db| {
             for _ in 0..8 {
-                let key = crate::registration_server::event_db::new_key()
-                    .unwrap_or_else(|| format!("K{}", uuid::Uuid::new_v4().simple()));
+                let key = crate::registration_server::event_db::new_key();
                 match db.file().execute(
                     "INSERT INTO keys (key, is_admin, comment) VALUES (?1, ?2, ?3)",
                     rusqlite::params![key, i64::from(is_admin), comment],

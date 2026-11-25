@@ -313,11 +313,13 @@ impl Search {
         request: &PrintRequest,
         fields: &HashMap<String, String>,
     ) -> Result<Printed, Error> {
+        let started = std::time::Instant::now();
         let cap = request.pixel_cap.unwrap_or(2400);
         let drawn = self.render_offline(request, fields, cap)?;
+        let render_ms = started.elapsed().as_millis();
         let event = event_dir(self)?;
         let stem = file_stem(request.category, fields);
-        let (png, pdf) = write_pair(&event, &stem, &drawn.png, &drawn.pdf)?;
+        let png = write_png(&event, &stem, &drawn.png)?;
         if request.transliterate || request.double_print {
             tokio::task::yield_now().await;
             let next_fields = if request.transliterate {
@@ -327,12 +329,18 @@ impl Search {
             };
             let drawn = self.render_offline(request, &next_fields, cap)?;
             let suffix = if request.transliterate { "tr" } else { "d" };
-            write_pair(&event, &format!("{stem}-{suffix}"), &drawn.png, &drawn.pdf)?;
+            write_png(&event, &format!("{stem}-{suffix}"), &drawn.png)?;
         }
+        log::debug!(
+            "print offline id={} stem={stem} render_ms={render_ms} total_ms={} png_bytes={} dpi_cap={cap}",
+            request.id,
+            started.elapsed().as_millis(),
+            drawn.png.len()
+        );
         Ok(Printed {
             job_id: None,
             png: Some(png),
-            pdf: Some(pdf),
+            pdf: None,
         })
     }
 
@@ -376,14 +384,10 @@ impl Search {
         let source = source_of(&badges, request.category, false)?;
         let (width_in, height_in) = inches_of(&badges, &source)?;
         let dpi = capped_dpi(720, width_in, height_in, cap);
+        // PNG only: desk opens one preview tab. Skipping PDF avoids a second full-frame
+        // decode + JPEG encode that dominated offline time after the raster.
         let png = png_of(&badges, &source, fields, dpi)?;
-        let pdf = match &source {
-            Source::Page(category) => page_of(&badges, *category)?
-                .pdf(fields, &HashMap::new())
-                .map_err(page_err)?,
-            Source::Layout(_) => pdf_of_png(&png, width_in, height_in)?,
-        };
-        Ok(Offline { png, pdf })
+        Ok(Offline { png })
     }
 
     async fn dispatch(
@@ -684,7 +688,6 @@ impl Search {
 
 struct Offline {
     png: Vec<u8>,
-    pdf: Vec<u8>,
 }
 
 struct ReadySend {
@@ -729,13 +732,26 @@ fn source_of(badges: &Badges, category: i64, certificate: bool) -> Result<Source
     if certificate {
         return Ok(Source::Layout(certificate_layout(badges, category)?));
     }
-    if matches!(badges.page_entry(category), Some(Ok(_))) {
-        return Ok(Source::Page(category));
+    if let Some(source) = category_source(badges, category) {
+        return Ok(source);
     }
-    if matches!(badges.layout_entry(category), Some(Ok(_))) {
-        return Ok(Source::Layout(category));
+    // Missing template for this category uses the default visitor badge (-1).
+    if category != -1 {
+        if let Some(source) = category_source(badges, -1) {
+            return Ok(source);
+        }
     }
     Err(Error::new("no badge"))
+}
+
+fn category_source(badges: &Badges, category: i64) -> Option<Source> {
+    if matches!(badges.page_entry(category), Some(Ok(_))) {
+        return Some(Source::Page(category));
+    }
+    if matches!(badges.layout_entry(category), Some(Ok(_))) {
+        return Some(Source::Layout(category));
+    }
+    None
 }
 
 fn certificate_layout(badges: &Badges, category: i64) -> Result<i64, Error> {
@@ -948,23 +964,55 @@ fn clean_file_part(value: &str) -> String {
         .collect()
 }
 
+/// Offline preview files older than this are removed when a new pair is written.
+const GENBADGES_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+fn write_png(event: &Path, stem: &str, png: &[u8]) -> Result<PathBuf, Error> {
+    let png_dir = event.join("genbadges-png");
+    std::fs::create_dir_all(&png_dir).map_err(|err| Error::new(err.to_string()))?;
+    prune_genbadges_dir(&png_dir, GENBADGES_MAX_AGE);
+    // Drop stale PDFs from older builds that still wrote the pair.
+    prune_genbadges_dir(&event.join("genbadges-pdf"), GENBADGES_MAX_AGE);
+    let png_path = png_dir.join(format!("{stem}.png"));
+    std::fs::write(&png_path, png).map_err(|err| Error::new(err.to_string()))?;
+    Ok(png_path)
+}
+
+#[cfg(test)]
 fn write_pair(
     event: &Path,
     stem: &str,
     png: &[u8],
     pdf: &[u8],
 ) -> Result<(PathBuf, PathBuf), Error> {
-    let png_path = event.join("genbadges-png").join(format!("{stem}.png"));
-    let pdf_path = event.join("genbadges-pdf").join(format!("{stem}.pdf"));
-    if let Some(parent) = png_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|err| Error::new(err.to_string()))?;
-    }
-    if let Some(parent) = pdf_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|err| Error::new(err.to_string()))?;
-    }
-    std::fs::write(&png_path, png).map_err(|err| Error::new(err.to_string()))?;
+    let png_path = write_png(event, stem, png)?;
+    let pdf_dir = event.join("genbadges-pdf");
+    std::fs::create_dir_all(&pdf_dir).map_err(|err| Error::new(err.to_string()))?;
+    let pdf_path = pdf_dir.join(format!("{stem}.pdf"));
     std::fs::write(&pdf_path, pdf).map_err(|err| Error::new(err.to_string()))?;
     Ok((png_path, pdf_path))
+}
+
+fn prune_genbadges_dir(dir: &Path, max_age: std::time::Duration) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Ok(modified) = entry.metadata().and_then(|meta| meta.modified()) else {
+            continue;
+        };
+        let Ok(age) = now.duration_since(modified) else {
+            continue;
+        };
+        if age > max_age {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }
 
 fn transliterate_fields(fields: &HashMap<String, String>) -> HashMap<String, String> {
@@ -1074,64 +1122,6 @@ fn unix_now() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_millis() as u64)
         .unwrap_or(0)
-}
-
-fn pdf_of_png(png: &[u8], width_in: f64, height_in: f64) -> Result<Vec<u8>, Error> {
-    let image = image::load_from_memory(png)
-        .map_err(|err| Error::new(err.to_string()))?
-        .into_rgb8();
-    let (width, height) = image.dimensions();
-    let mut jpeg = Vec::new();
-    let mut cursor = std::io::Cursor::new(&mut jpeg);
-    image::DynamicImage::ImageRgb8(image)
-        .write_to(&mut cursor, image::ImageFormat::Jpeg)
-        .map_err(|err| Error::new(err.to_string()))?;
-    let width_pt = width_in * 72.0;
-    let height_pt = height_in * 72.0;
-    let mut doc = Document::with_version("1.4");
-    let pages_id = doc.new_object_id();
-    let image_id = doc.add_object(Stream::new(
-        dictionary! {
-            "Type" => "XObject",
-            "Subtype" => "Image",
-            "Width" => width as i64,
-            "Height" => height as i64,
-            "ColorSpace" => "DeviceRGB",
-            "BitsPerComponent" => 8,
-            "Filter" => "DCTDecode",
-        },
-        jpeg,
-    ));
-    let content = format!("q\n{width_pt} 0 0 {height_pt} 0 0 cm\n/Im0 Do\nQ\n");
-    let content_id = doc.add_object(Stream::new(dictionary! {}, content.into_bytes()));
-    let page_id = doc.add_object(dictionary! {
-        "Type" => "Page",
-        "Parent" => pages_id,
-        "MediaBox" => vec![0.into(), 0.into(), width_pt.into(), height_pt.into()],
-        "Contents" => content_id,
-        "Resources" => dictionary! {
-            "XObject" => dictionary! {
-                "Im0" => image_id,
-            },
-        },
-    });
-    doc.set_object(
-        pages_id,
-        dictionary! {
-            "Type" => "Pages",
-            "Kids" => vec![page_id.into()],
-            "Count" => 1,
-        },
-    );
-    let catalog_id = doc.add_object(dictionary! {
-        "Type" => "Catalog",
-        "Pages" => pages_id,
-    });
-    doc.trailer.set("Root", catalog_id);
-    let mut out = Vec::new();
-    doc.save_to(&mut out)
-        .map_err(|err| Error::new(err.to_string()))?;
-    Ok(out)
 }
 
 #[cfg(test)]
@@ -1436,4 +1426,79 @@ fn follow(mut id: ObjectId, redirect: &HashMap<ObjectId, ObjectId>) -> ObjectId 
         id = *next;
     }
     id
+}
+
+#[cfg(test)]
+mod genbadges_prune {
+    use super::{prune_genbadges_dir, write_pair};
+    use std::path::PathBuf;
+    use std::time::{Duration, SystemTime};
+
+    fn temp_event(label: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "rust-reg-genbadges-{label}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    #[cfg(unix)]
+    fn age_file(path: &std::path::Path, age: Duration) {
+        let modified = SystemTime::now() - age;
+        let timespec = filetime_of(modified);
+        let times = [timespec, timespec];
+        let c_path = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::utimes(c_path.as_ptr(), times.as_ptr()) }, 0);
+    }
+
+    #[cfg(unix)]
+    fn filetime_of(at: SystemTime) -> libc::timeval {
+        let elapsed = at
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        libc::timeval {
+            tv_sec: elapsed.as_secs() as libc::time_t,
+            tv_usec: elapsed.subsec_micros() as libc::suseconds_t,
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn write_pair_drops_files_older_than_one_hour() {
+        let event = temp_event("prune");
+        let png_dir = event.join("genbadges-png");
+        let pdf_dir = event.join("genbadges-pdf");
+        std::fs::create_dir_all(&png_dir).unwrap();
+        std::fs::create_dir_all(&pdf_dir).unwrap();
+        let stale_png = png_dir.join("old.png");
+        let stale_pdf = pdf_dir.join("old.pdf");
+        let fresh_png = png_dir.join("new.png");
+        std::fs::write(&stale_png, b"old-png").unwrap();
+        std::fs::write(&stale_pdf, b"old-pdf").unwrap();
+        std::fs::write(&fresh_png, b"new-png").unwrap();
+        age_file(&stale_png, Duration::from_secs(60 * 60 + 5));
+        age_file(&stale_pdf, Duration::from_secs(60 * 60 + 5));
+
+        write_pair(&event, "3_Ann___Acme", b"png", b"pdf").unwrap();
+
+        assert!(!stale_png.exists());
+        assert!(!stale_pdf.exists());
+        assert!(fresh_png.exists());
+        assert!(png_dir.join("3_Ann___Acme.png").is_file());
+        assert!(pdf_dir.join("3_Ann___Acme.pdf").is_file());
+        let _ = std::fs::remove_dir_all(&event);
+    }
+
+    #[test]
+    fn prune_ignores_missing_directory() {
+        prune_genbadges_dir(
+            &std::env::temp_dir().join("rust-reg-genbadges-missing-dir"),
+            Duration::from_secs(1),
+        );
+    }
 }

@@ -8,7 +8,12 @@ import { openVisitor, visitorHref } from "../shell/open-visitor";
 import { MultiSelect } from "../picker";
 
 const PAGE = 20;
-const BUSINESS = new Set(["no_ticket_code", "no_printer", "invalid_phone_email_combo"]);
+const BUSINESS = new Set([
+  "no_ticket_code",
+  "no_printer",
+  "printed_offline",
+  "invalid_phone_email_combo",
+]);
 
 type Row = {
   uid: string;
@@ -206,17 +211,22 @@ export default function Visitors() {
 
   async function printSelected() {
     if (printing) return;
-    const printer = catalog.printer;
-    if (!printer) {
-      setPrintError("no_printer");
-      return;
-    }
     setPrintError("");
     setPrinting(true);
     try {
       const ids = await selectedIds();
       if (ids.length === 0) return;
-      await client.print(ids, printer);
+      const body = (await client.print(ids, catalog.printer || undefined)) as {
+        data?: { jobs?: Array<{ offline?: boolean; png?: string; pdf?: string }> };
+      };
+      const offline = body?.data?.jobs?.filter((job) => job.offline) ?? [];
+      if (offline.length === 1) {
+        const job = offline[0];
+        if (job?.png) window.open(job.png, "_blank", "noopener,noreferrer");
+      }
+      if (offline.length > 0) {
+        setPrintError("printed_offline");
+      }
       clearSelection();
     } catch (error) {
       setPrintError(businessCode(error) ?? (error instanceof Error ? error.message : ""));
@@ -354,7 +364,12 @@ export default function Visitors() {
             {t("visitors.print")}
           </button>
           {printError ? (
-            <p role="alert" className="text-sm text-red-700">
+            <p
+              role="alert"
+              className={
+                printError === "printed_offline" ? "text-sm text-gray-700" : "text-sm text-red-700"
+              }
+            >
               {BUSINESS.has(printError) ? t(`error.${printError}`) : printError}
             </p>
           ) : null}

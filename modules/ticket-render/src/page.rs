@@ -170,9 +170,22 @@ fn paint_areas(
 }
 
 fn encode_png(image: RgbaImage) -> Result<Vec<u8>, PageError> {
+    use image::codecs::png::{CompressionType, FilterType, PngEncoder};
+    use image::ImageEncoder;
+
     let mut bytes = Vec::new();
-    DynamicImage::ImageRgba8(image)
-        .write_to(&mut Cursor::new(&mut bytes), ImageFormat::Png)
+    let encoder = PngEncoder::new_with_quality(
+        &mut bytes,
+        CompressionType::Fast,
+        FilterType::Adaptive,
+    );
+    encoder
+        .write_image(
+            image.as_raw(),
+            image.width(),
+            image.height(),
+            image::ExtendedColorType::Rgba8,
+        )
         .map_err(|error| err(error.to_string()))?;
     Ok(bytes)
 }
@@ -268,10 +281,9 @@ fn draw_text(
     let center_x = (start_x + end_x) as f32 / 2.0;
     let center_y = (start_y + end_y) as f32 / 2.0;
 
+    // Fit with metrics only (no bitmaps), then rasterize once at the final size.
     let mut scale = 1.0f32;
-    let mut measured = measure_lines(&lines, dpi, dots_per_point, scale, faces)?;
-    let width = measured.iter().map(|line| line.width).fold(0.0, f32::max);
-    let height = measured.iter().map(|line| line.line_h).sum::<f32>();
+    let (width, height) = lines_size(&lines, dpi, dots_per_point, scale, faces)?;
     if width > content_w || height > content_h {
         let fit_w = if width > 0.0 { content_w / width } else { 1.0 };
         let fit_h = if height > 0.0 {
@@ -280,10 +292,8 @@ fn draw_text(
             1.0
         };
         scale = fit_w.min(fit_h).min(1.0);
-        if scale < 1.0 {
-            measured = measure_lines(&lines, dpi, dots_per_point, scale, faces)?;
-        }
     }
+    let measured = measure_lines(&lines, dpi, dots_per_point, scale, faces)?;
     let block_h = measured.iter().map(|line| line.line_h).sum::<f32>();
     let mut top = match area.alignment.y {
         1 => (content_h - block_h) / 2.0,
@@ -497,6 +507,44 @@ struct MeasuredLine {
     glyphs: Vec<Glyph>,
 }
 
+fn lines_size(
+    lines: &[Vec<Run<'_>>],
+    dpi: i32,
+    dots_per_point: f32,
+    scale: f32,
+    faces: Option<&[PreparedFace]>,
+) -> Result<(f32, f32), PageError> {
+    let mut width = 0.0f32;
+    let mut height = 0.0f32;
+    for line in lines {
+        let (line_w, line_h) = line_size(line, dpi, dots_per_point, scale, faces)?;
+        width = width.max(line_w);
+        height += line_h;
+    }
+    Ok((width, height))
+}
+
+fn line_size(
+    line: &[Run<'_>],
+    dpi: i32,
+    dots_per_point: f32,
+    scale: f32,
+    faces: Option<&[PreparedFace]>,
+) -> Result<(f32, f32), PageError> {
+    let mut width = 0.0f32;
+    let mut line_h = 1.0f32;
+    for run in line {
+        let size = font_px(run.font_size * scale, dpi, dots_per_point);
+        let font = open_font(run.families, run.weight, run.style, faces)?;
+        let metrics = font.line_metrics(size);
+        line_h = line_h.max(metrics.map(|metrics| metrics.new_line_size).unwrap_or(size));
+        for ch in run.text.chars() {
+            width += font.advance(ch, size);
+        }
+    }
+    Ok((width, line_h))
+}
+
 fn measure_lines(
     lines: &[Vec<Run<'_>>],
     dpi: i32,
@@ -626,6 +674,13 @@ impl DrawnFont<'_> {
         }
     }
 
+    fn advance(&self, ch: char, size: f32) -> f32 {
+        match self {
+            DrawnFont::Prepared(face) => face.font.metrics(ch, size).advance_width,
+            DrawnFont::Owned(font) => font.metrics(ch, size).advance_width,
+        }
+    }
+
     fn rasterize(&self, ch: char, size: f32) -> (Metrics, Vec<u8>) {
         match self {
             DrawnFont::Prepared(face) => face.rasterize(ch, size),
@@ -647,13 +702,15 @@ fn open_font<'a>(
         {
             return Ok(DrawnFont::Prepared(face));
         }
-        let font = Font::from_bytes(TEST_FONT.to_vec(), FontSettings::default())
-            .map_err(|message| err(message))?;
-        return Ok(DrawnFont::Owned(font));
     }
+    // Missing prepared face (or no preload): load from fonts/ rather than silent DejaVu.
     let bytes = face_bytes(families, weight, style);
     Font::from_bytes(bytes, FontSettings::default())
         .map(|font| DrawnFont::Owned(font))
+        .or_else(|_| {
+            Font::from_bytes(TEST_FONT.to_vec(), FontSettings::default())
+                .map(|font| DrawnFont::Owned(font))
+        })
         .map_err(|message| err(message))
 }
 
@@ -722,7 +779,19 @@ fn parse_face_name(slug: &str, file_name: &str) -> Option<(u16, bool, bool)> {
         "ttf" => false,
         _ => None?,
     };
-    let rest = stem.strip_prefix(&format!("{slug}-"))?;
+    if let Some(rest) = stem.strip_prefix(&format!("{slug}-")) {
+        if let Some((weight, italic)) = parse_css_face(rest) {
+            return Some((weight, italic, otf));
+        }
+    }
+    // Vendor names from the Scala tree, e.g. PFBeauSansPro-Bold.otf / regular.ttf.
+    if let Some((weight, italic)) = parse_vendor_face(stem) {
+        return Some((weight, italic, otf));
+    }
+    None
+}
+
+fn parse_css_face(rest: &str) -> Option<(u16, bool)> {
     let (weight, style) = rest.rsplit_once('-')?;
     let weight = weight.parse().ok()?;
     if !(1..=1000).contains(&weight) {
@@ -733,7 +802,38 @@ fn parse_face_name(slug: &str, file_name: &str) -> Option<(u16, bool, bool)> {
         "normal" => false,
         _ => return None,
     };
-    Some((weight, italic, otf))
+    Some((weight, italic))
+}
+
+fn parse_vendor_face(stem: &str) -> Option<(u16, bool)> {
+    let lower = stem.to_ascii_lowercase().replace('_', "-");
+    let face = lower
+        .rsplit_once('-')
+        .map(|(_, face)| face)
+        .filter(|face| !face.is_empty())
+        .unwrap_or(lower.as_str());
+    // Truncated vendor stems such as SemiBoldItali.
+    let (style, italic) = if face.ends_with("italic") || face.ends_with("itali") {
+        let style = face
+            .trim_end_matches("italic")
+            .trim_end_matches("itali");
+        (if style.is_empty() { "regular" } else { style }, true)
+    } else {
+        (face, false)
+    };
+    let weight = match style {
+        "xthin" | "extrathin" | "hairline" => 100,
+        "thin" => 200,
+        "light" | "extralight" => 300,
+        "regular" | "roman" | "" => 400,
+        "book" | "bbook" | "medium" => 500,
+        "semibold" | "demibold" => 600,
+        "bold" => 700,
+        "extrabold" | "ultrabold" => 800,
+        "black" | "heavy" => 900,
+        _ => return None,
+    };
+    Some((weight, italic))
 }
 
 fn choose_face(faces: &[FaceFile], weight: u16, italic: bool) -> Option<&Path> {
@@ -908,6 +1008,51 @@ mod tests {
         let bold_width = bold.rasterize('A', 100.0).0.advance_width;
         assert!(bold_width > regular_width);
         assert_eq!(italic.rasterize('A', 100.0).0.advance_width, regular_width);
+    }
+
+    #[test]
+    fn vendor_otf_names_map_to_css_weights() {
+        let slug = "pf-beau-sans-pro";
+        assert_eq!(
+            parse_face_name(slug, "PFBeauSansPro-Regular.otf"),
+            Some((400, false, true))
+        );
+        assert_eq!(
+            parse_face_name(slug, "PFBeauSansPro-Bold.otf"),
+            Some((700, false, true))
+        );
+        assert_eq!(
+            parse_face_name(slug, "PFBeauSansPro-SemiBoldItali.otf"),
+            Some((600, true, true))
+        );
+        assert_eq!(parse_face_name(slug, "regular.ttf"), Some((400, false, false)));
+        assert_eq!(parse_face_name(slug, "bold.ttf"), Some((700, false, false)));
+        assert_eq!(
+            parse_face_name(slug, "pf-beau-sans-pro-400-normal.ttf"),
+            Some((400, false, false))
+        );
+    }
+
+    #[test]
+    fn otf_wins_over_ttf_at_the_same_weight() {
+        let faces = [
+            FaceFile {
+                weight: 400,
+                italic: false,
+                otf: false,
+                path: PathBuf::from("fonts/pf-beau-sans-pro/regular.ttf"),
+            },
+            FaceFile {
+                weight: 400,
+                italic: false,
+                otf: true,
+                path: PathBuf::from("fonts/pf-beau-sans-pro/PFBeauSansPro-Regular.otf"),
+            },
+        ];
+        assert_eq!(
+            choose_face(&faces, 400, false).unwrap(),
+            Path::new("fonts/pf-beau-sans-pro/PFBeauSansPro-Regular.otf")
+        );
     }
 
     #[test]

@@ -240,12 +240,13 @@ async function keyCall(url: string, init: RequestInit): Promise<KeyResult<unknow
 }
 
 function keyRow(raw: unknown): KeyRow {
-  const row = raw as { id: number; key: string; comment?: string | null; is_admin?: boolean };
+  const row = raw as { id: number; key: string; comment?: string | null; is_admin?: unknown };
+  const flag = row.is_admin;
   return {
     id: row.id,
     key: row.key,
     comment: typeof row.comment === "string" && row.comment !== "" ? row.comment : null,
-    isAdmin: row.is_admin === true,
+    isAdmin: flag === true || flag === 1 || flag === "1" || flag === "true",
   };
 }
 

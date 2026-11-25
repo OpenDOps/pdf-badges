@@ -2,8 +2,18 @@
 /target/
 /desk/target/
 
-# Local badge template (fonts and layout stay on the machine)
-/scripts/badges/tadviser.yaml
+# Local badge templates, fonts, credentials, and event data (stay on the machine)
+/scripts/badges/
+/modules/ticket-render/fonts/
+/fonts/
+/credentials.yml
+/GVCSMU1W5P/
+/printer_conf/
+/data/credentials.yml
+/data/printer_conf/
+/data/*/
+!/data/google-tables/
+/updates/
 
 # Local event copy used by the form server (visitor data, not a fixture)
 /testdata/
