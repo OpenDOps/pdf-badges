@@ -128,14 +128,23 @@ pub fn watch_devices(service: Option<String>) -> std::sync::mpsc::Receiver<Devic
 }
 
 fn emit_devices(service: Option<&str>, tx: &std::sync::mpsc::Sender<DeviceReport>) {
+    let base = service.unwrap_or("http://127.0.0.1:631");
+    log::debug!("printer search CUPS-Get-Devices {base}");
     let devices = match list_devices(service) {
         Ok(devices) => devices,
         Err(err) => {
+            log::debug!("printer search CUPS-Get-Devices failed: {err}");
             let _ = tx.send(DeviceReport::Failed(err.to_string()));
             return;
         }
     };
+    log::debug!("printer search CUPS-Get-Devices devices={}", devices.len());
     for device in devices {
+        log::debug!(
+            "printer search device uri={} model={}",
+            device.uri,
+            device.make_model
+        );
         if tx.send(DeviceReport::Device(device)).is_err() {
             return;
         }
@@ -144,18 +153,33 @@ fn emit_devices(service: Option<&str>, tx: &std::sync::mpsc::Sender<DeviceReport
 }
 
 fn emit_queues(service: Option<&str>, tx: &std::sync::mpsc::Sender<Report>) {
+    let base = service.unwrap_or("http://127.0.0.1:631");
+    log::debug!("printer search CUPS-Get-Printers {base}");
     let queues = match list_service(service) {
         Ok(queues) => queues,
         Err(err) => {
+            log::debug!("printer search CUPS-Get-Printers failed: {err}");
             let _ = tx.send(Report::Failed(err.to_string()));
             return;
         }
     };
+    log::debug!("printer search CUPS-Get-Printers queues={}", queues.len());
     for mut queue in queues {
         if let Err(err) = fill_reported(&mut queue, service) {
-            let _ = tx.send(Report::Failed(err.to_string()));
+            log::debug!(
+                "printer search CUPS queue {} attributes failed: {err}",
+                queue.name
+            );
+            let _ = tx.send(Report::Failed(format!("{}: {err}", queue.name)));
             return;
         }
+        log::debug!(
+            "printer search queue name={} state={} accepting={} uri={}",
+            queue.name,
+            queue.state,
+            queue.accepting,
+            queue.device_uri
+        );
         if tx.send(Report::Queue(queue)).is_err() {
             return;
         }

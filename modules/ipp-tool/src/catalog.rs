@@ -190,7 +190,9 @@ fn run_watch(
         }
     }
     let services = browse.browse();
-    for service in collapse(services) {
+    let services = collapse(services);
+    log::debug!("printer search ipp browse services={}", services.len());
+    for service in services {
         drain_details(&details_rx, &mut seen, &events_tx);
         if !emit_service(&service, &mut seen, &events_tx) {
             return;
@@ -236,7 +238,11 @@ fn emit_known(
             });
             events_tx.send(Report::Printer(found)).is_ok()
         }
-        Err(_) => {
+        Err(err) => {
+            log::debug!(
+                "printer search ipp attributes failed uri={}: {err}",
+                printer.uri
+            );
             seen.push(Seen { key, printer: None });
             true
         }
@@ -267,7 +273,11 @@ fn emit_service(
             });
             events_tx.send(Report::Printer(found)).is_ok()
         }
-        Err(_) => {
+        Err(err) => {
+            log::debug!(
+                "printer search ipp service failed {}:{}: {err}",
+                service.host, service.port
+            );
             seen.push(Seen { key, printer: None });
             true
         }
@@ -281,7 +291,10 @@ fn answer_uri(
 ) -> bool {
     let probe = match Printer::from_uri(uri) {
         Ok(printer) => printer,
-        Err(_) => return events_tx.send(Report::Missed(uri.to_string())).is_ok(),
+        Err(err) => {
+            log::debug!("printer search ipp uri failed {uri}: {err}");
+            return events_tx.send(Report::Missed(uri.to_string())).is_ok();
+        }
     };
     let key = seen_key(&probe.address, probe.port);
     if let Some(item) = seen.iter().find(|item| item.key == key) {
@@ -298,7 +311,8 @@ fn answer_uri(
             });
             events_tx.send(Report::Printer(found)).is_ok()
         }
-        Err(_) => {
+        Err(err) => {
+            log::debug!("printer search ipp uri failed {uri}: {err}");
             seen.push(Seen { key, printer: None });
             events_tx.send(Report::Missed(uri.to_string())).is_ok()
         }

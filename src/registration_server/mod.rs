@@ -390,9 +390,10 @@ struct StderrLog;
 
 impl log::Log for StderrLog {
     fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
-        metadata
+        (metadata
             .target()
             .starts_with("rust_reg::registration_server")
+            || metadata.target().starts_with("ipp_tool"))
             && metadata.level() <= log::Level::Debug
     }
 

@@ -9,5 +9,6 @@ description = "Cross-platform IPP client for discovery, attributes, and jobs"
 crate-type = ["rlib", "cdylib", "staticlib"]
 
 [dependencies]
+log = "0.4"
 mdns-sd = "0.21.6"
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }

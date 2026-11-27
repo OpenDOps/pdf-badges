@@ -10,6 +10,7 @@
 /GVCSMU1W5P/
 /printer_conf/
 /data/credentials.yml
+/data/operator-session.yml
 /data/printer_conf/
 /data/*/
 !/data/google-tables/

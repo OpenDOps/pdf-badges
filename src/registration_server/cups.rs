@@ -688,6 +688,12 @@ fn pass(inner: Arc<Inner>, generation: u64) {
     }
     let mut slot = inner.slot.lock().expect("printers");
     if slot.generation == generation && slot.running {
+        log::debug!(
+            "printer search generation={generation} stopped early native={} ipp={} devices={}",
+            slot.native_done,
+            slot.ipp_done,
+            slot.device_done
+        );
         slot.error = Some("listing stopped".to_string());
         slot.running = false;
         drop(slot);
@@ -730,10 +736,12 @@ fn on_native(inner: &Inner, generation: u64, report: NativeReport) -> Vec<Change
             changes
         }
         NativeReport::Finished => {
+            log::debug!("printer search native finished generation={generation}");
             slot.native_done = true;
             try_settle(&mut slot)
         }
         NativeReport::Failed(message) => {
+            log::debug!("printer search native failed generation={generation}: {message}");
             slot.error = Some(message);
             slot.native_done = true;
             slot.pending.clear();
@@ -749,8 +757,17 @@ fn on_ipp(inner: &Inner, generation: u64, report: IppReport) -> Vec<Change> {
         return Vec::new();
     }
     match report {
-        IppReport::Printer(found) => on_found(inner, &mut slot, &found),
+        IppReport::Printer(found) => {
+            log::debug!(
+                "printer search ipp found name={} state={} uri={}",
+                found.name,
+                found.settings.state,
+                found.uri
+            );
+            on_found(inner, &mut slot, &found)
+        }
         IppReport::Missed(uri) => {
+            log::debug!("printer search ipp missed uri={uri}");
             if let Some(host) = host_of(&uri) {
                 slot.pending.remove(&host);
             }
@@ -760,10 +777,12 @@ fn on_ipp(inner: &Inner, generation: u64, report: IppReport) -> Vec<Change> {
             try_settle(&mut slot)
         }
         IppReport::Finished => {
+            log::debug!("printer search ipp finished generation={generation}");
             slot.ipp_done = true;
             try_settle(&mut slot)
         }
         IppReport::Failed(message) => {
+            log::debug!("printer search ipp failed generation={generation}: {message}");
             slot.error = Some(message);
             slot.ipp_done = true;
             slot.pending.clear();
@@ -1279,13 +1298,17 @@ fn on_device(inner: &Inner, generation: u64, report: DeviceReport) -> Vec<Change
             changes
         }
         DeviceReport::Finished => {
+            log::debug!(
+                "printer search devices finished generation={generation} seen={}",
+                slot.seen_devices.len()
+            );
             let mut changes = disconnect_missing(&mut slot);
             slot.device_done = true;
             changes.extend(try_settle(&mut slot));
             changes
         }
         DeviceReport::Failed(message) => {
-            log::debug!("printer search devices failed: {message}");
+            log::debug!("printer search devices failed generation={generation}: {message}");
             slot.device_done = true;
             slot.pending_install.clear();
             try_settle(&mut slot)

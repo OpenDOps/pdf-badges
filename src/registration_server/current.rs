@@ -624,6 +624,14 @@ impl CurrentEvent {
             .map(|_| print::prepare_event(&base.join(event_id)));
         match opened {
             Ok(db) => {
+                if let Err(err) = db.import_remote_prints() {
+                    state.phase = if state.db.is_some() {
+                        Phase::Ready
+                    } else {
+                        Phase::Closed
+                    };
+                    return Err(err.into());
+                }
                 let previous = state.event_id.clone();
                 state.db = Some(Arc::new(Mutex::new(db)));
                 state.event_id = Some(event_id.to_string());

@@ -342,8 +342,11 @@ pub struct OutgoingAttachment {
 
 /// One visitor written to the file and then to the memory list.
 ///
-/// `last_print_ts` and `print_count` are not fields. An update keeps the
-/// values already in memory. A new uid starts them at `0`.
+/// `last_print_ts` and `print_count` are not fields. The list reads them from
+/// `prints`. Timestamps in `subscribtion.jvrel_prop.prints` are inserted there,
+/// as Scala `saveRegistered` does when the save does not print. A timestamp
+/// already stored for that uid is left as it is. A uid with no such timestamps
+/// keeps the counts already in memory, and a new uid starts them at `0`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VisitorWrite {
     pub uid: String,
@@ -607,12 +610,20 @@ impl EventDb {
     /// filled from the stored JSON when the write does not already name them.
     pub fn write(&mut self, visitor: &VisitorWrite) -> Result<(), EventDbError> {
         let indexed = index_visitor(visitor);
+        let times = remote_print_times(&indexed.visitor.data);
         let path = self.file_path();
         let tx = self
             .file
             .unchecked_transaction()
             .map_err(|err| sqlite_at(&path, err))?;
         upsert_visitor_file(&tx, &indexed).map_err(|err| sqlite_at(&path, err))?;
+        let added = insert_missing_prints(
+            &tx,
+            &indexed.visitor.uid,
+            indexed.visitor.category,
+            &times,
+        )
+        .map_err(|err| sqlite_at(&path, err))?;
         tx.commit().map_err(|err| sqlite_at(&path, err))?;
 
         let memory_path = Path::new(self.memory_uri());
@@ -621,8 +632,68 @@ impl EventDb {
             .unchecked_transaction()
             .map_err(|err| sqlite_at(memory_path, err))?;
         upsert_visitor_memory(&tx, &indexed.visitor).map_err(|err| sqlite_at(memory_path, err))?;
+        if !times.is_empty() {
+            let (count, last) = print_stats(&self.file, &indexed.visitor.uid)
+                .map_err(|err| sqlite_at(&path, err))?;
+            tx.execute(
+                "UPDATE list_row SET print_count = ?1, last_print_ts = ?2 WHERE uid = ?3",
+                rusqlite::params![count, last, indexed.visitor.uid],
+            )
+            .map_err(|err| sqlite_at(memory_path, err))?;
+        }
         tx.commit().map_err(|err| sqlite_at(memory_path, err))?;
+        if added > 0 {
+            log::debug!(
+                "visitor {}: stored {added} remote prints",
+                indexed.visitor.uid
+            );
+        }
         Ok(())
+    }
+
+    /// Insert `subscribtion.jvrel_prop.prints` timestamps that are not already
+    /// in `prints`. Downloaded visitors are already in `mem_u`; this fills the
+    /// counts the list reads. A later open inserts only timestamps still missing.
+    pub fn import_remote_prints(&self) -> Result<usize, EventDbError> {
+        let path = self.file_path();
+        let tx = self
+            .file
+            .unchecked_transaction()
+            .map_err(|err| sqlite_at(&path, err))?;
+        let mut stmt = tx
+            .prepare("SELECT uid, data, IFNULL(category, 0) FROM mem_u")
+            .map_err(|err| sqlite_at(&path, err))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })
+            .map_err(|err| sqlite_at(&path, err))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|err| sqlite_at(&path, err))?;
+        drop(stmt);
+        let mut added = 0usize;
+        let mut visitors = 0usize;
+        for (uid, data, category) in rows {
+            let times = remote_print_times(&data);
+            if times.is_empty() {
+                continue;
+            }
+            let n = insert_missing_prints(&tx, &uid, category, &times)
+                .map_err(|err| sqlite_at(&path, err))?;
+            if n > 0 {
+                added += n;
+                visitors += 1;
+            }
+        }
+        tx.commit().map_err(|err| sqlite_at(&path, err))?;
+        if added > 0 {
+            log::debug!("remote prints stored {added} rows for {visitors} visitors");
+        }
+        Ok(added)
     }
 
     /// Append one `prints` row, then update the memory print columns.
@@ -1875,6 +1946,66 @@ fn json_i64(value: &serde_json::Value) -> Option<i64> {
     value
         .as_i64()
         .or_else(|| value.as_str().and_then(|text| text.parse().ok()))
+}
+
+/// Scala `saveRegistered` reads `subscribtion.jvrel_prop.prints` as one timestamp
+/// or a list of them, and ignores a non-positive value.
+fn remote_print_times(data: &str) -> Vec<i64> {
+    let Ok(document) = serde_json::from_str::<serde_json::Value>(data) else {
+        return Vec::new();
+    };
+    let Some(value) = document.pointer("/subscribtion/jvrel_prop/prints") else {
+        return Vec::new();
+    };
+    let mut times = Vec::new();
+    match value {
+        serde_json::Value::Array(items) => {
+            for item in items {
+                if let Some(ts) = json_i64(item) {
+                    if ts > 0 {
+                        times.push(ts);
+                    }
+                }
+            }
+        }
+        other => {
+            if let Some(ts) = json_i64(other) {
+                if ts > 0 {
+                    times.push(ts);
+                }
+            }
+        }
+    }
+    times
+}
+
+fn insert_missing_prints(
+    conn: &Connection,
+    uid: &str,
+    category: i64,
+    times: &[i64],
+) -> Result<usize, rusqlite::Error> {
+    let mut added = 0usize;
+    for ts in times {
+        let n = conn.execute(
+            "INSERT INTO prints (uid, ts, category, is_cert)
+             SELECT ?1, ?2, ?3, 0
+             WHERE NOT EXISTS (
+               SELECT 1 FROM prints WHERE uid = ?1 AND ts = ?2
+             )",
+            rusqlite::params![uid, ts, category],
+        )?;
+        added += n;
+    }
+    Ok(added)
+}
+
+fn print_stats(conn: &Connection, uid: &str) -> Result<(i64, i64), rusqlite::Error> {
+    conn.query_row(
+        "SELECT COUNT(*), IFNULL(MAX(ts), 0) FROM prints WHERE uid = ?1",
+        [uid],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
 }
 
 fn json_text(value: &serde_json::Value) -> Option<String> {
@@ -4344,6 +4475,93 @@ mod tests {
                 1
             );
             assert_eq!(db.loaded_count().unwrap(), 5177);
+        }
+
+        #[test]
+        fn remote_prints_fill_the_list() {
+            let (_scratch, mut db) = ready();
+            let mut written = visitor("9003", "zzprints", 51);
+            written.category = 4;
+            written.data = r#"{"uniqueId":"9003","subscribtion":{"jvrel_prop":{"prints":[1795675758307,1795675758307,1795692080518,0]}}}"#.to_string();
+            db.write(&written).unwrap();
+            let page = db
+                .search("zzprints", &[], ListOrder::LastAdd, None, None)
+                .unwrap();
+            assert_eq!(page.total, 1);
+            assert_eq!(page.rows[0].print_count, 2);
+            assert_eq!(page.rows[0].last_print_ts, 1795692080518);
+            let stored: Vec<(i64, i64, i64)> = {
+                let mut stmt = db
+                    .file()
+                    .prepare(
+                        "SELECT ts, category, is_cert FROM prints WHERE uid = '9003' ORDER BY ts",
+                    )
+                    .unwrap();
+                stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+                    .unwrap()
+                    .map(|row| row.unwrap())
+                    .collect()
+            };
+            assert_eq!(
+                stored,
+                vec![(1795675758307, 4, 0), (1795692080518, 4, 0)]
+            );
+            db.write(&written).unwrap();
+            assert_eq!(
+                file_count(&db, "SELECT COUNT(*) FROM prints WHERE uid = '9003'"),
+                2
+            );
+
+            let mut one = visitor("9004", "zzoneprint", 52);
+            one.category = 8;
+            one.data =
+                r#"{"subscribtion":{"jvrel_prop":{"prints":1795600000000}}}"#.to_string();
+            db.write(&one).unwrap();
+            let page = db
+                .search("zzoneprint", &[], ListOrder::LastAdd, None, None)
+                .unwrap();
+            assert_eq!(page.rows[0].print_count, 1);
+            assert_eq!(page.rows[0].last_print_ts, 1795600000000);
+
+            db.record_print("9004", 1795600000001).unwrap();
+            one.data = r#"{"subscribtion":{"jvrel_prop":{"prints":[1795600000000,1795600000002]}}}"#
+                .to_string();
+            db.write(&one).unwrap();
+            let page = db
+                .search("zzoneprint", &[], ListOrder::LastAdd, None, None)
+                .unwrap();
+            assert_eq!(page.rows[0].print_count, 3);
+            assert_eq!(page.rows[0].last_print_ts, 1795600000002);
+            assert_eq!(
+                file_count(&db, "SELECT COUNT(*) FROM prints WHERE uid = '9004'"),
+                3
+            );
+        }
+
+        #[test]
+        fn stored_rows_import_remote_prints_once() {
+            let (_scratch, db) = open_fixture();
+            db.file()
+                .execute(
+                    "INSERT INTO mem_u (uid, data, category, ts) VALUES (?1, ?2, 3, 10)",
+                    rusqlite::params![
+                        "9005",
+                        r#"{"subscribtion":{"jvrel_prop":{"prints":[11,11,22]}}}"#,
+                    ],
+                )
+                .unwrap();
+            assert_eq!(db.import_remote_prints().unwrap(), 2);
+            assert_eq!(db.import_remote_prints().unwrap(), 0);
+            let (count, last): (i64, i64) = db
+                .file()
+                .query_row(
+                    "SELECT COUNT(*), MAX(ts) FROM prints WHERE uid = '9005'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(count, 2);
+            assert_eq!(last, 22);
         }
 
         #[test]

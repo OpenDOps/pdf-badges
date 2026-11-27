@@ -2040,6 +2040,13 @@ async fn printers_refresh(State(app): State<App>, headers: HeaderMap) -> Respons
     } else {
         false
     };
+    let progress = search_progress_of(&app);
+    log::debug!(
+        "printer refresh started={started} generation={} running={} error={}",
+        progress.generation,
+        progress.running,
+        progress.error.as_deref().unwrap_or("-")
+    );
     printers_search_response(&app, started)
 }
 

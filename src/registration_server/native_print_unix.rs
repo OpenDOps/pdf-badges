@@ -233,8 +233,10 @@ fn skip_counted(body: &[u8], index: usize) -> Result<usize, Error> {
 /// `CUPS-Get-Devices` against a cupsd base. One device-attribute group becomes one record.
 fn list_devices(service: Option<&str>) -> Result<Vec<Device>, Error> {
     let base = service.unwrap_or("http://127.0.0.1:631");
-    let response = post_ipp(base, &encode_operation(CUPS_GET_DEVICES, &[]))?;
-    let message = ipp_tool::decode(&response).map_err(|err| Error::new(err.to_string()))?;
+    let response = post_ipp(base, &encode_operation(CUPS_GET_DEVICES, &[]))
+        .map_err(|err| Error::new(format!("CUPS-Get-Devices {base}: {err}")))?;
+    let message = ipp_tool::decode(&response)
+        .map_err(|err| Error::new(format!("CUPS-Get-Devices {base}: {err}")))?;
     if message.code >= 0x0400 {
         return Err(Error::new(format!(
             "CUPS-Get-Devices status {:#06x}",
@@ -276,8 +278,10 @@ pub(crate) fn cups_submit(base: &str, body: &[u8]) -> Result<Vec<u8>, Error> {
 /// One printer-attribute group becomes one record. This does not send
 /// `CUPS-Add-Modify-Printer` or `Print-Job`.
 pub fn cups_queues(base: &str) -> Result<Vec<Queue>, Error> {
-    let response = post_ipp(base, &encode_operation(CUPS_GET_PRINTERS, &[]))?;
-    let message = ipp_tool::decode(&response).map_err(|err| Error::new(err.to_string()))?;
+    let response = post_ipp(base, &encode_operation(CUPS_GET_PRINTERS, &[]))
+        .map_err(|err| Error::new(format!("CUPS-Get-Printers {base}: {err}")))?;
+    let message = ipp_tool::decode(&response)
+        .map_err(|err| Error::new(format!("CUPS-Get-Printers {base}: {err}")))?;
     if message.code >= 0x0400 {
         return Err(Error::new(format!(
             "CUPS-Get-Printers status {:#06x}",

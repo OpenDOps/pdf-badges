@@ -46,6 +46,9 @@ pub enum Value {
     Mime(String),
     OctetString(Vec<u8>),
     Resolution { x: i32, y: i32, units: u8 },
+    /// Inclusive bounds. IPP tag `0x33` (`rangeOfInteger`). CUPS sends this
+    /// inside `media-col`; rejecting it drops the whole printer list.
+    Range { lower: i32, upper: i32 },
     Collection(Vec<(String, Value)>),
     NoValue,
 }
@@ -65,6 +68,7 @@ impl Value {
             Self::Mime(_) => 0x49,
             Self::OctetString(_) => 0x30,
             Self::Resolution { .. } => 0x32,
+            Self::Range { .. } => 0x33,
             Self::Collection(_) => 0x34,
             Self::NoValue => 0x13,
         }
@@ -78,6 +82,7 @@ impl Value {
             Self::Integer(value) | Self::Enum(value) => Some(value.to_string()),
             Self::Boolean(value) => Some(if *value { "true" } else { "false" }.to_string()),
             Self::Resolution { x, y, units } => Some(resolution_label(*x, *y, *units)),
+            Self::Range { lower, upper } => Some(format!("{lower}-{upper}")),
             Self::Collection(members) => collection_label(members),
             Self::OctetString(_) | Self::NoValue => None,
             Self::Keyword(_)
@@ -123,6 +128,11 @@ impl Value {
                 out.extend_from_slice(&x.to_be_bytes());
                 out.extend_from_slice(&y.to_be_bytes());
                 out.push(*units);
+            }
+            Self::Range { lower, upper } => {
+                write_u16(out, 8);
+                out.extend_from_slice(&lower.to_be_bytes());
+                out.extend_from_slice(&upper.to_be_bytes());
             }
             Self::Collection(_) => write_u16(out, 0),
             Self::Keyword(value)
@@ -323,6 +333,7 @@ fn known_tag(tag: u8) -> bool {
             | 0x23
             | 0x30
             | 0x32
+            | 0x33
             | 0x41
             | 0x42
             | 0x44
@@ -362,6 +373,15 @@ fn parse_value(tag: u8, raw: &[u8]) -> Result<Value, Error> {
                 x: i32::from_be_bytes([raw[0], raw[1], raw[2], raw[3]]),
                 y: i32::from_be_bytes([raw[4], raw[5], raw[6], raw[7]]),
                 units: raw[8],
+            }
+        }
+        0x33 => {
+            if raw.len() != 8 {
+                return Err(Error::new(format!("IPP range length is {}", raw.len())));
+            }
+            Value::Range {
+                lower: i32::from_be_bytes([raw[0], raw[1], raw[2], raw[3]]),
+                upper: i32::from_be_bytes([raw[4], raw[5], raw[6], raw[7]]),
             }
         }
         0x41 => Value::Text(text(raw)?),
@@ -610,5 +630,51 @@ mod tests {
             .groups
             .iter()
             .any(|group| group.tag == PRINTER_ATTRIBUTES));
+    }
+
+    #[test]
+    fn a_range_of_integer_roundtrips() {
+        let body = encode_request(
+            Operation::GetPrinterAttributes,
+            1,
+            &[("copies-supported", vec![Value::Range { lower: 1, upper: 999 }])],
+            &[],
+        );
+        let message = decode(&body).unwrap();
+        assert_eq!(message.texts("copies-supported"), vec!["1-999".to_string()]);
+    }
+
+    /// CUPS puts `rangeOfInteger` (`0x33`) inside `media-col`. Rejecting that
+    /// member used to fail the whole `CUPS-Get-Printers` reply.
+    #[test]
+    fn a_collection_member_range_keeps_the_printer_name() {
+        let mut body = vec![0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, PRINTER_ATTRIBUTES];
+        body.push(0x34);
+        write_u16(&mut body, "media-col-default".len() as u16);
+        body.extend_from_slice(b"media-col-default");
+        write_u16(&mut body, 0);
+        body.push(0x4A);
+        write_u16(&mut body, 0);
+        write_u16(&mut body, "x-dimension".len() as u16);
+        body.extend_from_slice(b"x-dimension");
+        body.push(0x33);
+        write_u16(&mut body, 0);
+        write_u16(&mut body, 8);
+        body.extend_from_slice(&100i32.to_be_bytes());
+        body.extend_from_slice(&1000i32.to_be_bytes());
+        body.push(0x37);
+        write_u16(&mut body, 0);
+        write_u16(&mut body, 0);
+        body.push(0x42);
+        write_u16(&mut body, "printer-name".len() as u16);
+        body.extend_from_slice(b"printer-name");
+        write_u16(&mut body, "Kyocera".len() as u16);
+        body.extend_from_slice(b"Kyocera");
+        body.push(END_OF_ATTRIBUTES);
+
+        let message = decode(&body).unwrap();
+        assert_eq!(message.first_str("printer-name").as_deref(), Some("Kyocera"));
+        let label = message.texts("media-col-default");
+        assert_eq!(label, vec!["100-1000".to_string()]);
     }
 }
